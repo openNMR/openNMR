@@ -185,14 +185,13 @@ def test_bruker_two_groups_on_one_line_are_simultaneous():
     assert p1.t0 == p3.t0
 
 
-def test_bruker_housekeeping_delays_are_minor_and_merged():
+def test_bruker_housekeeping_delays_are_minor_and_each_its_own_event():
+    """2026-10-22: every housekeeping delay stays its own event (so the viewer
+    can offer a tick box for each) instead of neighbours being fused."""
     seq, = parse_pulse_sequence(BRUKER, "bruker")
     short = [e for e in seq.events if e.kind == "delay" and e.minor]
-    assert short, "30u / 1m housekeeping delays should be flagged minor"
-    # no two minor delays are left touching one another
-    delays = [e for e in seq.events if e.kind == "delay"]
-    for a, b in zip(delays, delays[1:]):
-        assert not (a.minor and b.minor and abs(a.t1 - b.t0) < 1e-12)
+    assert [e.expr for e in short] == ["1m", "1m", "30u", "1m"]
+    assert all(e.value is not None and e.value <= 1e-3 + 1e-12 for e in short)
 
 
 def test_bruker_ifdef_blocks_follow_zgoptns_and_flags():
@@ -338,7 +337,7 @@ def test_overlapping_delays_get_separate_lanes():
         "from firebird import *\ndef run(comms):\n    with parallel:\n"
         "        with sequential:\n            Delay(100.0)\n"
         "        with sequential:\n            Delay(200.0)\n", "xpulse")[0]
-    lay2 = compute_layout(seq2)
+    lay2 = compute_layout(seq2, show_minor=True)     # 100 us / 200 us are housekeeping
     assert lay2.n_lanes == 2 and set(lay2.lane.values()) == {0, 1}
 
 
@@ -587,3 +586,404 @@ def test_save_figure(window, tmp_path, ext):
     out = tmp_path / f"seq.{ext}"
     window._pulse_sequence_dialog.save_figure(str(out), dpi=80)
     assert out.exists() and out.stat().st_size > 500
+
+
+# ======================================================================
+# 2026-10-22: recycle delay, calculated delays, housekeeping tick boxes,
+# delays drawn among the pulses, scroll / drag zoom
+# ======================================================================
+
+ZG_LIKE = """\
+;zg-like, with the power set on the recycle-delay line
+#include <Avance.incl>
+"d11=30m"
+"d12=d20-p1"
+define delay tau1
+1 ze
+2 30m
+  d1 pl1:f1
+  p1*0.33 ph1
+  d12
+  (p2 ph2):f1 (p3 ph3):f2
+  d20-p1
+  (d12-p1)/2
+  tau1
+  p1 ph1
+  1m cpds2:f2
+  go=2 ph31
+  30m mc #0 to 2 F0(zd)
+exit
+"""
+ZG_CONSTS = {"d1": 2.0, "d20": 1e-3, "p1": 10.0, "p2": 20.0, "p3": 8.0, "d12": 5.0,
+             "tau1": 1e-4, "aq": 0.05}
+
+
+def _zg():
+    seq, = parse_pulse_sequence(ZG_LIKE, "bruker", constants=ZG_CONSTS)
+    return seq
+
+
+def _ev(seq, label=None, expr=None):
+    return next(e for e in seq.events if (label is None or e.label == label)
+                and (expr is None or e.expr == expr))
+
+
+def test_recycle_delay_is_kept_when_the_power_is_set_on_its_line():
+    """The reported bug: 'd1 pl1:f1' marked d1 as housekeeping, and it was then
+    merged away with the 30m beside it -- the recycle delay vanished."""
+    seq = _zg()
+    d1 = _ev(seq, "d1")
+    assert d1.kind == "delay" and not d1.minor and d1.value == 2.0
+
+
+def test_calculated_delays_are_parsed_valued_and_never_housekeeping():
+    seq = _zg()
+    # "d12=d20-p1" is calculated by the programme itself, replacing the
+    # parameter table's own d12 (5 s here) -- d20 is 1 ms and p1 is 10 us
+    assert _ev(seq, "d12").value == pytest.approx(0.99e-3)
+    calc = _ev(seq, "d20-p1")
+    assert calc.kind == "delay" and calc.value == pytest.approx(0.99e-3) and not calc.minor
+    half = _ev(seq, "(d12-p1)/2")
+    assert half.value == pytest.approx(0.49e-3) and not half.minor
+    assert _ev(seq, "tau1").value == pytest.approx(1e-4)        # a 'define delay' name
+
+
+def test_calculated_value_unknown_name_is_still_drawn_with_a_nominal_length():
+    seq, = parse_pulse_sequence("1 ze\n2 d1\n  dmystery-p1\n  go=2 ph31\n", "bruker",
+                                constants={"p1": 10.0})
+    e = _ev(seq, expr="dmystery-p1")
+    assert e.kind == "delay" and e.value is None and e.duration > 0
+
+
+def test_old_style_bare_pulses():
+    seq = _zg()
+    p = _ev(seq, "p1*0.33")
+    assert p.kind == "hard" and p.channel == "f1" and p.value == pytest.approx(3.3e-6)
+    assert p.phase == "ph1"
+    f2 = _ev(seq, "p3")
+    assert f2.channel == "f2" and f2.t0 == _ev(seq, "p2").t0     # simultaneous
+
+
+def test_a_bracketed_calculated_delay_is_not_mistaken_for_a_pulse_group():
+    seq = _zg()
+    assert not [e for e in seq.events if e.label == "(d12-p1)/2" and e.kind != "delay"]
+
+
+def test_literal_settling_delays_are_housekeeping_and_each_is_separate():
+    seq = _zg()
+    minor = [e for e in seq.events if e.minor]
+    assert [e.expr for e in minor] == ["30m", "1m", "30m"]
+    assert len({e.uid for e in minor}) == 3
+
+
+def test_shown_minor_uids_semantics():
+    from opennmr.io.pulse_sequence import shown_minor_uids
+    seq = _zg()
+    ids = [e.uid for e in seq.events if e.minor]
+    assert shown_minor_uids(seq, False) == set() and shown_minor_uids(seq, None) == set()
+    assert shown_minor_uids(seq, True) == set(ids)
+    assert shown_minor_uids(seq, [ids[1]]) == {ids[1]}
+    assert shown_minor_uids(seq, [ids[1], 9999]) == {ids[1]}      # not a housekeeping delay
+
+
+def test_layout_widens_with_each_ticked_housekeeping_delay():
+    seq, = parse_pulse_sequence(
+        "1 ze\n2 30m\n  d1\n  (p1 ph1):f1\n  20m\n  (p2 ph2):f1\n  4u\n  go=2 ph31\nexit\n",
+        "bruker", constants={"d1": 1.0, "p1": 10.0, "p2": 20.0})
+    ids = [e.uid for e in seq.events if e.minor]
+    assert len(ids) == 3
+    w = [compute_layout(seq, show_minor=s).width for s in (False, ids[:1], ids[:2], True)]
+    assert w[0] < w[1] < w[2] < w[3]
+
+
+def test_a_housekeeping_delay_under_a_decoupling_block_adds_no_width():
+    """The 1m under cpds/the acquisition: that stretch is already as wide as
+    those events make it, so ticking the delay changes only its bracket."""
+    seq = _zg()
+    ids = [e.uid for e in seq.events if e.minor]
+    mid = next(e.uid for e in seq.events if e.minor and e.expr == "1m")
+    assert compute_layout(seq, show_minor=[mid]).width == pytest.approx(
+        compute_layout(seq, show_minor=False).width)
+    assert ids
+
+
+def test_hidden_housekeeping_delays_take_no_lane():
+    seq = _zg()
+    lay = compute_layout(seq, show_minor=False)
+    assert all(not e.minor for e in seq.events if e.uid in lay.lane)
+    assert lay.n_lanes == 1
+
+
+def _bracket_ys(ax):
+    """y of every horizontal delay bracket (two-point black lines)."""
+    return sorted({round(float(l.get_ydata()[0]), 6) for l in ax.lines
+                   if len(l.get_xdata()) == 2 and l.get_ydata()[0] == l.get_ydata()[1]
+                   and l.get_color() == "#333333"})
+
+
+def _baseline_ys(ax):
+    return sorted({round(float(l.get_ydata()[0]), 6) for l in ax.lines
+                   if len(l.get_xdata()) == 2 and l.get_color() == "#9a9a9a"}, reverse=True)
+
+
+def test_delays_are_drawn_among_the_pulses_by_default():
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    fig, ax = ps.plot_pulse_sequence(seq)
+    f1, f2, acq = _baseline_ys(ax)
+    brackets = _bracket_ys(ax)
+    assert brackets and all(f2 < y < f1 for y in brackets)        # between the channels
+    plt.close(fig)
+    fig, ax = ps.plot_pulse_sequence(seq, delays_inline=False)
+    brackets = _bracket_ys(ax)
+    assert all(y < _baseline_ys(ax)[-1] for y in brackets)         # below every channel
+    plt.close(fig)
+
+
+def test_drawing_shows_exactly_the_ticked_housekeeping_delays():
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    ids = [e.uid for e in seq.events if e.minor]
+    counts = []
+    for shown in (False, [ids[1]], True):
+        fig, ax = ps.plot_pulse_sequence(seq, show_minor_delays=shown)
+        counts.append(len(_bracket_ys(ax)) and sum(
+            1 for l in ax.lines if len(l.get_xdata()) == 2 and l.get_ydata()[0] == l.get_ydata()[1]
+            and l.get_color() == "#333333"))
+        plt.close(fig)
+    assert counts[1] == counts[0] + 1 and counts[2] == counts[0] + 3
+
+
+def test_a_ticked_unnamed_housekeeping_delay_shows_its_text():
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    one = next(e.uid for e in seq.events if e.expr == "1m")
+    fig, ax = ps.plot_pulse_sequence(seq, show_minor_delays=[one], show_names=set())
+    assert "1m" in _label_texts(ax)
+    plt.close(fig)
+
+
+def test_pulse_label_of_a_calculated_value():
+    assert ps.pulse_label("d20-p1") == r"$\mathit{d}_{20}$−$\mathit{p}_{1}$"
+    assert ps.pulse_label("p1*0.33") == r"$\mathit{p}_{1}$·0.33"
+    assert ps.pulse_label("(d3-p2)/2") == r"($\mathit{d}_{3}$−$\mathit{p}_{2}$)/2"
+
+
+def test_housekeeping_delays_listed_for_the_notebook():
+    seq = _zg()
+    assert [e.expr for e in ps.housekeeping_delays(seq)] == ["30m", "1m", "30m"]
+    assert all(r["housekeeping"] for r in ps.event_table(seq) if r["expression"] in ("30m", "1m"))
+
+
+def test_name_levels_keep_neighbouring_delay_names_apart():
+    """Four short neighbouring delays with their durations shown: no two
+    names overlap (they are staggered onto separate levels)."""
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    fig, ax = ps.plot_pulse_sequence(seq, show_values=True, show_minor_delays=True)
+    fig.canvas.draw()
+    rend = fig.canvas.get_renderer()
+    delay_texts = [t for t in ax.texts if t.get_va() == "top" and t.get_text()
+                   and t.get_text() != "Delays"]
+    boxes = [t.get_window_extent(rend) for t in delay_texts]
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1:]:
+            assert not a.overlaps(b), (delay_texts[i].get_text(), "overlaps")
+    plt.close(fig)
+
+
+# ------------------------------------------------------------- scroll / zoom
+
+def _scroll(fig, ax, x, y, button, key=None):
+    from matplotlib.backend_bases import MouseEvent
+    px, py = ax.transData.transform((x, y))
+    ev = MouseEvent("scroll_event", fig.canvas, px, py, button=button, key=key)
+    fig.canvas.callbacks.process("scroll_event", ev)
+
+
+def _mouse(fig, name, ax, x, y, button=1, dbl=False):
+    from matplotlib.backend_bases import MouseEvent
+    px, py = ax.transData.transform((x, y))
+    ev = MouseEvent(name, fig.canvas, px, py, button=button, dblclick=dbl)
+    fig.canvas.callbacks.process(name, ev)
+
+
+def test_scroll_zooms_time_axis_under_the_cursor():
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg())
+    off = ps.enable_zoom_pan(fig)
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    centre = x0 + 0.3 * (x1 - x0)
+    _scroll(fig, ax, centre, 0.0, "up")
+    n0, n1 = ax.get_xlim()
+    assert (n1 - n0) < (x1 - x0)
+    assert n0 < centre < n1
+    assert (centre - n0) / (n1 - n0) == pytest.approx(0.3, abs=1e-6)  # the point stays put
+    assert ax.get_ylim() == pytest.approx((y0, y1))                    # vertical untouched
+    _scroll(fig, ax, centre, 0.0, "down")
+    assert (ax.get_xlim()[1] - ax.get_xlim()[0]) == pytest.approx(x1 - x0)
+    off()
+    plt.close(fig)
+
+
+def test_ctrl_scroll_zooms_vertically_and_shift_scroll_pans():
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg())
+    ps.enable_zoom_pan(fig)
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    _scroll(fig, ax, 0.5 * (x0 + x1), 0.5 * (y0 + y1), "up", key="control")
+    assert ax.get_xlim() == pytest.approx((x0, x1))
+    assert (ax.get_ylim()[1] - ax.get_ylim()[0]) < (y1 - y0)
+    fig.axes[0].set_ylim(y0, y1)
+    _scroll(fig, ax, 0.5 * (x0 + x1), 0.5 * (y0 + y1), "up", key="shift")
+    assert ax.get_xlim()[0] != pytest.approx(x0)
+    assert (ax.get_xlim()[1] - ax.get_xlim()[0]) == pytest.approx(x1 - x0)
+    plt.close(fig)
+
+
+def test_zooming_out_is_limited_and_double_click_restores_the_full_view():
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg())
+    ps.enable_zoom_pan(fig)
+    home = ax.get_xlim(), ax.get_ylim()
+    for _ in range(40):
+        _scroll(fig, ax, 0.5 * sum(ax.get_xlim()), 0.0, "down")
+    assert (ax.get_xlim()[1] - ax.get_xlim()[0]) <= 1.6 * (home[0][1] - home[0][0]) + 1e-9
+    for _ in range(5):
+        _scroll(fig, ax, 0.5 * sum(ax.get_xlim()), 0.0, "up")
+    _mouse(fig, "button_press_event", ax, 0.5 * sum(ax.get_xlim()), 0.0, dbl=True)
+    assert ax.get_xlim() == pytest.approx(home[0]) and ax.get_ylim() == pytest.approx(home[1])
+    plt.close(fig)
+
+
+def test_dragging_pans_and_the_busy_hook_hands_the_mouse_to_another_tool():
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg())
+    busy = {"on": False}
+    ps.enable_zoom_pan(fig, busy=lambda: busy["on"])
+    _scroll(fig, ax, 0.5 * sum(ax.get_xlim()), 0.0, "up")             # zoom so there is room to pan
+    before = ax.get_xlim()
+    x = 0.5 * sum(before)
+    _mouse(fig, "button_press_event", ax, x, 0.0)
+    _mouse(fig, "motion_notify_event", ax, x - 1.0, 0.0)
+    _mouse(fig, "button_release_event", ax, x - 1.0, 0.0)
+    after = ax.get_xlim()
+    assert after[0] > before[0] and (after[1] - after[0]) == pytest.approx(before[1] - before[0])
+    busy["on"] = True
+    _scroll(fig, ax, x, 0.0, "up")
+    assert ax.get_xlim() == pytest.approx(after)                        # ignored while busy
+    plt.close(fig)
+
+
+def test_zoom_can_be_switched_off():
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg())
+    off = ps.enable_zoom_pan(fig)
+    off()
+    before = ax.get_xlim()
+    _scroll(fig, ax, 0.5 * sum(before), 0.0, "up")
+    assert ax.get_xlim() == pytest.approx(before)
+    plt.close(fig)
+
+
+# ----------------------------------------------------------------------- GUI
+
+def test_housekeeping_tick_boxes_one_per_delay_and_drive_the_drawing(window, tmp_path):
+    from PySide6.QtCore import Qt
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    assert d.minor_list.count() == 3
+    assert d.minor_list.item(0).text().startswith("30m")
+    assert d._shown_minor_uids() == set() and d.minor_check.checkState() == Qt.CheckState.Unchecked
+    d.minor_list.item(1).setCheckState(Qt.CheckState.Checked)
+    assert len(d._shown_minor_uids()) == 1
+    assert d.minor_check.checkState() == Qt.CheckState.PartiallyChecked
+    assert d.draw_options()["show_minor_delays"] == d._shown_minor_uids()
+    d.minor_check.setChecked(True)
+    assert len(d._shown_minor_uids()) == 3
+    assert all(d.minor_list.item(i).checkState() == Qt.CheckState.Checked for i in range(3))
+    d.minor_check.setChecked(False)
+    assert d._shown_minor_uids() == set()
+
+
+def test_master_choice_is_remembered_and_applied_to_the_next_sequence(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    d.minor_check.setChecked(True)
+    assert window._ui_settings["pulse_sequence_options"]["show_minor"] is True
+    d.load()
+    assert len(d._shown_minor_uids()) == 3
+
+
+def test_sequence_without_housekeeping_disables_the_box(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(
+        tmp_path, "1 ze\n2 d1\n  (p1 ph1):f1\n  go=2 ph31\nexit\n"))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    assert d.minor_list.count() == 0 and not d.minor_check.isEnabled()
+
+
+def test_the_recycle_delay_appears_in_the_window(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    assert ps.pulse_label("d1") in _label_texts(d.figure.axes[0])
+
+
+def test_inline_option_persists_and_redraws(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    assert d.inline_check.isChecked() and d.draw_options()["delays_inline"] is True
+    inline_ylim = d.figure.axes[0].get_ylim()
+    d.inline_check.setChecked(False)
+    assert window._ui_settings["pulse_sequence_options"]["delays_inline"] is False
+    assert d.figure.axes[0].get_ylim() != inline_ylim
+
+
+def test_window_scroll_zooms_and_reset_view_restores(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    d.canvas.draw()
+    ax = d.figure.axes[0]
+    home = ax.get_xlim()
+    _scroll(d.figure, ax, 0.5 * sum(home), 0.0, "up")
+    assert (ax.get_xlim()[1] - ax.get_xlim()[0]) < (home[1] - home[0])
+    d.reset_view()
+    assert ax.get_xlim() == pytest.approx(home)
+
+
+def test_changing_a_colour_or_names_keeps_the_zoom_but_a_layout_change_resets_it(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    d.canvas.draw()
+    ax = d.figure.axes[0]
+    home = ax.get_xlim()
+    _scroll(d.figure, ax, 0.5 * sum(home), 0.0, "up")
+    zoomed = d.figure.axes[0].get_xlim()
+    d._set_all_names(False)
+    assert d.figure.axes[0].get_xlim() == pytest.approx(zoomed)         # names: same view
+    d._pick_colour = None
+    d.colors["hard"] = "#123456"
+    d._store_colours()
+    assert d.figure.axes[0].get_xlim() == pytest.approx(zoomed)         # colour: same view
+    d.minor_check.setChecked(True)                                      # widths change -> full view
+    assert d.figure.axes[0].get_xlim() != pytest.approx(zoomed)
+
+
+def test_toolbar_tool_owns_the_mouse_over_our_zoom(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    d.canvas.draw()
+    ax = d.figure.axes[0]
+    home = ax.get_xlim()
+    d.toolbar.mode = "zoom rect"                  # the toolbar's own zoom tool is on
+    _scroll(d.figure, ax, 0.5 * sum(home), 0.0, "up")
+    assert ax.get_xlim() == pytest.approx(home)

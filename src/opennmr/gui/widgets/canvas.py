@@ -945,6 +945,11 @@ class MplCanvas(QWidget):
     DEFAULT_CROSSHAIR_COLOR = "0.35"
     DEFAULT_CROSSHAIR_WIDTH = 0.8
     CROSSHAIR_WIDTH_RANGE = (0.1, 6.0)
+    #: The dashed zoom box drawn while click-dragging a region to zoom
+    #: to: line width in screen pixels (matplotlib's own is a hairline of
+    #: 1 px -- explicit user request: "too thin", adjustable in Settings).
+    DEFAULT_ZOOM_BOX_WIDTH = 2.0
+    ZOOM_BOX_WIDTH_RANGE = (0.5, 10.0)
     #: The contour right-click menu's "Scroll Up Shows More Contours"
     #: was toggled -- MainWindow applies it to every canvas and saves it
     #: (Settings ▸ Interface holds the same switch).
@@ -1009,6 +1014,9 @@ class MplCanvas(QWidget):
         # 2026-10-17: a fit's components vanished from PDF/SVG opened in
         # Illustrator, which drops paths of more than ~32k points).
         self.canvas.print_figure = self._print_figure_vector_safe
+        # The zoom box is drawn by the canvas's drawRectangle; replacing it
+        # on this instance lets its line width be set (set_zoom_box_width).
+        self.canvas.drawRectangle = self._draw_zoom_rectangle
         self.toolbar = _Toolbar(self.canvas, self)
 
         layout = QVBoxLayout(self)
@@ -1405,6 +1413,7 @@ class MplCanvas(QWidget):
         # Crosshair appearance (see set_crosshair_style).
         self._crosshair_color = self.DEFAULT_CROSSHAIR_COLOR
         self._crosshair_width = self.DEFAULT_CROSSHAIR_WIDTH
+        self._zoom_box_width = self.DEFAULT_ZOOM_BOX_WIDTH
         self._region_select_start: float | None = None  # x-data value of the drag's own start
         self._region_select_ax = None  # axes the current region-select drag started on
         self._region_select_patch = None  # the live rubber-band axvspan, redrawn every motion tick
@@ -1511,6 +1520,10 @@ class MplCanvas(QWidget):
         self._overlay_spectra: list = []
         self._overlay_kwargs: dict = {}
         self._panel_axes: list = []
+        self._spectrum_panels: list = []         # Compare > Panels: one Axes per panel
+        self._spectrum_panel_groups: list = []   # ... and the spectra (indices) it holds
+        self._spectrum_panel_link = None
+        self._compare_panels_kwargs = None
         self._panel_home_limits: list = []
         self._panel_spectra: list = []
         #: Zoomed insets of the single 2D contour on show (Plot Style ▸ 2D ▸
@@ -1754,6 +1767,60 @@ class MplCanvas(QWidget):
         if self._crosshair is not None:
             self._remove_crosshair()
             self.canvas.draw_idle()
+
+    def zoom_box_width(self) -> float:
+        """Line width, in screen pixels, of the dashed zoom box."""
+        return self._zoom_box_width
+
+    def set_zoom_box_width(self, width) -> bool:
+        """Set the zoom box's line width (pixels). A value that is not a
+        number or lies outside :attr:`ZOOM_BOX_WIDTH_RANGE` is ignored
+        (a stale saved setting must never break a drag); returns whether
+        it was accepted."""
+        try:
+            value = float(width)
+        except (TypeError, ValueError):
+            return False
+        lo, hi = self.ZOOM_BOX_WIDTH_RANGE
+        if not lo <= value <= hi:
+            return False
+        self._zoom_box_width = value
+        return True
+
+    def _draw_zoom_rectangle(self, rect) -> None:
+        """``FigureCanvasQT.drawRectangle`` with an adjustable line width.
+
+        Same drawing as matplotlib's (black and white dashes, so it shows
+        on any background; drawn from the start corner so the dashes do
+        not jump as the box grows), but the pen is
+        :attr:`_zoom_box_width` pixels wide instead of 1. A Qt dash
+        pattern is measured in pen widths, so the dashes stay in
+        proportion at any thickness."""
+        from PySide6.QtGui import QColor, QPen
+        qt_canvas = self.canvas
+        if rect is None:
+            qt_canvas._draw_rect_callback = lambda painter: None
+            qt_canvas.update()
+            return
+        ratio = qt_canvas.device_pixel_ratio
+        x0, y0, w, h = (int(pt / ratio) for pt in rect)
+        x1, y1 = x0 + w, y0 + h
+        width = self._zoom_box_width
+
+        def draw(painter) -> None:
+            pen = QPen(QColor("black"), width)
+            pen.setDashPattern([3, 3])
+            for colour, offset in (("black", 0), ("white", 3)):
+                pen.setDashOffset(offset)
+                pen.setColor(QColor(colour))
+                painter.setPen(pen)
+                painter.drawLine(x0, y0, x0, y1)
+                painter.drawLine(x0, y0, x1, y0)
+                painter.drawLine(x0, y1, x1, y1)
+                painter.drawLine(x1, y0, x1, y1)
+
+        qt_canvas._draw_rect_callback = draw
+        qt_canvas.update()
 
     def reset_crosshair_style(self) -> None:
         self.set_crosshair_style(self.DEFAULT_CROSSHAIR_COLOR, self.DEFAULT_CROSSHAIR_WIDTH)
@@ -3264,6 +3331,10 @@ class MplCanvas(QWidget):
         # places _compare_axes is reset.
         self._compare_spectra = []
         self._compare_kwargs = None
+        self._spectrum_panels = []
+        self._spectrum_panel_groups = []
+        self._spectrum_panel_link = None
+        self._compare_panels_kwargs = None
         self._overlay_spectra = []
         self._overlay_labels = None
         self._overlay_kwargs = {}
@@ -3342,7 +3413,8 @@ class MplCanvas(QWidget):
         self._crosshair = _ContourCrosshair(
             self.canvas, self.ax, self._proj_axes.get("f1"), self._proj_axes.get("f2"),
             self.toolbar, stack_axes=self._compare_axes,
-            panel_axes=self._panel_axes if len(self._panel_axes) > 1 else None,
+            panel_axes=(self._panel_axes if len(self._panel_axes) > 1 else
+                        self._spectrum_panels if len(self._spectrum_panels) > 1 else None),
             color=self._crosshair_color, linewidth=self._crosshair_width, linestyle="--",
         )
 
@@ -4612,6 +4684,9 @@ class MplCanvas(QWidget):
             if restyle:
                 self._restyle_existing_legends()
             return
+        if self._spectrum_panels:
+            self._refresh_panel_trace_names(restyle)
+            return
         handles, labels = self._legend_entries()
         # A stacked Compare has one Axes per trace; its legend (one entry
         # per trace) goes on the top row, and nowhere else.
@@ -4631,6 +4706,25 @@ class MplCanvas(QWidget):
                 existing.remove()
         if self._legend_visible and handles and as_labels:
             self._draw_trace_labels(handles, labels)
+        if restyle:
+            self._restyle_existing_legends()
+            self.canvas.draw_idle()
+
+    def _refresh_panel_trace_names(self, restyle: bool = True) -> None:
+        """Compare ▸ Panels: each panel names its own traces (a legend per
+        panel, or the names written on the traces)."""
+        as_labels = self._legend_style == "labels"
+        for ax in self._spectrum_panels:
+            handles, labels = ax.get_legend_handles_labels()
+            pairs = [(h, plotting.safe_label(l) if hasattr(plotting, "safe_label") else l)
+                     for h, l in zip(handles, labels) if not str(l).startswith("_")]
+            old = ax.get_legend()
+            if self._legend_visible and pairs and not as_labels:
+                ax.legend([h for h, _l in pairs], [l for _h, l in pairs], **self._legend_kwargs())
+            elif old is not None:
+                old.remove()
+            if self._legend_visible and pairs and as_labels:
+                self._draw_trace_labels([h for h, _l in pairs], [l for _h, l in pairs])
         if restyle:
             self._restyle_existing_legends()
             self.canvas.draw_idle()
@@ -4960,7 +5054,11 @@ class MplCanvas(QWidget):
         elif view == "slices":
             self._redraw_contour(preserve_view=True)
         elif view == "compare":
-            self.show_compare(self._compare_spectra, **(self._compare_kwargs or {}))
+            if self._compare_panels_kwargs is not None and self._spectrum_panels:
+                self.show_compare_panels(self._compare_spectra, self._spectrum_panel_groups,
+                                         **self._compare_panels_kwargs)
+            else:
+                self.show_compare(self._compare_spectra, **(self._compare_kwargs or {}))
         elif view == "spectrum":
             # In place: a full show_spectrum would throw away the zoom
             # just to change a name or a colour.
@@ -6843,6 +6941,90 @@ class MplCanvas(QWidget):
         self._apply_layout()
         self.canvas.draw_idle()
 
+    # ---- Compare as separate panels (row / column / grid) -----------------
+
+    def show_compare_panels(self, spectra: list, groups: list, *, layout: str = "row",
+                            ncols: int | None = None, linked: bool = True, link_y: bool = False,
+                            normalize: bool = False, series_keys: list | None = None,
+                            legend_labels: list | None = None) -> None:
+        """Compare 1D spectra as separate panels. ``groups`` says which of
+        ``spectra`` (indices) share a panel: ``[[0, 1], [2]]`` is two panels,
+        the first holding two superimposed spectra. Names and colours come
+        from the series entries, so Plot Style and Rename reach every panel;
+        a spectrum made from a kept fit brings its fit, components and
+        residual. ``linked`` ties the panels' shift axes together (and
+        ``link_y`` the intensity axes); see :meth:`set_spectrum_panels_linked`."""
+        from ...notebook.compare_panels import plot_compare_panels
+        groups = [list(g) for g in groups]
+        kwargs = {"layout": layout, "ncols": ncols, "linked": linked, "link_y": link_y,
+                  "normalize": normalize, "series_keys": series_keys, "legend_labels": legend_labels}
+        self._enter_plot_kind("compare")
+        self._contour_spectrum = None
+        self._contour_factor = None
+        self._proj_axes = {"f1": None, "f2": None}
+        self._compare_axes = None
+        self._fit_mode = False
+        self._selected_compare_index = None
+        self._freeform_zoom_axes = set()
+        self._processing_preview_fid_ax = None
+        self._processing_preview_spec_ax = None
+        self._current_1d_spectrum = None
+        was_panels = bool(self._spectrum_panels)
+        self._clear_figure()
+        if not was_panels:
+            self._legend_visible = True         # panels hold different spectra: name them
+        self._compare_panels_kwargs = kwargs
+        self._compare_kwargs = None
+        self._compare_spectra = list(spectra)
+        entries = self._assign_series("compare", [
+            ((series_keys[i] if series_keys and i < len(series_keys) else str(i)),
+             (legend_labels[i] if legend_labels and i < len(legend_labels) else f"Trace {i + 1}"),
+             False)
+            for i in range(len(spectra))
+        ])
+        panels = [{"spectra": [spectra[i] for i in g],
+                   "labels": [entries[i].label for i in g],
+                   "colors": [entries[i].colour for i in g]} for g in groups]
+        result = plot_compare_panels(
+            panels, layout=layout, ncols=ncols, link=linked, link_y=link_y, normalize=normalize,
+            full_resolution=self._full_resolution, fig=self.figure, fontsize=self._AXIS_LABELSIZE,
+            tight=False, model_for=self.compare_fit_model)
+        for ax in result.axes:
+            ax.patch.set_alpha(0.0)
+            plotting.apply_spine_style(ax, top=False, right=False, bottom=True, left=False,
+                                       linewidth=self._AXIS_LINEWIDTH)
+            plotting.apply_tick_style(ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+                                      minor=self._minor_ticks_visible, labelsize=self._AXIS_LABELSIZE)
+        self._spectrum_panels = list(result.axes)
+        self._spectrum_panel_groups = groups
+        self._spectrum_panel_link = result.link
+        self._compare_shared_range = None
+        self.ax = result.axes[0]
+        self._apply_view_options()
+        self._crosshair_ready = True
+        self._apply_layout()
+        self.canvas.draw_idle()
+
+    def spectrum_panels_linked(self) -> tuple:
+        """``(x_linked, y_linked)`` of the current panel Compare, or (False, False)."""
+        link = self._spectrum_panel_link
+        return (bool(link.x), bool(link.y)) if link is not None else (False, False)
+
+    def set_spectrum_panels_linked(self, linked: bool | None = None, link_y: bool | None = None) -> None:
+        """Link or unlink the panels' shift (``linked``) / intensity (``link_y``)
+        axes without redrawing; turning a link on puts every panel on the
+        first one's current view."""
+        link = self._spectrum_panel_link
+        if link is None:
+            return
+        link.set(x=linked, y=link_y)
+        if self._compare_panels_kwargs is not None:
+            if linked is not None:
+                self._compare_panels_kwargs["linked"] = bool(linked)
+            if link_y is not None:
+                self._compare_panels_kwargs["link_y"] = bool(link_y)
+        self.canvas.draw_idle()
+
     # ---- kept fits in Compare --------------------------------------------
 
     _fit_model_cache: dict = {}
@@ -6872,59 +7054,11 @@ class MplCanvas(QWidget):
     def _draw_compare_fit_overlays(self, spectra, axes, data_lines, colors, names,
                                    normalize: bool) -> None:
         """Each Compare entry made from a kept fit gets its fit drawn over
-        its data: the total fit (in the trace's colour), its components
-        and, if asked, its residual just below -- stacked (a row each, the
-        data repeated) or superimposed (the data drawn once). How is the
-        entry's own ``metadata.raw["fit_model_view"]``
-        (:func:`opennmr.notebook.fit_models.fit_view`)."""
-        from ...notebook.fit_models import draw_fit_model, fit_view
-        items = []
-        for i, spectrum in enumerate(spectra):
-            model = self.compare_fit_model(spectrum)
-            if model is None:
-                continue
-            y = np.asarray(model["y"], dtype=float)
-            data = np.real(np.asarray(spectrum.data, dtype=float))
-            if data.shape != y.shape or not np.any(y):
-                continue
-            k = int(np.argmax(np.abs(y)))
-            scale = float(data[k] / y[k]) if y[k] else 1.0
-            if normalize:
-                peak = float(np.max(np.abs(data))) or 1.0
-                scale /= peak
-            try:
-                view = fit_view(spectrum.metadata.raw.get("fit_model_view"))
-            except (KeyError, ValueError, TypeError):
-                view = fit_view()
-            items.append((i, model, view, scale))
-        if not items:
-            return
-        shared = len(set(map(id, axes))) == 1
-        step = None
-        if shared:
-            spans = [float(np.ptp((np.asarray(m["y"]) - np.asarray(m["y_fit"]))
-                                  [np.asarray(m["mask"], dtype=bool)])) * abs(sc)
-                     for _i, m, v, sc in items if v["show_residual"]]
-            step = 1.15 * max(spans) if spans else None
-        drawn_data: set = set()
-        residual_index = 0
-        for i, model, view, scale in items:
-            ax, line = axes[i], data_lines[i]
-            data_colour = view["style"]["data_colour"]
-            key = (np.asarray(model["y"], dtype=float).tobytes(), round(scale, 12))
-            if not view["show_data"] or (shared and key in drawn_data):
-                line.set_visible(False)
-                line.set_label("_hidden data")
-            else:
-                drawn_data.add(key)
-                line.set_color(data_colour)
-                line.set_linewidth(view["style"]["data_width"])
-                line.set_label("Data" if not shared or len(drawn_data) == 1 else "_data")
-            draw_fit_model(ax, model, view, scale=scale, fit_colour=colors[i], name=names[i],
-                           draw_data=False, residual_index=residual_index if shared else 0,
-                           residual_step=step)
-            if shared and view["show_residual"]:
-                residual_index += 1
+        its data (see :func:`opennmr.notebook.compare_panels.draw_kept_fit_overlays`,
+        which the notebook's panel Compare shares)."""
+        from ...notebook.compare_panels import draw_kept_fit_overlays
+        draw_kept_fit_overlays(spectra, axes, data_lines, colors, names, normalize,
+                               model_for=self.compare_fit_model)
 
     @staticmethod
     def _apply_shared_row_scale(axes, spectra, normalize: bool) -> None:
@@ -8409,6 +8543,11 @@ class MplCanvas(QWidget):
 
         original_dpi = self.figure.get_dpi()
         original_size = self.figure.get_size_inches()
+        # While the figure is at its (possibly huge) export size, nothing
+        # may repaint the live widget: a file dialog inside ``save_fn``
+        # runs its own event loop, and each paint of an 8-inch figure at
+        # 800 dpi is a 6400 x 6400 render. Re-enabled in ``finally``.
+        self.canvas.setUpdatesEnabled(False)
         if self._export_dpi is not None:
             self.figure.set_dpi(self._export_dpi)
         default_width, default_height = self.default_export_size()
@@ -8428,9 +8567,32 @@ class MplCanvas(QWidget):
         self._restore_configured_text_sizes()
         self._apply_layout()
 
+        # **The save itself is told the DPI.** ``figure.set_dpi`` above is
+        # not enough: matplotlib's ``savefig`` defaults to
+        # ``savefig.dpi = "figure"``, and for a figure living in a Qt
+        # canvas "figure" means ``figure._original_dpi`` -- the dpi the
+        # figure was *created* with (screen resolution), which
+        # ``set_dpi`` never touches. Every export therefore came out at
+        # screen resolution whatever the Output tab said ("nominally 800
+        # dpi, but it really does not look it"; Windows and macOS alike).
+        # Saying the dpi explicitly, through rcParams (the toolbar's Save
+        # calls ``figure.savefig(fname)`` with no arguments), is the one
+        # route every save path shares.
+        export_rc = {}
+        if self._export_dpi is not None:
+            export_rc["savefig.dpi"] = float(self._export_dpi)
+        # And nothing may be left touching or crossing the edge: if the
+        # layout pass could not make room for everything drawn (a legend
+        # or annotation outside the axes, an inset, a colour-bar label),
+        # crop to the content with a small margin rather than clip it.
+        if plotting.edge_crowding(self.figure):
+            export_rc.update({"savefig.bbox": "tight", "savefig.pad_inches": self._EXPORT_PAD_INCHES})
+
         try:
-            save_fn()
+            with matplotlib.rc_context(export_rc):
+                save_fn()
         finally:
+            self.canvas.setUpdatesEnabled(True)
             if selected_row is not None:
                 self._selected_compare_index = selected_row
                 self._apply_compare_selection_highlight()
@@ -8450,6 +8612,10 @@ class MplCanvas(QWidget):
             self._restore_configured_text_sizes()
             self._apply_layout()
             self.canvas.draw_idle()
+
+    #: Margin kept around the content when an export has to be cropped
+    #: to it (see :meth:`export_full_resolution`), in inches.
+    _EXPORT_PAD_INCHES = 0.08
 
     #: How each reportable unit is formatted. Which of them a given
     #: measurement actually shows is :meth:`_measurement_unit_order`'s

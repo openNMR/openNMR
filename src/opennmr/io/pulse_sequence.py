@@ -55,6 +55,9 @@ NOMINAL = {"hard": 10e-6, "shaped": 1e-3, "decoupling": 1e-3, "delay": 1e-3,
 MINOR_NAMED_S = 20e-6
 #: ... and literal delays (``30u``, ``1m``) up to this length.
 MINOR_LITERAL_S = 1e-3
+#: Bruker literal delays (``4u``, ``1m``, the ``30m`` before ``mc``) up to
+#: this length are hardware settling, not part of the experiment.
+MINOR_LITERAL_BRUKER_S = 30e-3
 
 
 class PulseSequenceError(ValueError):
@@ -194,10 +197,11 @@ class _Timeline:
                 ev.t1 = self.t
 
 
-def _is_minor(label: str, value, literal: bool) -> bool:
+def _is_minor(label: str, value, literal: bool, literal_max: float | None = None) -> bool:
     if value is None:
         return False
-    return value <= MINOR_LITERAL_S if literal else value < MINOR_NAMED_S
+    limit = MINOR_LITERAL_S if literal_max is None else literal_max
+    return value <= limit * (1 + 1e-9) if literal else value < MINOR_NAMED_S
 
 
 def _label_of(expr: str) -> str:
@@ -278,18 +282,90 @@ def zgoptns_defines(text) -> set:
     return set(re.findall(r"-D(\w+)", text or ""))
 
 
-def _bruker_value(tok, consts):
-    """(seconds or None, is_literal) for a delay/pulse token."""
-    m = _B_NUM.match(tok)
+_B_TOKEN = re.compile(
+    r"\s*(?:(\d+\.?\d*(?:[eE][-+]?\d+)?|\.\d+)([umns])?(?![A-Za-z0-9_.])|([A-Za-z_]\w*)|(.))")
+#: Names whose recorded value is in microseconds (a pulse length, the dead
+#: time); every other recorded number is taken as it is (delays in seconds).
+_B_MICROSECONDS = re.compile(r"p\d+|de|pw", re.I)
+
+
+def _bruker_expr(expr, consts):
+    """``(seconds or None, is_literal)`` for a Bruker delay/pulse expression.
+
+    Handles a bare name (``d1``, ``p1``), a literal with a unit (``30u``,
+    ``1m``, ``5s``) and **calculated** values -- ``d20-p1``, ``p1*2``,
+    ``d2/2-30u``, ``(d3-p2)/2`` -- the way TopSpin reads them: a pulse
+    length (``p1``, ``de``) is microseconds and everything else seconds, so
+    ``d20-p1`` is in seconds. ``None`` when any name in it has no recorded
+    value (the schematic then draws a nominal length and says so in the
+    Events table), never an exception."""
+    expr = (expr or "").strip()
+    m = _B_NUM.match(expr)
     if m:
         return float(m.group(1)) * _B_UNIT[(m.group(2) or "").lower() or None], True
-    t = tok.lower()
-    v = consts.get(t)
-    if v is None:
-        return None, False
-    if re.fullmatch(r"p\d+|de|pw", t):
-        return v * 1e-6, False
-    return float(v), False
+    out, literal, pos = [], True, 0
+    while pos < len(expr):
+        t = _B_TOKEN.match(expr, pos)
+        if not t:
+            return None, False
+        pos = t.end()
+        num, unit, ident, other = t.groups()
+        if num is not None:
+            out.append(repr(float(num) * _B_UNIT[(unit or "").lower() or None]))
+        elif ident is not None:
+            literal = False
+            v = consts.get(ident.lower())
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                return None, False
+            out.append(repr(float(v) * 1e-6 if _B_MICROSECONDS.fullmatch(ident) else float(v)))
+        elif other in "+-*/()":
+            out.append(other)
+        else:
+            return None, False
+    return _safe_eval("".join(out), {}), literal
+
+
+def _bruker_value(tok, consts):
+    """(seconds or None, is_literal) for a delay/pulse token."""
+    return _bruker_expr(tok, consts)
+
+
+#: Names a calculated delay may be made from (anything else on a line,
+#: such as ``ph1^`` or ``ip1+2``, is not a delay).
+_B_DELAY_IDENT = re.compile(r"d\d+|de|p\d+|pw|cnst\d+|l\d+|in\d+|inf\d+|vd\w*|aq|dw", re.I)
+#: Names that are never a delay (phases, powers, shapes, frequency, ...).
+_B_NOT_A_DELAY = re.compile(
+    r"ph\d+|pl\d+|sp\d+|gp\d+|fq\d+|cpd\w*|i[pd]\w*|dp\d+|rcyc|zd|mc|f\d+|ns|ds|td\d*", re.I)
+_B_ASSIGN = re.compile(r'"\s*([A-Za-z_]\w*)\s*=\s*([^"]*?)\s*"')
+
+
+def _is_calculated_delay(word: str, user_delays) -> bool:
+    """A word such as ``d20-p1``, ``d2/2``, ``(d3-p2)/2``, ``1m*3`` or
+    ``tau-30u``: an arithmetic expression over delay-like names and numbers
+    that involves at least one delay (so ``p1*0.33``, a pulse, is not)."""
+    if not re.fullmatch(r"[\w.+\-*/()]+", word) or not re.search(r"[-+*/]", word):
+        return False
+    idents, has_unit, pos = [], False, 0
+    while pos < len(word):
+        t = _B_TOKEN.match(word, pos)
+        if not t:
+            return False
+        pos = t.end()
+        num, unit, ident, other = t.groups()
+        if num is not None:
+            has_unit = has_unit or bool(unit)
+        elif ident is not None:
+            idents.append(ident.lower())
+        elif other not in "+-*/()":
+            return False
+    if any(_B_NOT_A_DELAY.fullmatch(i) for i in idents):
+        return False
+    # Delay-like: d1, de, vd.., a 'define delay' name -- or a name the
+    # programme made up for itself (taua, t_echo...), which a bare
+    # arithmetic word can only be a delay of.
+    return (any(re.fullmatch(r"d\d+|de|vd\w*", i) or i in user_delays
+                or not _B_DELAY_IDENT.fullmatch(i) for i in idents)
+            or (not idents and has_unit))
 
 
 def _split_items(line: str):
@@ -310,6 +386,15 @@ def _split_items(line: str):
             if m:
                 suffix = m.group(1)
                 j += m.end()
+            elif j < n and line[j] in "*/+-":
+                # "(d3-p2)/2": arithmetic that happens to start with a
+                # bracket is one calculated delay, not a pulse group
+                k = j
+                while k < n and not line[k].isspace():
+                    k += 1
+                items.append(("word", line[i:k]))
+                i = k
+                continue
             items.append(("group", inner, suffix))
             i = j
         else:
@@ -361,6 +446,8 @@ def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
     labels: dict = {}                       # '2' -> time at that label
     cond: list = []                         # stack of (active_here, was_true)
     text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    #: ``define delay tau1`` -- names the programme gives its own delays.
+    user_delays = {m.lower() for m in re.findall(r"^\s*define\s+delay\s+(\w+)", text, re.I | re.M)}
 
     def on() -> bool:
         return all(c[0] for c in cond)
@@ -392,7 +479,15 @@ def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
         if not on():
             continue
         line = line.split(";", 1)[0].strip()
-        if not line or line.startswith('"') or re.match(r"(define|ph\d+\s*=|haltacqu)", line, re.I):
+        if line.startswith('"'):
+            # "d6=d20-p1" -- the programme calculates this value itself, so
+            # it replaces whatever the parameter table holds for that name.
+            for nm, ex in _B_ASSIGN.findall(line):
+                v, _lit = _bruker_expr(ex, consts)
+                if v is not None:
+                    consts[nm.lower()] = v * 1e6 if _B_MICROSECONDS.fullmatch(nm) else v
+            continue
+        if not line or re.match(r"(define|ph\d+\s*=|haltacqu)", line, re.I):
             continue
         # leading label ("1 ze", "2 d1")
         m = re.match(r"(\d+)(?:\s+|$)", line)
@@ -401,9 +496,6 @@ def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
             labels[m.group(1)] = tl.t
             line = line[m.end():]
         items = _split_items(line)
-        housekeeping = any(
-            it[0] == "word" and re.match(r"(pl\d*:|plw|fq\b|fq\d|fq=|sp\d*:|spnam|cpd|do:|setnmr|ctrlgrad|rppt?)", it[1], re.I)
-            for it in items)
         par: list = []
 
         def flush():
@@ -449,18 +541,34 @@ def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
                 nm, sh = w.split(":")
                 v, _ = _bruker_value(nm, consts)
                 tl.add("gradient", "G", nm, expr=w, dur=v, shape=sh)
+            elif (re.fullmatch(r"(\d*\.?\d+\*)?p\d+(\*\d*\.?\d+)?(:[A-Za-z]\w*)?", w, re.I)
+                  and k < len(items) and items[k][0] == "word"
+                  and re.fullmatch(r"ph\d+\^?", items[k][1], re.I)):
+                # the older spelling of a pulse: "p1 ph1", "p1*0.33 ph1", "p3:f2 ph2"
+                head, _, tail = w.partition(":")
+                suffix = tail if re.fullmatch(r"f\d", tail, re.I) else ""
+                par += _bruker_group_specs(head + (":" + tail if tail and not suffix else "")
+                                           + " " + items[k][1], suffix.lower(), consts)
+                k += 1
             elif lw in ("ze", "exit", "zd", "wr", "st", "rcyc", "if", "endif", "goto"):
                 if lw == "exit":
                     flush()
                 continue
-            elif _B_NUM.match(w) or re.fullmatch(r"d\d+|de", lw) or _B_LISTDELAY.match(w):
+            elif (_B_NUM.match(w) or re.fullmatch(r"d\d+|de", lw) or _B_LISTDELAY.match(w)
+                  or lw in user_delays or _is_calculated_delay(w, user_delays)):
                 flush()
                 if _B_LISTDELAY.match(w) and not re.fullmatch(r"vd|vp|vc|vt", lw):
                     lab, v, lit = "vd", None, False
                 else:
                     v, lit = _bruker_value(w, consts)
                     lab = "" if lit else w
-                minor = housekeeping or _is_minor(lab, v, lit)
+                # Hardware settling (a literal 4u / 30m, the dead time) is
+                # housekeeping; the recycle delay d1 and any calculated delay
+                # (d20-p1) never are. What else sits on the line (pl1:f1,
+                # cpds2:f2) says nothing about the delay itself -- it used to
+                # hide d1 whenever the power was set on the same line.
+                minor = (lw != "d1" and not _is_calculated_delay(w, user_delays)
+                         and _is_minor(lab, v, lit, MINOR_LITERAL_BRUKER_S))
                 tl.add("delay", "delay", lab, expr=w, dur=v, minor=minor)
         flush()
     tl.close_dec()
@@ -1254,17 +1362,11 @@ def _xp_classify_parallel(xp, st, events):
 def _finalise(seq: PulseSequence) -> PulseSequence:
     ev = [e for e in seq.events if e.t1 >= e.t0]
     ev.sort(key=lambda e: (e.t0, e.t1))
-    # merge neighbouring housekeeping delays
-    merged = []
-    for e in ev:
-        p = merged[-1] if merged else None
-        if (p and e.kind == "delay" and p.kind == "delay" and e.minor and p.minor
-                and abs(p.t1 - e.t0) < 1e-12):
-            p.t1 = e.t1
-            p.label = ""
-            p.value = (p.value or 0.0) + (e.value or 0.0) if (p.value is not None or e.value is not None) else None
-            continue
-        merged.append(e)
+    # Housekeeping delays are NOT merged: each is its own event so the viewer
+    # can offer a tick box for every one of them (they used to be fused into
+    # a single nameless gap, which also swallowed a real neighbour such as the
+    # recycle delay d1 whenever both counted as "short").
+    merged = ev
     for i, e in enumerate(merged):
         e.uid = i
     seq.events = merged
@@ -1289,25 +1391,45 @@ def _interval_width(dur: float) -> float:
     return min(0.6 + 0.4 * math.log10(1.0 + max(dur, 0.0) / 1e-5), 4.2)
 
 
-def compute_layout(seq: PulseSequence, show_minor: bool = False) -> Layout:
+def shown_minor_uids(seq: PulseSequence, show_minor=False) -> set:
+    """The housekeeping delays that are drawn: ``show_minor`` is ``True``
+    (all of them), ``False``/``None`` (none) or a collection of event uids
+    (just those)."""
+    minor = {e.uid for e in seq.events if e.kind == "delay" and e.minor}
+    if show_minor is True:
+        return minor
+    if not show_minor:
+        return set()
+    return minor & {int(u) for u in show_minor}
+
+
+def compute_layout(seq: PulseSequence, show_minor=False) -> Layout:
     """Schematic x position of every event (log-compressed time, not to
-    scale). Housekeeping delays collapse to a thin gap unless
-    ``show_minor``."""
+    scale). Housekeeping delays that are not shown collapse to a thin gap
+    (one gap for a run of them); ``show_minor`` is ``True``, ``False`` or
+    the uids of the housekeeping delays to show (:func:`shown_minor_uids`)."""
+    import bisect
     evs = seq.events
+    shown = shown_minor_uids(seq, show_minor)
+    hidden = [e for e in evs if e.kind == "delay" and e.minor and e.uid not in shown]
     pts = sorted({round(t, 12) for e in evs for t in (e.t0, e.t1)}
                  | {round(t, 12) for lp in seq.loops for t in (lp.t0, lp.t1)})
     if len(pts) < 2:
         pts = [0.0, 1e-3]
-    visible_cover = [e for e in evs if not (e.kind == "delay" and e.minor)]
+    hidden_ids = {e.uid for e in hidden}
+    visible_cover = [e for e in evs if e.uid not in hidden_ids]
     xs = [0.0]
+    previous_collapsed = False
     for a, b in zip(pts[:-1], pts[1:]):
         mid = 0.5 * (a + b)
         covered = any(e.t0 <= mid <= e.t1 for e in visible_cover)
-        in_minor = any(e.kind == "delay" and e.minor and e.t0 <= mid <= e.t1 for e in evs)
-        if in_minor and not covered and not show_minor:
-            w = 0.18
+        in_hidden = any(e.t0 <= mid <= e.t1 for e in hidden)
+        if in_hidden and not covered:
+            w = 0.0 if previous_collapsed else 0.18
+            previous_collapsed = True
         else:
             w = _interval_width(b - a)
+            previous_collapsed = False
         xs.append(xs[-1] + w)
 
     def x(t):
@@ -1316,7 +1438,6 @@ def compute_layout(seq: PulseSequence, show_minor: bool = False) -> Layout:
             return xs[0]
         if t >= pts[-1]:
             return xs[-1]
-        import bisect
         k = bisect.bisect_right(pts, t) - 1
         if pts[k] == t:
             return xs[k]
@@ -1325,10 +1446,11 @@ def compute_layout(seq: PulseSequence, show_minor: bool = False) -> Layout:
 
     x0 = {e.uid: x(e.t0) for e in evs}
     x1 = {e.uid: x(e.t1) for e in evs}
-    # delays that overlap in time go on separate lanes
+    # delays that overlap in time go on separate lanes (a hidden one takes none)
     lanes_end: list = []
     lane = {}
-    for e in sorted((e for e in evs if e.kind == "delay"), key=lambda e: x0[e.uid]):
+    for e in sorted((e for e in evs if e.kind == "delay" and e.uid not in hidden_ids),
+                    key=lambda e: x0[e.uid]):
         for k, end in enumerate(lanes_end):
             if x0[e.uid] >= end - 1e-9:
                 lane[e.uid] = k

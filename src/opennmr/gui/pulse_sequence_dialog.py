@@ -25,8 +25,9 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog, QGridLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton, QSplitter, QTableWidget,
-    QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+    QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 
@@ -39,6 +40,15 @@ class ClickableLabel(QLabel):
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt name)
         self.doubleClicked.emit()
         super().mouseDoubleClickEvent(event)
+
+
+class _ShowAllCheck(QCheckBox):
+    """"Show all": a click on the half-ticked state (some, not all, shown)
+    ticks everything rather than clearing it."""
+
+    def nextCheckState(self) -> None:  # noqa: N802 (Qt name)
+        self.setCheckState(Qt.CheckState.Unchecked if self.checkState() == Qt.CheckState.Checked
+                           else Qt.CheckState.Checked)
 
 
 _UID = Qt.ItemDataRole.UserRole
@@ -71,7 +81,8 @@ class PulseSequenceDialog(QDialog):
         opts = self._settings.get("pulse_sequence_options") or {}
         self._opts = {"show_minor": bool(opts.get("show_minor", False)),
                       "show_values": bool(opts.get("show_values", False)),
-                      "show_loops": bool(opts.get("show_loops", True))}
+                      "show_loops": bool(opts.get("show_loops", True)),
+                      "delays_inline": bool(opts.get("delays_inline", True))}
 
         root = QVBoxLayout(self)
         top = QHBoxLayout()
@@ -107,8 +118,14 @@ class PulseSequenceDialog(QDialog):
         diagram = QWidget()
         dl = QVBoxLayout(diagram)
         dl.setContentsMargins(0, 0, 0, 0)
-        dl.addWidget(NavigationToolbar2QT(self.canvas, diagram))
+        self.toolbar = NavigationToolbar2QT(self.canvas, diagram)
+        dl.addWidget(self.toolbar)
         dl.addWidget(self.canvas, 1)
+        # Scroll to zoom along time (Ctrl: vertical, Shift: pan), drag to pan,
+        # double-click for the full view -- unless the toolbar's own pan /
+        # zoom tool is active and owns the mouse.
+        self._disable_zoom = self._ps.enable_zoom_pan(
+            self.figure, busy=lambda: bool(getattr(self.toolbar, "mode", "")))
         self.tabs.addTab(diagram, "Diagram")
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
@@ -156,19 +173,36 @@ class PulseSequenceDialog(QDialog):
         # options
         obox = QGroupBox("Display")
         ol = QVBoxLayout(obox)
-        self.minor_check = QCheckBox("Show short housekeeping delays")
-        self.minor_check.setToolTip("Delays such as 30u, 1m or the dead time 'de' that only "
-                                    "set the hardware up are hidden by default.")
         self.values_check = QCheckBox("Show durations under the names")
         self.values_check.setToolTip("Only where the data record the value (e.g. d1, p1 of a "
                                      "Bruker experiment).")
         self.loops_check = QCheckBox("Show loops")
-        for chk, key in ((self.minor_check, "show_minor"), (self.values_check, "show_values"),
-                         (self.loops_check, "show_loops")):
+        self.inline_check = QCheckBox("Delays among the pulses")
+        self.inline_check.setToolTip(
+            "On: delays are drawn as brackets directly under the first channel, on the same "
+            "time axis as the pulses. Off: in a block of their own below every channel.")
+        for chk, key in ((self.values_check, "show_values"), (self.loops_check, "show_loops"),
+                         (self.inline_check, "delays_inline")):
             chk.setChecked(self._opts[key])
             chk.toggled.connect(lambda v, k=key: self._set_option(k, v))
             ol.addWidget(chk)
         sl.addWidget(obox)
+        # housekeeping delays: all of them, each with its own tick box
+        hbox = QGroupBox("Housekeeping delays")
+        hl = QVBoxLayout(hbox)
+        self.minor_check = _ShowAllCheck("Show all housekeeping delays")
+        self.minor_check.setToolTip(
+            "Delays such as 30u, 1m or the dead time 'de' that only set the hardware up are "
+            "hidden by default. Tick this to show every one, or tick them one by one below.")
+        self.minor_check.setChecked(self._opts["show_minor"])
+        self.minor_check.stateChanged.connect(self._on_minor_master)
+        hl.addWidget(self.minor_check)
+        self.minor_list = QListWidget()
+        self.minor_list.setMaximumHeight(150)
+        self.minor_list.setToolTip("Every housekeeping delay of this sequence, in time order.")
+        self.minor_list.itemChanged.connect(self._on_minor_item)
+        hl.addWidget(self.minor_list)
+        sl.addWidget(hbox)
         # conditional blocks
         self.flag_box = QGroupBox("Conditional blocks (#ifdef / flags)")
         self.flag_layout = QVBoxLayout(self.flag_box)
@@ -179,9 +213,14 @@ class PulseSequenceDialog(QDialog):
 
         bottom = QHBoxLayout()
         self.note = QLabel("Schematic – not to scale: long delays are compressed so every "
-                           "pulse stays visible.")
+                           "pulse stays visible. Scroll to zoom, drag to pan, double-click to reset.")
         self.note.setStyleSheet("color:#666;")
         bottom.addWidget(self.note, 1)
+        reset_view = QPushButton("Reset view")
+        reset_view.setToolTip("Back to the whole sequence after scrolling / dragging "
+                              "(double-clicking the diagram does the same).")
+        reset_view.clicked.connect(self.reset_view)
+        bottom.addWidget(reset_view)
         save = QPushButton("Save figure…")
         save.clicked.connect(self._save_figure)
         close = QPushButton("Close")
@@ -248,6 +287,7 @@ class PulseSequenceDialog(QDialog):
         else:
             self._rebuild_flags()
             self._rebuild_names()
+            self._rebuild_minor()
 
     def _on_sequence_chosen(self, i: int) -> None:
         if not self._building and i >= 0:
@@ -259,6 +299,7 @@ class PulseSequenceDialog(QDialog):
             self.sequence.channel_nuclei = self._ps.channel_nuclei(self.spectrum)
         self._rebuild_flags()
         self._rebuild_names()
+        self._rebuild_minor()
         self._fill_table()
         self._redraw()
 
@@ -328,6 +369,70 @@ class PulseSequenceDialog(QDialog):
                 parent.setExpanded(title != "Delays" or len(events) < 12)
         self._building = False
 
+    def _rebuild_minor(self) -> None:
+        """One tick box per housekeeping delay of the sequence, ticked as the
+        master "show all" choice (remembered) says."""
+        self._building = True
+        self.minor_list.clear()
+        events = self._ps.housekeeping_delays(self.sequence) if self.sequence else []
+        for e in events:
+            name = e.label or e.expr or "delay"
+            txt = f"{name}   {e.value_text()}" if e.value is not None else name
+            item = QListWidgetItem(txt)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if self._opts["show_minor"]
+                               else Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, e.uid)
+            self.minor_list.addItem(item)
+        self.minor_list.setEnabled(bool(events))
+        self.minor_check.setEnabled(bool(events))
+        self.minor_check.setToolTip(
+            self.minor_check.toolTip().split("\n")[0] + ("" if events else
+                                                          "\nThis sequence has none."))
+        self._building = False
+        self._sync_minor_master()
+
+    def _shown_minor_uids(self) -> set:
+        out = set()
+        for i in range(self.minor_list.count()):
+            item = self.minor_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                out.add(item.data(Qt.ItemDataRole.UserRole))
+        return out
+
+    def _sync_minor_master(self) -> None:
+        n = self.minor_list.count()
+        k = len(self._shown_minor_uids())
+        state = (Qt.CheckState.Unchecked if k == 0 else
+                 Qt.CheckState.Checked if k == n else Qt.CheckState.PartiallyChecked)
+        blocked = self.minor_check.blockSignals(True)
+        self.minor_check.setCheckState(state)
+        self.minor_check.blockSignals(blocked)
+
+    def _on_minor_master(self, state) -> None:
+        """"Show all housekeeping delays": tick (or clear) every one. The
+        half-ticked state (some shown) is only ever set by
+        :meth:`_sync_minor_master`, which blocks this."""
+        checked = Qt.CheckState(state) == Qt.CheckState.Checked
+        if Qt.CheckState(state) == Qt.CheckState.PartiallyChecked:
+            return
+        self._building = True
+        for i in range(self.minor_list.count()):
+            self.minor_list.item(i).setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        self._building = False
+        self._sync_minor_master()
+        self._opts["show_minor"] = bool(checked)
+        self._settings["pulse_sequence_options"] = dict(self._opts)
+        self._save_settings()
+        self._redraw()
+
+    def _on_minor_item(self, _item) -> None:
+        if self._building:
+            return
+        self._sync_minor_master()
+        self._redraw()
+
     def _shown_uids(self) -> set:
         out = set()
         for i in range(self.name_tree.topLevelItemCount()):
@@ -340,7 +445,7 @@ class PulseSequenceDialog(QDialog):
 
     def _on_names_changed(self, *_a) -> None:
         if not self._building:
-            self._redraw()
+            self._redraw(keep_view=True)
 
     def _set_all_names(self, on: bool) -> None:
         self._building = True
@@ -348,7 +453,7 @@ class PulseSequenceDialog(QDialog):
             self.name_tree.topLevelItem(i).setCheckState(
                 0, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
         self._building = False
-        self._redraw()
+        self._redraw(keep_view=True)
 
     def _set_option(self, key: str, value: bool) -> None:
         self._opts[key] = bool(value)
@@ -372,7 +477,7 @@ class PulseSequenceDialog(QDialog):
         self._settings["pulse_sequence_colors"] = changed
         self._save_settings()
         self._refresh_colour_buttons()
-        self._redraw()
+        self._redraw(keep_view=True)
 
     def _refresh_colour_buttons(self) -> None:
         for kind, b in self.colour_buttons.items():
@@ -382,10 +487,19 @@ class PulseSequenceDialog(QDialog):
     def draw_options(self) -> dict:
         return dict(colors=dict(self.colors), show_names=self._shown_uids(),
                     show_values=self._opts["show_values"],
-                    show_minor_delays=self._opts["show_minor"],
-                    show_loops=self._opts["show_loops"])
+                    show_minor_delays=self._shown_minor_uids(),
+                    show_loops=self._opts["show_loops"],
+                    delays_inline=self._opts["delays_inline"])
 
-    def _redraw(self) -> None:
+    def _redraw(self, keep_view: bool = False) -> None:
+        """Draw the sequence again. ``keep_view``: stay at the zoomed /
+        panned region (for a change that does not move anything, such as a
+        colour or which names are shown)."""
+        view = None
+        if keep_view and self.figure.axes:
+            ax0 = self.figure.axes[0]
+            if hasattr(ax0, "_opennmr_home_view"):
+                view = (ax0.get_xlim(), ax0.get_ylim())
         self.figure.clear()
         if self.sequence is None:
             ax = self.figure.add_subplot(111)
@@ -396,7 +510,18 @@ class PulseSequenceDialog(QDialog):
             ax = self.figure.add_subplot(111)
             self._ps.plot_pulse_sequence(self.sequence, ax, **self.draw_options())
             self.figure.subplots_adjust(left=0.01, right=0.99, top=0.93, bottom=0.04)
+            if view is not None:
+                ax.set_xlim(view[0])
+                ax.set_ylim(view[1])
         self.canvas.draw_idle()
+
+    def reset_view(self) -> None:
+        """Back to the whole sequence (after scrolling / dragging)."""
+        if self.figure.axes and hasattr(self.figure.axes[0], "_opennmr_home_view"):
+            ax = self.figure.axes[0]
+            ax.set_xlim(ax._opennmr_home_view[0])
+            ax.set_ylim(ax._opennmr_home_view[1])
+            self.canvas.draw_idle()
 
     def _fill_table(self) -> None:
         rows = self._ps.event_table(self.sequence) if self.sequence else []

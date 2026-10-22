@@ -3,7 +3,7 @@ from .style import (
     stack_colors, get_contour_cmap, downsample_2d, downsample_indices, downsample_1d, save_figure,
     relative_luminance, contrast_against_white, is_too_light, readable_cmap,
     qualitative_colors, usable_cmap_positions, MAX_LINE_LUMINANCE,
-    fit_labels_within_figure, clipped_labels, set_colorbar_gap,
+    fit_labels_within_figure, clipped_labels, edge_crowding, set_colorbar_gap,
     CONTOUR_CMAP_NAMES, VALID_SAVE_FORMATS,
 )
 from .accessibility import (

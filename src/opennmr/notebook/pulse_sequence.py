@@ -16,6 +16,15 @@ off together (``show_pulse_names``, ``show_delay_names``) or one by one
 (``show_names``). The drawing is a **schematic -- not to scale**: long
 delays are compressed so every pulse stays visible.
 
+Delays are drawn **among the pulses** (``delays_inline=True``, the default):
+brackets just under the first channel, so one reads along the sequence in
+time order. Housekeeping delays (recycle delay excepted, which is always
+shown) are hidden by default and added one by one with ``show_minor_delays``
+(``True`` for all, or a collection of their uids -- see
+:func:`housekeeping_delays`). Calculated delays (``d20-p1``) are shown with
+their expression. :func:`enable_zoom_pan` adds scroll-zoom / drag-pan to a
+figure drawn outside the GUI.
+
 Supported files: Bruker, Varian/Agilent, JEOL Delta (``.jxp``), X-Pulse and
 Magritek (Prospa ``*_pp.mac``). See :mod:`opennmr.io.pulse_sequence`.
 """
@@ -28,7 +37,8 @@ import re
 
 from ..io.pulse_sequence import (
     Event, Loop, PulseSequence, PulseSequenceError, compute_layout, detect_vendor,
-    format_time, parse_pulse_sequence, read_pulse_sequences, zgoptns_defines, KINDS,
+    format_time, parse_pulse_sequence, read_pulse_sequences, shown_minor_uids,
+    zgoptns_defines, KINDS,
 )
 
 #: Colour-blind-safe (Okabe-Ito) defaults, one per kind of event.
@@ -55,7 +65,7 @@ __all__ = [
     "DEFAULT_COLORS", "KIND_NAMES", "PulseSequence", "PulseSequenceError",
     "read_pulse_sequences", "parse_pulse_sequence", "pulse_sequence_for",
     "find_sequence_file", "plot_pulse_sequence", "figure_size", "event_table", "channel_nuclei",
-    "pulse_label",
+    "pulse_label", "enable_zoom_pan", "housekeeping_delays",
 ]
 
 
@@ -138,19 +148,35 @@ def pulse_sequence_for(spectrum, path: str | None = None, flags: dict | None = N
 
 def pulse_label(name: str) -> str:
     """``'p1'`` -> ``'$p_{1}$'``, ``'2pw'`` -> ``'2$pw$'``, ``'tau'`` -> ``'$\\tau$'``
-    (italic symbols with subscripts, as in a paper); anything else is
-    returned as plain text."""
+    (italic symbols with subscripts, as in a paper). A **calculated** value is
+    set the same way piece by piece -- ``'d20-p1'`` -> ``'$d_{20}$−$p_{1}$'``,
+    ``'p1*0.33'`` -> ``'$p_{1}$·0.33'``; anything else is returned as plain text."""
     if not name:
         return ""
     m = re.fullmatch(r"([0-9.]*)([A-Za-z]+)(\d*)", name)
-    if not m or len(m.group(2)) > 6:
-        return name.replace("$", "")
-    pre, letters, digits = m.groups()
-    sym = _GREEK.get(letters)
-    body = sym if sym else rf"\mathit{{{letters}}}"
-    if digits:
-        body += f"_{{{digits}}}"
-    return f"{pre}${body}$"
+    if m and len(m.group(2)) <= 6:
+        pre, letters, digits = m.groups()
+        sym = _GREEK.get(letters)
+        body = sym if sym else rf"\mathit{{{letters}}}"
+        if digits:
+            body += f"_{{{digits}}}"
+        return f"{pre}${body}$"
+    if re.search(r"[-+*/]", name):
+        out = []
+        for part in re.split(r"((?<![\w.])[A-Za-z_]\w*)", name.replace("$", "")):
+            if re.fullmatch(r"[A-Za-z]{1,6}\d*", part):
+                out.append(pulse_label(part))
+            else:
+                out.append(part.replace("*", "·").replace("-", "−"))
+        return "".join(out)
+    return name.replace("$", "")
+
+
+def housekeeping_delays(seq: PulseSequence) -> list:
+    """The delays that only set the hardware up (``30u``, ``1m``, the dead
+    time ``de``...), in time order -- each can be shown or hidden on its own
+    via ``show_minor_delays=[uid, ...]`` of :func:`plot_pulse_sequence`."""
+    return [e for e in seq.events if e.kind == "delay" and e.minor]
 
 
 def event_table(seq: PulseSequence) -> list:
@@ -172,7 +198,7 @@ _ROW_H = 1.9
 _H_PULSE, _H_DEC, _H_GRAD, _H_ACQ = 1.0, 0.34, 0.8, 0.55
 
 
-def figure_size(seq: PulseSequence, show_minor_delays: bool = False,
+def figure_size(seq: PulseSequence, show_minor_delays=False,
                 show_loops: bool = True) -> tuple:
     """A good ``figsize`` (inches) for ``seq`` -- wide enough for its
     pulses, tall enough for its channels, delay lanes and loop brackets."""
@@ -186,7 +212,8 @@ def figure_size(seq: PulseSequence, show_minor_delays: bool = False,
 def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = None,
                         show_pulse_names: bool = True, show_delay_names: bool = True,
                         show_names=None, show_values: bool = False,
-                        show_minor_delays: bool = False, show_loops: bool = True,
+                        show_minor_delays=False, show_loops: bool = True,
+                        delays_inline: bool = True,
                         legend: bool = True, title: bool = True,
                         figsize=None, fontsize: float = 10.0):
     """Draw ``seq`` as a pulse-sequence diagram. Returns ``(fig, ax)``.
@@ -205,7 +232,14 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
     show_values
         Add the duration under a name where the file records it.
     show_minor_delays
-        Include housekeeping delays (``30u``, ``de``, hardware set-up).
+        Housekeeping delays (``30u``, ``de``, hardware set-up) to draw:
+        ``True`` for all of them, ``False`` for none (the default), or a
+        collection of event ``uid`` values to draw just those -- see
+        :func:`housekeeping_delays`.
+    delays_inline
+        ``True`` (the default): delays are drawn **with the pulses**, as
+        brackets directly under the first channel's line, on the same time
+        axis. ``False``: in a block of their own below every channel.
     """
     import matplotlib.pyplot as plt
     from matplotlib.patches import Polygon, Rectangle
@@ -213,12 +247,59 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
 
     col = {**DEFAULT_COLORS, **(colors or {})}
     lay = compute_layout(seq, show_minor_delays)
+    shown_minor = shown_minor_uids(seq, show_minor_delays)
+    def named(e) -> bool:
+        # A ticked housekeeping delay with no name of its own (a literal
+        # ``30u``) always carries its text: ticking it is the request.
+        if e.kind == "delay" and e.uid in shown_minor and not e.label:
+            return True
+        if show_names is not None:
+            return e.uid in set(show_names)
+        return show_delay_names if e.kind == "delay" else show_pulse_names
+
+    def delay_text(e):
+        """(drawn text, plain text for width) of a delay's name, or None."""
+        name = e.label or (e.expr if e.minor else "")
+        if not name or not named(e):
+            return None
+        txt = pulse_label(e.label) if e.label else name
+        plain = name
+        if show_values and e.value is not None and e.label:
+            extra = f"  {format_time(e.value)}"
+            txt, plain = txt + extra, plain + extra
+        return txt, plain
+
+    # Delay names are staggered onto up to three levels so neighbours never
+    # overlap; the lane is made tall enough for the levels actually used.
+    delay_level: dict = {}
+    lane_ends: dict = {}
+    for e in sorted((e for e in seq.events if e.kind == "delay" and e.uid in lay.lane),
+                    key=lambda ev: lay.x0[ev.uid]):
+        t = delay_text(e)
+        if t is None:
+            continue
+        est = 0.115 * len(t[1]) * fontsize / 10.0 + 0.2
+        xm = 0.5 * (lay.x0[e.uid] + lay.x1[e.uid])
+        ends = lane_ends.setdefault(lay.lane[e.uid], [-9e9, -9e9, -9e9])
+        level = next((k for k in range(3) if ends[k] <= xm - est / 2), ends.index(min(ends)))
+        ends[level] = xm + est / 2
+        delay_level[e.uid] = level
+    n_levels = max(delay_level.values(), default=0) + 1
     chans = seq.channels or ["f1"]
     nrows = len(chans)
-    row_y = {c: -(i * _ROW_H) for i, c in enumerate(chans)}
-    delay_top = -(nrows - 1) * _ROW_H - 0.9
-    lane_h = 0.95
-    bottom = delay_top - lay.n_lanes * lane_h - 0.5
+    lane_h = 0.95 + 0.42 * max(0, n_levels - 2)
+    has_delays = any(e.kind == "delay" and e.uid in lay.lane for e in seq.events)
+    if delays_inline:
+        # The delay brackets sit right under the first channel's line, among
+        # the pulses; the other channels are pushed down to make room.
+        block = (lay.n_lanes * lane_h + 0.6) if has_delays else 0.0
+        row_y = {c: -(i * _ROW_H) - (block if i > 0 else 0.0) for i, c in enumerate(chans)}
+        delay_top = row_y[chans[0]] - 0.9
+        bottom = row_y[chans[-1]] - 0.9
+    else:
+        row_y = {c: -(i * _ROW_H) for i, c in enumerate(chans)}
+        delay_top = -(nrows - 1) * _ROW_H - 0.9
+        bottom = delay_top - lay.n_lanes * lane_h - 0.5
     loop_depth = max([lp.depth for lp, _, _ in lay.loops] + [-1]) + 1 if show_loops else 0
     top = _H_PULSE + 0.9 + 0.5 * loop_depth
 
@@ -229,11 +310,6 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
     ax.set_axis_off()
     ax.set_xlim(-2.2, lay.width + 0.6)
     ax.set_ylim(bottom - 0.4, top + (0.6 if title else 0.1))
-
-    def named(e) -> bool:
-        if show_names is not None:
-            return e.uid in set(show_names)
-        return show_delay_names if e.kind == "delay" else show_pulse_names
 
     # channel baselines and labels
     nuc = getattr(seq, "channel_nuclei", {}) or {}
@@ -300,12 +376,11 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
             ax.plot(xs, ys, color=c, lw=1.3, zorder=3)
             put_label(e, xm, y, _H_ACQ + 0.2, c)
 
-    # delays: thin brackets on lanes under the last channel
-    dl_end: dict = {}
+    # delays: thin brackets on lanes under the first channel (or, not inline, the last)
     for e in sorted(seq.events, key=lambda ev: lay.x0[ev.uid]):
         if e.kind != "delay":
             continue
-        if e.minor and not show_minor_delays:
+        if e.minor and e.uid not in shown_minor:
             continue
         x0, x1 = lay.x0[e.uid], lay.x1[e.uid]
         y = delay_top - lay.lane.get(e.uid, 0) * lane_h
@@ -313,20 +388,12 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
         ax.plot([x0, x1], [y, y], color=c, lw=0.9, zorder=2, solid_capstyle="butt")
         for xx in (x0, x1):
             ax.plot([xx, xx], [y - 0.1, y + 0.1], color=c, lw=0.9, zorder=2)
-        if named(e) and e.label:
-            txt = pulse_label(e.label)
-            if show_values and e.value is not None:
-                txt += f"  {format_time(e.value)}"
-            est = 0.115 * len(e.label) * fontsize / 10.0 + 0.1
+        t = delay_text(e)
+        if t is not None:
             xm = 0.5 * (x0 + x1)
-            lane = lay.lane.get(e.uid, 0)
-            lvl = 0
-            if dl_end.get(lane, (-9e9, 0))[0] > xm - est / 2:
-                lvl = 1 - dl_end[lane][1]
-            dl_end[lane] = (xm + est / 2, lvl)
-            ax.text(xm, y - 0.14 - 0.42 * lvl, txt, ha="center", va="top",
+            ax.text(xm, y - 0.14 - 0.42 * delay_level.get(e.uid, 0), t[0], ha="center", va="top",
                     fontsize=fontsize, color=c, zorder=5)
-    if lay.n_lanes:
+    if has_delays:
         ax.text(-0.35, delay_top, "Delays", ha="right", va="center", fontsize=fontsize, color="#222")
 
     # loops
@@ -351,4 +418,100 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
             fontsize=fontsize * 0.75, style="italic", color="#777")
     if title:
         ax.set_title(seq.name, fontsize=fontsize * 1.15, loc="left")
+    # The full view, for "reset" after scrolling / dragging (enable_zoom_pan).
+    ax._opennmr_home_view = (ax.get_xlim(), ax.get_ylim())
     return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# scrolling / zooming
+# ---------------------------------------------------------------------------
+
+def enable_zoom_pan(fig, *, factor: float = 1.25, busy=None, max_out: float = 1.6):
+    """Let the mouse zoom and pan a pulse-sequence figure.
+
+    * **scroll** zooms in / out under the cursor along the time axis;
+      **Ctrl + scroll** zooms the vertical axis; **Shift + scroll** pans
+      along time.
+    * **drag** (left button) pans; **double-click** returns to the full view.
+
+    The full view is the one :func:`plot_pulse_sequence` drew (it is kept on
+    the axes), and zooming out never goes beyond ``max_out`` times it. Works
+    in a notebook with an interactive backend (``%matplotlib widget`` /
+    ``qt``) and is what the GUI's Pulse sequence window uses. ``busy`` is an
+    optional callable returning True while another tool (a toolbar's own
+    pan / zoom) owns the mouse. Returns a function that switches it off."""
+    state = {"drag": None}
+
+    def home(ax):
+        return getattr(ax, "_opennmr_home_view", None) or (ax.get_xlim(), ax.get_ylim())
+
+    def clamp(lo, hi, home_lo, home_hi):
+        span, full = hi - lo, home_hi - home_lo
+        if span > full * max_out:
+            mid = 0.5 * (lo + hi)
+            lo, hi = mid - full * max_out / 2, mid + full * max_out / 2
+        return lo, hi
+
+    def zoom_axis(ax, which, centre, scale):
+        get, put = (ax.get_xlim, ax.set_xlim) if which == "x" else (ax.get_ylim, ax.set_ylim)
+        lo, hi = get()
+        new_lo, new_hi = centre - (centre - lo) * scale, centre + (hi - centre) * scale
+        hx, hy = home(ax)
+        h_lo, h_hi = hx if which == "x" else hy
+        put(clamp(new_lo, new_hi, h_lo, h_hi))
+
+    def on_scroll(event):
+        ax = event.inaxes
+        if ax is None or (busy and busy()):
+            return
+        scale = 1 / factor if event.button == "up" else factor
+        key = (event.key or "")
+        if "shift" in key:
+            lo, hi = ax.get_xlim()
+            step = (hi - lo) * 0.1 * (-1 if event.button == "up" else 1)
+            ax.set_xlim(lo + step, hi + step)
+        elif "control" in key or "ctrl" in key:
+            zoom_axis(ax, "y", event.ydata, scale)
+        else:
+            zoom_axis(ax, "x", event.xdata, scale)
+        fig.canvas.draw_idle()
+
+    def on_press(event):
+        if event.inaxes is None or (busy and busy()) or event.button != 1:
+            return
+        if getattr(event, "dblclick", False):
+            hx, hy = home(event.inaxes)
+            event.inaxes.set_xlim(hx)
+            event.inaxes.set_ylim(hy)
+            state["drag"] = None
+            fig.canvas.draw_idle()
+            return
+        state["drag"] = (event.inaxes, event.x, event.y, event.inaxes.get_xlim(),
+                         event.inaxes.get_ylim())
+
+    def on_move(event):
+        d = state["drag"]
+        if d is None or event.x is None or (busy and busy()):
+            return
+        ax, x0, y0, xlim, ylim = d
+        inv = ax.transData.inverted()
+        (a0, b0), (a1, b1) = inv.transform((x0, y0)), inv.transform((event.x, event.y))
+        ax.set_xlim(xlim[0] - (a1 - a0), xlim[1] - (a1 - a0))
+        ax.set_ylim(ylim[0] - (b1 - b0), ylim[1] - (b1 - b0))
+        # the limits just changed, so the inverse used above is stale: re-anchor
+        state["drag"] = (ax, event.x, event.y, ax.get_xlim(), ax.get_ylim())
+        fig.canvas.draw_idle()
+
+    def on_release(_event):
+        state["drag"] = None
+
+    cids = [fig.canvas.mpl_connect("scroll_event", on_scroll),
+            fig.canvas.mpl_connect("button_press_event", on_press),
+            fig.canvas.mpl_connect("motion_notify_event", on_move),
+            fig.canvas.mpl_connect("button_release_event", on_release)]
+
+    def disable():
+        for cid in cids:
+            fig.canvas.mpl_disconnect(cid)
+    return disable

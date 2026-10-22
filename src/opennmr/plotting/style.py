@@ -292,6 +292,45 @@ def fit_labels_within_figure(fig, *, min_fontsize: float = LABEL_FIT_MIN_FONTSIZ
     }
 
 
+def edge_crowding(fig, margin_pt: float = 2.0) -> list:
+    """Sides of ``fig`` (``'left'``, ``'right'``, ``'top'``, ``'bottom'``)
+    that something drawn touches, crosses, or comes within ``margin_pt``
+    points of -- the "pushed right to the edge" case.
+
+    Measured on the figure's *tight bounding box* (every artist: tick
+    labels, legends, annotations, insets, colour-bar labels), not just the
+    axis labels :func:`clipped_labels` looks at. ``tight_layout`` normally
+    leaves ~10 pt on every side, so a 2 pt threshold has no false alarms
+    on a figure it laid out; it fires when the layout could not make room
+    (an artist outside the axes that ``tight_layout`` does not know
+    about), which is when an export should be cropped to its content
+    rather than clip it. Returns ``[]`` for a figure that cannot be
+    measured."""
+    try:
+        try:
+            renderer = fig.canvas.get_renderer()
+        except AttributeError:
+            renderer = fig._get_renderer()
+        _settle_label_positions(fig)
+        box = fig.get_tightbbox(renderer)
+    except Exception:  # noqa: BLE001 -- an unmeasurable figure is not a crowded one
+        return []
+    if box is None:
+        return []
+    margin = margin_pt / 72.0
+    width, height = fig.get_size_inches()
+    sides = []
+    if box.x0 < margin:
+        sides.append("left")
+    if box.x1 > width - margin:
+        sides.append("right")
+    if box.y0 < margin:
+        sides.append("bottom")
+    if box.y1 > height - margin:
+        sides.append("top")
+    return sides
+
+
 def apply_tick_style(ax, direction='in', length=4.0, width=1.0, pad=4.0,
                       num_ticks=None, axis='both', minor=True, labelsize=None):
     """Apply consistent tick styling to an ``ax``: direction, size,

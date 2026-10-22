@@ -47,6 +47,7 @@ from .widgets import wheel_guard
 from .cpmg_panel import CpmgProcessingPanel
 from .shear_panel import ShearPanel
 from .compare_2d import Compare2DControls
+from .compare_panels_controls import ComparePanelsControls
 from ..notebook import notes as nb_notes
 from ..notebook import referencing as nb_referencing
 from .drift_panel import DriftCorrectionPanel
@@ -2547,9 +2548,12 @@ class MainWindow(QMainWindow):
         compare_form = QFormLayout()
 
         self.layout_mode_combo = QComboBox()
-        self.layout_mode_combo.addItems(["Stacked", "Superimposed", "Heatmap"])
+        self.layout_mode_combo.addItems(["Stacked", "Superimposed", "Heatmap",
+                                         "Panels: row", "Panels: column", "Panels: grid"])
         self.layout_mode_combo.setToolTip(
             "Stacked: one panel per spectrum. Superimposed: all on one axis.\n"
+            "Panels: separate plots in a row, a column or a grid -- put one or several "
+            "spectra (fits included) in each, and link or unlink their zoom.\n"
             "Heatmap: one row per spectrum, colour = intensity, rows in the "
             "list's order (top first). Every row is interpolated onto the ppm "
             "range all the checked spectra share; Normalize sets what the "
@@ -2594,6 +2598,15 @@ class MainWindow(QMainWindow):
             lambda on: self.compare_canvas.set_panels_linked(on))
         self.compare_2d_controls.setVisible(False)
         layout.addWidget(self.compare_2d_controls)
+
+        # 1D spectra as separate panels (Layout ▸ Panels): linking, grid
+        # columns and which panel each spectrum goes in.
+        self.compare_panels_controls = ComparePanelsControls()
+        self.compare_panels_controls.changed.connect(self._on_compare_controls_changed)
+        self.compare_panels_controls.link_toggled.connect(
+            lambda x, y: self.compare_canvas.set_spectrum_panels_linked(x, y))
+        self.compare_panels_controls.setVisible(False)
+        layout.addWidget(self.compare_panels_controls)
 
         compare_action_row = QHBoxLayout()
         compare_plot_button = QPushButton("Plot")
@@ -6553,6 +6566,31 @@ class MainWindow(QMainWindow):
                 MplCanvas.DEFAULT_CROSSHAIR_COLOR, MplCanvas.DEFAULT_CROSSHAIR_WIDTH))
         crosshair_row_layout.addWidget(self.crosshair_style_reset_button)
         interface_form.addRow("Crosshair:", crosshair_row)
+        # Zoom box (the dashed rectangle drawn while click-dragging to zoom):
+        # line width, applied to every plot and remembered (explicit user
+        # request: the default hairline is too thin).
+        zoom_box_row = QWidget()
+        zoom_box_row_layout = QHBoxLayout(zoom_box_row)
+        zoom_box_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.zoom_box_width_spin = TypedDoubleSpinBox()
+        self.zoom_box_width_spin.setRange(*MplCanvas.ZOOM_BOX_WIDTH_RANGE)
+        self.zoom_box_width_spin.setDecimals(1)
+        self.zoom_box_width_spin.setSingleStep(0.5)
+        self.zoom_box_width_spin.setSuffix(" px")
+        self.zoom_box_width_spin.setToolTip(
+            "Line width of the dashed box drawn while you click-drag a region to zoom to, "
+            "on every plot.")
+        self.zoom_box_width_spin.valueChanged.connect(self._set_zoom_box_width)
+        zoom_box_row_layout.addWidget(self.zoom_box_width_spin)
+        zoom_box_reset_button = QPushButton("Reset")
+        zoom_box_reset_button.setToolTip("Back to the default zoom-box thickness.")
+        zoom_box_reset_button.clicked.connect(
+            lambda _checked=False: self._set_zoom_box_width(MplCanvas.DEFAULT_ZOOM_BOX_WIDTH))
+        zoom_box_row_layout.addWidget(zoom_box_reset_button)
+        zoom_box_row_layout.addStretch(1)
+        interface_form.addRow("Zoom box:", zoom_box_row)
+        self._set_zoom_box_width(
+            self._ui_settings.get("zoom_box_width", MplCanvas.DEFAULT_ZOOM_BOX_WIDTH), save=False)
         for _canvas in self._all_canvases():
             _canvas.crosshairStyleChanged.connect(
                 lambda color, width: self._set_crosshair_style(color, width))
@@ -7227,6 +7265,20 @@ class MainWindow(QMainWindow):
             self._ui_settings["crosshair_width"] = width
             self._save_ui_settings()
 
+    def _set_zoom_box_width(self, width, save: bool = True) -> None:
+        """Settings ▸ Interface ▸ Zoom box: the dashed zoom rectangle's line
+        width (pixels) on every plot; remembered as ``zoom_box_width``. A
+        value a canvas rejects leaves the width as it was."""
+        for canvas in self._all_canvases():
+            canvas.set_zoom_box_width(width)
+        width = self._all_canvases()[0].zoom_box_width()
+        blocked = self.zoom_box_width_spin.blockSignals(True)
+        self.zoom_box_width_spin.setValue(width)
+        self.zoom_box_width_spin.blockSignals(blocked)
+        if save:
+            self._ui_settings["zoom_box_width"] = width
+            self._save_ui_settings()
+
     def _on_crosshair_colour_clicked(self) -> None:
         color, width = self._all_canvases()[0].crosshair_style()
         picked = QColorDialog.getColor(
@@ -7814,6 +7866,8 @@ class MainWindow(QMainWindow):
         # skips non-1D entries and reports them as such).
         two_d_rows_and_candidates = [(row, c) for row, c in rows_and_candidates if c.ndim == 2]
         self.compare_2d_controls.setVisible(bool(two_d_rows_and_candidates))
+        all_2d = bool(rows_and_candidates) and len(rows_and_candidates) == len(two_d_rows_and_candidates)
+        self.compare_panels_controls.setVisible(self.layout_mode_combo.currentIndex() >= 3 and not all_2d)
         # Every checked entry a 2D (one or more): overlay or side-by-side
         # panels, with insets -- see _refresh_compare_2d. A single 2D is
         # drawn too, so an inset can be put on one spectrum.
@@ -7864,7 +7918,8 @@ class MainWindow(QMainWindow):
         bits.extend(self._compare_scaling_notes)
         self.compare_status_label.setText(" ".join(bits))
 
-        mode = ("stack", "overlay", "heatmap")[self.layout_mode_combo.currentIndex()]
+        mode = ("stack", "overlay", "heatmap",
+                "panels_row", "panels_column", "panels_grid")[self.layout_mode_combo.currentIndex()]
 
         # Rendering a "Stacked" Compare view is one subplot per
         # spectrum -- fine for a typical handful, but a pseudo-2D
@@ -7884,6 +7939,10 @@ class MainWindow(QMainWindow):
 
         if mode == "heatmap":
             self._show_compare_heatmap(plot_spectra, plot_rows, norm_mode, switch_tab)
+            return
+        if mode.startswith("panels_"):
+            self._show_compare_panels(plot_spectra, plot_rows, norm_mode, mode.split("_", 1)[1],
+                                      switch_tab)
             return
 
         try:
@@ -7908,6 +7967,34 @@ class MainWindow(QMainWindow):
             self._on_compare_list_current_row_changed(self.compare_list.currentRow())
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot comparison", str(exc))
+
+    def _show_compare_panels(self, spectra: list, rows: list[int], norm_mode: str, layout: str,
+                             switch_tab: bool) -> None:
+        """Compare ▸ Layout ▸ Panels: the checked 1D spectra as separate
+        panels in a row, column or grid, grouped as the Panels table says.
+        Drawn by :func:`opennmr.notebook.compare_panels.plot_compare_panels`
+        -- the function a notebook calls."""
+        controls = self.compare_panels_controls
+        entries = [self.compare_list.item(row).data(Qt.ItemDataRole.UserRole) for row in rows]
+        keys = [repr(tuple(entry)) for entry in entries]
+        names = [self.compare_list.item(row).text() for row in rows]
+        controls.set_spectra(keys, names)
+        groups = controls.groups()
+        try:
+            self._compare_series_entries = dict(zip(keys, (tuple(e) for e in entries)))
+            self.compare_canvas.show_compare_panels(
+                spectra, groups, layout=layout, ncols=controls.columns(),
+                linked=controls.linked(), link_y=controls.linked_y(),
+                normalize=(norm_mode == "max"), series_keys=keys, legend_labels=names)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Failed to plot comparison", str(exc))
+            return
+        self.compare_status_label.setText(
+            self.compare_status_label.text()
+            + f" {len(groups)} panel{'s' if len(groups) != 1 else ''}"
+            + (", zoom linked." if controls.linked() and len(groups) > 1 else "."))
+        if switch_tab:
+            self.canvas_tabs.setCurrentWidget(self.compare_canvas)
 
     #: What the heatmap's colour scale means, per Normalize choice --
     #: written on the colour bar, so the figure says it without the GUI.

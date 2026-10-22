@@ -41,6 +41,8 @@ from .one_d import (
     CPMGprocess, CPMGplot, cpmg_echo_layout, cpmg_to_spectrum,
 )
 
+from .compare_panels import plot_compare_panels, NMR1D_multi_plot
+
 from .two_d import (
     NMR2dimport, NMR2Dplotter, NMR2D_multi_plot, NMR2D_overlay_plot,
     NMR2d_get_trace, NMR2D_get_slices, prepare_trace_for_fit,
@@ -356,6 +358,8 @@ __all__ = [
     "NMR1dimport", "NMR1dplot", "NMR1dheatmap",
     "vocs_f1", "vocs_f2", "vocs_power", "pulse_to_w1", "apply_VOCS", "VOCSSum",
     "CPMGprocess", "CPMGplot", "cpmg_echo_layout", "cpmg_to_spectrum",
+    # compare_panels
+    "plot_compare_panels", "NMR1D_multi_plot",
     # two_d
     "NMR2dimport", "NMR2Dplotter", "NMR2D_multi_plot", "NMR2D_overlay_plot",
     "NMR2d_get_trace", "NMR2D_get_slices", "prepare_trace_for_fit",
