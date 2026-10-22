@@ -103,3 +103,14 @@ def test_dspfvs_zero_with_a_recorded_group_delay_is_still_corrected():
 def test_other_unknown_dspfvs_values_still_raise():
     with pytest.raises(ValueError, match="DSPFVS"):
         df.remove_digital_filter({"acqus": {"DECIM": 24, "DSPFVS": 9, "GRPDLY": 0}}, np.zeros(64, complex))
+
+
+def test_group_delay_is_zero_without_bruker_dsp():
+    """DSPFVS <= 0: no DSP firmware, as TopSpin's vconv writes for
+    converted Varian data (DSPFVS 0, GRPDLY -1, a nominal DECIM). Used
+    to raise "DSPFVS 0.0 is not in the group-delay lookup table"."""
+    assert df.group_delay(decim=1680.0, dspfvs=0.0, grpdly=-1.0) == 0.0
+    assert df.group_delay(decim=1680.0, dspfvs=-1.0, grpdly=0.0) == 0.0
+    # A recorded GRPDLY still wins, as for every other DSPFVS (real
+    # DIGMOD=0 data in test_data records DSPFVS -1 with GRPDLY 67.97).
+    assert df.group_delay(decim=20.0, dspfvs=-1.0, grpdly=67.96875) == pytest.approx(67.96875)

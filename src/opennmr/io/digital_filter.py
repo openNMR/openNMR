@@ -18,7 +18,9 @@ is folded back onto the beginning.
 
 The delay comes from ``GRPDLY`` when the file records one; otherwise it
 is looked up by ``(DSPFVS, DECIM)`` in :data:`BRUKER_DSP_TABLE`.
-``DSPFVS >= 14`` needs no correction at all.
+``DSPFVS >= 14`` needs no correction at all, and nor does ``DSPFVS <=
+0``: no DSP firmware, as in data TopSpin's ``vconv`` converted from
+Varian (``DSPFVS = 0``, ``GRPDLY = -1``).
 
 **Agreement with nmrglue.** Byte-identical on synthetic data across
 all 37 real parameter combinations and all three modes (102
@@ -109,10 +111,12 @@ def group_delay(decim: float, dspfvs: float, grpdly: float = 0.0) -> float:
 
     ``GRPDLY`` wins whenever the file records a usable one (> 0);
     otherwise the ``(DSPFVS, DECIM)`` table applies, and ``DSPFVS >=
-    14`` means no correction is needed."""
+    14`` means no correction is needed. ``DSPFVS <= 0`` means no DSP
+    firmware at all (data converted from another vendor), so there is
+    no Bruker filter and no delay."""
     if grpdly > 0:
         return float(grpdly)
-    if dspfvs >= 14:
+    if dspfvs <= 0 or dspfvs >= 14:
         return 0.0
     if dspfvs not in BRUKER_DSP_TABLE:
         raise ValueError(f"DSPFVS {dspfvs} is not in the group-delay lookup table.")

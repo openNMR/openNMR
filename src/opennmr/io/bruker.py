@@ -684,6 +684,34 @@ def _read_procs(datapath: str, procno: int, proc2: bool = False) -> dict:
     return parse_jcampdx_params(os.path.join(datapath, "pdata", str(procno), filename))
 
 
+def _recorded_reverse(procs: dict) -> bool:
+    """Whether ``procs`` asks TopSpin to flip the spectrum after the
+    Fourier transform (``REVERSE = yes``).
+
+    TopSpin's ``vconv`` sets it on every Varian dataset it converts: it
+    copies the Varian FID unchanged (point for point, checked on real
+    data), and a Varian FID has the opposite quadrature sense to a
+    Bruker one, so TopSpin's normal transform comes out mirrored and
+    ``REVERSE`` turns it back. :func:`read_1d` honours it by skipping
+    the conjugation it applies to Bruker FIDs, which gives the same
+    spectrum the Varian reader produces from the original data, with
+    the recorded ``PHC0``/``PHC1`` applying as they stand.
+
+    Measured against TopSpin's own ``1r`` for a converted 1H dataset
+    (real parts, same axis): this correlates 0.99991 at zero shift.
+    Flipping the transformed spectrum instead, which is what the
+    parameter's name suggests, reaches only 0.23; the conjugated
+    (pre-2026-10-22) read gives -0.04, i.e. mirrored. Not handled in
+    :func:`read_2d`: no converted 2D example to check against."""
+    value = procs.get("REVERSE")
+    if isinstance(value, str):
+        return value.strip().lower() in ("yes", "true", "1")
+    try:
+        return bool(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 #: The reference correction TopSpin has already applied, in Hz:
 #: ``(SF - BF1) * 1e6``, where ``BF1`` is the bare basic frequency and
 #: ``SF`` the referenced one. :func:`_ppm_hz_axis` folds this into
@@ -787,13 +815,17 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     # rather than splitting into two conventions that could drift.
     dic = read_acqus_files(path)
     data = _read_bruker_binary(os.path.join(path, "fid"), dic)
+    procs = _read_procs(path, procno)
     fid = _remove_digital_filter(dic, data).astype(np.complex128)
-    fid = np.conj(fid)  # see _CONJUGATE_QUADRATURE_NOTE below
+    # REVERSE = yes (TopSpin's vconv of Varian data): the FID is already
+    # in this project's orientation, so it is not conjugated. The
+    # recorded PHC0/PHC1 then apply unchanged. See _recorded_reverse.
+    if not _recorded_reverse(procs):
+        fid = np.conj(fid)  # see _CONJUGATE_QUADRATURE_NOTE below
     fid_raw = fid  # the truly raw FID -- see metadata.raw["fid_raw"]'s own comment below
     original_length = len(fid)  # NP: acquired points, before shift/align/LP/window/zero-fill
 
     acqus = dic["acqus"]
-    procs = _read_procs(path, procno)
 
     ns = float(acqus.get("NS", 1.0))
     obs = float(acqus.get("BF1"))

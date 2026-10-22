@@ -949,3 +949,58 @@ def test_peek_falls_back_to_si_when_acqu2s_has_no_td(tmp_path):
     """A malformed/incomplete parameter set should degrade, not raise."""
     expt = _write_2d_params(tmp_path, nuc2="off", td2=0, si2=8)
     assert bruker.peek(str(expt))["shape"] == (8, 64)
+
+
+# ============================================================
+# Varian data converted by TopSpin's vconv
+# ============================================================
+
+@pytest.mark.parametrize("value, expected", [
+    ("yes", True), ("no", False), ("TRUE", True), (1.0, True), (0.0, False), (None, False),
+])
+def test_recorded_reverse_reads_the_procs_flag(value, expected):
+    procs = {} if value is None else {"REVERSE": value}
+    assert bruker._recorded_reverse(procs) is expected
+
+
+_VCONV = os.path.join("test_data", "varian_vconv")
+_VCONV_BRUKER = os.path.join(_VCONV, "EMIM_Leo_1p5_27Al_071119.fidconv", "1")
+_VCONV_VARIAN = os.path.join(_VCONV, "EMIM_Leo_1p5_27Al_071119.fid")
+
+
+@pytest.mark.skipif(not os.path.isdir(_VCONV), reason="needs a vconv-converted Varian dataset")
+@pytest.mark.filterwarnings("ignore:DSPFVS is 0:UserWarning")
+def test_vconv_converted_varian_data_reads_like_topspin_and_like_the_original():
+    """A 1H experiment (despite its folder name) and TopSpin's vconv
+    conversion of it, which records DSPFVS 0, GRPDLY -1 and REVERSE yes.
+    Before 2026-10-22 the conversion failed to load ("DSPFVS 0.0 is not
+    in the group-delay lookup table"), and with that fixed it still came
+    out mirrored, because REVERSE was ignored."""
+    from opennmr import io
+    from opennmr.io import varian_binary
+
+    # The conversion is the Varian FID itself, untouched by the filter step.
+    dic = bruker.read_acqus_files(_VCONV_BRUKER)
+    converted_fid = bruker._remove_digital_filter(
+        dic, bruker._read_bruker_binary(os.path.join(_VCONV_BRUKER, "fid"), dic)).ravel()
+    _, varian_fid = varian_binary.read_fid(os.path.join(_VCONV_VARIAN, "fid"))
+    varian_fid = np.asarray(varian_fid).ravel()
+    np.testing.assert_allclose(converted_fid[:varian_fid.size], varian_fid,
+                               rtol=0, atol=1e-12 * np.abs(varian_fid).max())
+
+    converted = io.load(_VCONV_BRUKER, vendor="bruker")
+    ppm = np.asarray(converted.axes[0].ppm)
+    real = np.real(np.asarray(converted.data))
+
+    # Matches TopSpin's own processing of the same data (real parts, same axis).
+    topspin = bruker.read_1d_processed(_VCONV_BRUKER)
+    np.testing.assert_allclose(ppm, np.asarray(topspin.axes[0].ppm), atol=1e-6)
+    reference = np.real(np.asarray(topspin.data))
+    a, b = real - real.mean(), reference - reference.mean()
+    assert np.dot(a, b) / np.linalg.norm(a) / np.linalg.norm(b) > 0.999
+
+    # And puts the largest peak where the Varian reader does from the original.
+    original = io.load(_VCONV_VARIAN, vendor="varian")
+    original_ppm = np.asarray(original.axes[0].ppm)
+    assert ppm[np.argmax(np.abs(np.asarray(converted.data)))] == pytest.approx(
+        original_ppm[np.argmax(np.abs(np.asarray(original.data)))], abs=0.002)

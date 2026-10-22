@@ -14,18 +14,21 @@ this project's own -- no ``nmrglue``. It is pinned by a test asserting
 meet: a subtle error in header offsets or real/imaginary interleaving
 produces a plausible-looking but wrong spectrum rather than a crash.
 
-**Axis-referencing caveat**: the ppm axis below treats Varian's ``tof``
-(transmitter offset frequency) the same way :mod:`opennmr.io.xpulse`
-treats X-Pulse's ``$O1`` -- both are "how far the transmitter is
-offset from the reference frequency," the same physical quantity --
-for consistency with this project's other two vendor readers, rather
-than nmrglue's own ``guess_udic``/``unit_conversion`` heuristics (which
-returned unusable placeholder values -- 999.99 for every field -- when
-tried against this project's own real test data). This has *not* been
-cross-checked against an independently known chemical shift, only
-confirmed to produce a single, plausible-looking peak on real
-``test_data/varian_1d`` data -- treat shift referencing with some
-caution until that's done (see ``TODO.md``).
+**Shift referencing** (:func:`_ppm_axis`) follows VnmrJ's own
+definition: the spectrum is centred on ``sfrq`` and 0 ppm sits at
+``reffrq``. ``sfrq`` is the transmitter frequency and *already
+includes* ``tof``, so ``tof`` plays no part. Until 2026-10-22 it was
+subtracted a second time, which moved every spectrum by
+``-tof/sfrq`` ppm: -155.6 ppm on a 27Al spectrum with ``tof = 20 kHz``,
+-1.0 ppm on 1H with ``tof = 499.8 Hz``. ``rfl``/``rfp`` (VnmrJ's
+reference-line position and value) are not read because ``reffrq``
+already encodes them: VnmrJ sets ``reffrq = sfrq - (sw/2 - rfl +
+rfp)/1e6``, and the two agree to 1e-7 ppm on real data. ``setref``
+derives ``reffrq`` from the lock (``H1reffrq`` times the nucleus's
+IUPAC Xi ratio), so this is lock-based referencing. Checked against
+known 27Al shifts (AlCl4-/Al2Cl7- at 103/97 ppm, pinned by
+``tests/test_varian.py``) and against TopSpin's own ``vconv``
+conversion of the same data.
 """
 
 from __future__ import annotations
@@ -70,6 +73,19 @@ def _procpar_value(procpar: dict, key: str, default=None, cast=float):
         return default
 
 
+def _ppm_axis(freq_hz: np.ndarray, sfrq_hz: float, reffrq_hz: float) -> np.ndarray:
+    """ppm for each point of a spectrum whose ``freq_hz`` is the
+    offset from the spectrum's centre, as :func:`opennmr.processing.ft.
+    fft_spectrum` returns it.
+
+    VnmrJ's definition: the centre is at ``sfrq`` and 0 ppm at
+    ``reffrq``, so a point sits at ``sfrq + freq_hz`` and its shift is
+    measured from ``reffrq``, in units of ``reffrq``. ``tof`` is
+    deliberately absent -- ``sfrq`` already includes it (see this
+    module's docstring)."""
+    return (np.asarray(freq_hz) + (sfrq_hz - reffrq_hz)) / reffrq_hz * 1e6
+
+
 # ============================================================
 # 1D
 # ============================================================
@@ -110,7 +126,6 @@ def read_1d(path: str, mass: float = 1.0,
 
     sfrq_hz = _procpar_value(procpar, "sfrq", default=1.0) * 1e6  # observed freq
     reffrq_hz = _procpar_value(procpar, "reffrq", default=sfrq_hz / 1e6) * 1e6  # ppm=0 reference
-    tof = _procpar_value(procpar, "tof", default=0.0)  # transmitter offset, Hz
     nucleus = _normalize_nucleus(_procpar_value(procpar, "tn", default=None, cast=str))
     ns = _procpar_value(procpar, "nt", default=1.0)
     np_points = _procpar_value(procpar, "np", default=2 * len(fid), cast=int) // 2
@@ -134,7 +149,7 @@ def read_1d(path: str, mass: float = 1.0,
         fid = fid[:np_points]
 
     freq_hz, spectrum = processing_ft.fft_spectrum(fid, dt)
-    freq_ppm = (freq_hz - tof - (reffrq_hz - sfrq_hz)) / sfrq_hz * 1e6
+    freq_ppm = _ppm_axis(freq_hz, sfrq_hz, reffrq_hz)
 
     if autophase:
         if phase_mode == "joint":
@@ -165,7 +180,10 @@ def read_1d(path: str, mass: float = 1.0,
         nucleus=nucleus,
         sfo1=sfrq_hz / 1e6,
         bf1=reffrq_hz / 1e6,
-        o1=tof,
+        # Centre relative to bf1, so sfo1 = bf1 + o1 (TopSpin's vconv
+        # stores O1 the same way). Not ``tof``: that is relative to
+        # VnmrJ's own base frequency, which no field here records.
+        o1=sfrq_hz - reffrq_hz,
         ns=ns,
         source_path=path,
         probe=_procpar_value(procpar, "probe", default=None, cast=str),
@@ -250,7 +268,6 @@ def read_2d(path: str, mass: float = 1.0, pseudo_2d: bool | None = None,
 
     sfrq_hz = _procpar_value(procpar, "sfrq", default=1.0) * 1e6
     reffrq_hz = _procpar_value(procpar, "reffrq", default=sfrq_hz / 1e6) * 1e6
-    tof = _procpar_value(procpar, "tof", default=0.0)
     nucleus = _normalize_nucleus(_procpar_value(procpar, "tn", default=None, cast=str))
     ns = _procpar_value(procpar, "nt", default=1.0)
 
@@ -299,7 +316,7 @@ def read_2d(path: str, mass: float = 1.0, pseudo_2d: bool | None = None,
         freq_hz, spec_row = processing_ft.fft_spectrum(row, dt)
         spectrum_rows.append(spec_row)
     spectrum = np.array(spectrum_rows)
-    freq_ppm = (freq_hz - tof - (reffrq_hz - sfrq_hz)) / sfrq_hz * 1e6
+    freq_ppm = _ppm_axis(freq_hz, sfrq_hz, reffrq_hz)
 
     if autophase:
         # Phase against the summed (all-rows) spectrum, then apply the
@@ -331,7 +348,10 @@ def read_2d(path: str, mass: float = 1.0, pseudo_2d: bool | None = None,
         nucleus=nucleus,
         sfo1=sfrq_hz / 1e6,
         bf1=reffrq_hz / 1e6,
-        o1=tof,
+        # Centre relative to bf1, so sfo1 = bf1 + o1 (TopSpin's vconv
+        # stores O1 the same way). Not ``tof``: that is relative to
+        # VnmrJ's own base frequency, which no field here records.
+        o1=sfrq_hz - reffrq_hz,
         ns=ns,
         source_path=path,
         pseudo_2d=True,

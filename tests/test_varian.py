@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import nmrglue as ng
 import pytest
@@ -188,6 +190,78 @@ def test_read_1d_raises_without_sw(tmp_path):
     path = _write_varian_1d(tmp_path, n=8, sw=0.0)
     with pytest.raises(ValueError):
         varian.read_1d(path, autophase=False)
+
+
+# ============================================================
+# Shift referencing
+#
+# VnmrJ centres the spectrum on sfrq and puts 0 ppm at reffrq; sfrq
+# already includes tof. Until 2026-10-22 tof was subtracted a second
+# time, moving every spectrum by -tof/sfrq ppm.
+# ============================================================
+
+#: A real 27Al acquisition's frequencies (EMIM chloroaluminate,
+#: test_data/varian_27Al): sfrq, reffrq (MHz), tof, sw (Hz). VnmrJ puts
+#: this spectrum's centre at 150.0 ppm.
+_AL27_FREQS = dict(sfrq=130.2444175, reffrq=130.22488377, tof=20266.1, sw=65093.5720098)
+_AL27_CENTRE_PPM = 150.0
+
+
+def _expected_ppm(hz, sfrq, reffrq):
+    """VnmrJ's axis, written out independently of the reader."""
+    return (np.asarray(hz) + (sfrq - reffrq) * 1e6) / reffrq
+
+
+def test_read_1d_ppm_axis_is_centred_on_sfrq_and_measured_from_reffrq(tmp_path):
+    path = _write_varian_1d(tmp_path, n=64, tn="Al27", **_AL27_FREQS)
+    spectrum = varian.read_1d(path, autophase=False)
+    axis = spectrum.axes[0]
+
+    np.testing.assert_allclose(
+        axis.ppm, _expected_ppm(axis.hz, _AL27_FREQS["sfrq"], _AL27_FREQS["reffrq"]), rtol=0, atol=1e-9)
+    assert axis.ppm[np.argmin(np.abs(axis.hz))] == pytest.approx(_AL27_CENTRE_PPM, abs=0.01)
+    # sfo1 = bf1 + o1, as TopSpin's own vconv conversion stores it.
+    assert spectrum.metadata.o1 == pytest.approx((_AL27_FREQS["sfrq"] - _AL27_FREQS["reffrq"]) * 1e6)
+    assert spectrum.metadata.bf1 + spectrum.metadata.o1 / 1e6 == pytest.approx(spectrum.metadata.sfo1)
+
+
+def test_read_1d_ppm_axis_does_not_depend_on_tof(tmp_path):
+    """The regression itself: the same sfrq/reffrq must give the same
+    axis whatever tof says, because sfrq already includes it."""
+    no_offset = varian.read_1d(
+        _write_varian_1d(tmp_path, sfrq=100.001, reffrq=100.0, tof=0.0, name="a.fid"), autophase=False)
+    offset = varian.read_1d(
+        _write_varian_1d(tmp_path, sfrq=100.001, reffrq=100.0, tof=20000.0, name="b.fid"), autophase=False)
+    np.testing.assert_allclose(no_offset.axes[0].ppm, offset.axes[0].ppm, rtol=0, atol=1e-12)
+
+
+def test_read_2d_ppm_axis_matches_the_1d_definition(tmp_path):
+    path = _write_varian_2d(tmp_path, ni=3, n_direct=8, tn="Al27", **_AL27_FREQS)
+    spectrum = varian.read_2d(path, autophase=False)
+    axis = spectrum.axes[1]
+
+    np.testing.assert_allclose(
+        axis.ppm, _expected_ppm(axis.hz, _AL27_FREQS["sfrq"], _AL27_FREQS["reffrq"]), rtol=0, atol=1e-9)
+    assert axis.ppm[np.argmin(np.abs(axis.hz))] == pytest.approx(_AL27_CENTRE_PPM, abs=0.01)
+    assert spectrum.metadata.o1 == pytest.approx((_AL27_FREQS["sfrq"] - _AL27_FREQS["reffrq"]) * 1e6)
+
+
+_AL27_EMIM = "test_data/varian_27Al/EMIM_Leo_1p1_27Al_071119.fid"
+
+
+@pytest.mark.skipif(not os.path.isdir(_AL27_EMIM), reason=f"{_AL27_EMIM} not present")
+def test_real_27al_peaks_land_at_their_known_shifts():
+    """EMIM chloroaluminate ionic liquid, 27Al at 11.7 T, lock-referenced
+    in VnmrJ to Al(NO3)3/D2O (``tnref``). Its two peaks are known to sit
+    at about 103 and 97 ppm (AlCl4- and Al2Cl7-). With tof (20.3 kHz)
+    subtracted twice they came out at -52.6 and -58.5 ppm."""
+    spectrum = io.load(_AL27_EMIM, vendor="varian")
+    ppm = np.asarray(spectrum.axes[0].ppm)
+    magnitude = np.abs(np.asarray(spectrum.data))
+
+    assert ppm[np.argmax(magnitude)] == pytest.approx(103.0, abs=0.3)
+    window = (ppm > 95.0) & (ppm < 99.0)
+    assert ppm[window][np.argmax(magnitude[window])] == pytest.approx(97.1, abs=0.3)
 
 
 # ============================================================
