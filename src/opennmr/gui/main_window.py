@@ -1446,7 +1446,9 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.open_experiments_action)
         view_menu.addSeparator()
         pan_action = QAction("&Pan Mode", self)
-        pan_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        # Ctrl+Shift+P (Cmd+Shift+P on macOS) now opens the pulse sequence, as
+        # explicitly requested (2026-10-22); Pan Mode keeps a key of its own.
+        pan_action.setShortcut(QKeySequence("Ctrl+Alt+P"))
         pan_action.setToolTip("Drag to pan the spectrum.")
         pan_action.triggered.connect(lambda: self._set_navigation_mode("pan"))
         view_menu.addAction(pan_action)
@@ -1456,6 +1458,14 @@ class MainWindow(QMainWindow):
         zoom_action.setToolTip("Drag a rectangle to zoom into it.")
         zoom_action.triggered.connect(lambda: self._set_navigation_mode("zoom"))
         view_menu.addAction(zoom_action)
+
+        self.pulse_sequence_menu_action = QAction("Pulse &Sequence…", self)
+        self.pulse_sequence_menu_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        self.pulse_sequence_menu_action.setToolTip(
+            "Show the pulse sequence of the selected experiment (also: right-click it, or "
+            "double-click the programme name at the bottom right).")
+        self.pulse_sequence_menu_action.triggered.connect(lambda _c=False: self._show_pulse_sequence())
+        view_menu.addAction(self.pulse_sequence_menu_action)
 
         toggle_nav_action = QAction("&Toggle Pan/Zoom", self)
         # Ctrl+Z (Cmd+Z on macOS) as explicitly requested. There is no
@@ -7980,12 +7990,14 @@ class MainWindow(QMainWindow):
         names = [self.compare_list.item(row).text() for row in rows]
         controls.set_spectra(keys, names)
         groups = controls.groups()
+        controls.set_panel_count(len(groups))
         try:
             self._compare_series_entries = dict(zip(keys, (tuple(e) for e in entries)))
             self.compare_canvas.show_compare_panels(
                 spectra, groups, layout=layout, ncols=controls.columns(),
                 linked=controls.linked(), link_y=controls.linked_y(),
-                normalize=(norm_mode == "max"), series_keys=keys, legend_labels=names)
+                normalize=(norm_mode == "max"), series_keys=keys, legend_labels=names,
+                axis_labels=controls.axis_labels(), axis_styles=controls.axis_styles())
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot comparison", str(exc))
             return

@@ -1231,3 +1231,255 @@ def test_one_export_dimension_keeps_the_proportions(window, tmp_path):
     d.save_figure(str(out), dpi=100, width=5.0, height=0)
     w, h = Image.open(out).size
     assert w == 500 and h > 50
+
+
+# ======================================================================
+# 2026-10-22: drag zooms by default (pan by setting), home resets after
+# scroll-zoom, Ctrl+Shift+P opens the viewer
+# ======================================================================
+
+def _mouse_px(fig, name, ax, px, py, button=1):
+    from matplotlib.backend_bases import MouseEvent
+    fig.canvas.callbacks.process(name, MouseEvent(name, fig.canvas, float(px), float(py), button=button))
+
+
+def _scroll_px(fig, ax, px, py, button):
+    from matplotlib.backend_bases import MouseEvent
+    fig.canvas.callbacks.process("scroll_event", MouseEvent("scroll_event", fig.canvas, float(px),
+                                                            float(py), button=button))
+
+
+def _drag_fig():
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg())
+    fig.canvas.draw()
+    return fig, ax
+
+
+def _px(ax, x, y):
+    return ax.transData.transform((x, y))
+
+
+def test_drag_zoom_mode_draws_a_box_and_zooms_into_it():
+    import matplotlib.pyplot as plt
+    fig, ax = _drag_fig()
+    ps.enable_zoom_pan(fig, drag_mode="zoom")
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    a = _px(ax, x0 + 0.2 * (x1 - x0), y0 + 0.2 * (y1 - y0))
+    b = _px(ax, x0 + 0.6 * (x1 - x0), y0 + 0.7 * (y1 - y0))
+    _mouse_px(fig, "button_press_event", ax, *a)
+    _mouse_px(fig, "motion_notify_event", ax, *b)
+    assert any(getattr(p, "_opennmr_zoom_box", False) for p in ax.patches)
+    _mouse_px(fig, "button_release_event", ax, *b)
+    assert not any(getattr(p, "_opennmr_zoom_box", False) for p in ax.patches)
+    nx0, nx1 = ax.get_xlim()
+    assert nx1 - nx0 == pytest.approx(0.4 * (x1 - x0), rel=0.05)
+    plt.close(fig)
+
+
+def test_a_plain_click_in_zoom_mode_does_not_zoom():
+    import matplotlib.pyplot as plt
+    fig, ax = _drag_fig()
+    ps.enable_zoom_pan(fig, drag_mode="zoom")
+    before = (ax.get_xlim(), ax.get_ylim())
+    p = _px(ax, *[sum(v) / 2 for v in (ax.get_xlim(), ax.get_ylim())])
+    _mouse_px(fig, "button_press_event", ax, *p)
+    _mouse_px(fig, "button_release_event", ax, *p)
+    assert (ax.get_xlim(), ax.get_ylim()) == before
+    plt.close(fig)
+
+
+def test_drag_mode_can_change_while_the_figure_is_open():
+    import matplotlib.pyplot as plt
+    fig, ax = _drag_fig()
+    mode = {"m": "pan"}
+    ps.enable_zoom_pan(fig, drag_mode=lambda: mode["m"])
+    x0, x1 = ax.get_xlim()
+    mid = [sum(ax.get_xlim()) / 2, sum(ax.get_ylim()) / 2]
+    a = _px(ax, *mid)
+    b = a + [60, 0]
+    _mouse_px(fig, "button_press_event", ax, *a)
+    _mouse_px(fig, "motion_notify_event", ax, *b)
+    _mouse_px(fig, "button_release_event", ax, *b)
+    assert ax.get_xlim() != (x0, x1) and (ax.get_xlim()[1] - ax.get_xlim()[0]) == pytest.approx(x1 - x0)
+    plt.close(fig)
+
+
+def test_window_drag_defaults_to_zoom_and_follows_the_setting(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    window.canvas_tabs.setCurrentIndex(0)
+    ax = d.figure.axes[0]
+    d.canvas.draw()
+    x0, x1 = ax.get_xlim()
+    a = _px(ax, x0 + 0.2 * (x1 - x0), sum(ax.get_ylim()) / 2)
+    b = a + [120, 40]
+    window._ui_settings["drag_mode"] = "zoom"
+    _mouse_px(d.figure, "button_press_event", ax, *a)
+    _mouse_px(d.figure, "button_release_event", ax, *b)
+    assert ax.get_xlim()[1] - ax.get_xlim()[0] < (x1 - x0) * 0.9
+    d.reset_view()
+    window._ui_settings["drag_mode"] = "pan"
+    _mouse_px(d.figure, "button_press_event", ax, *a)
+    _mouse_px(d.figure, "motion_notify_event", ax, *b)
+    _mouse_px(d.figure, "button_release_event", ax, *b)
+    assert ax.get_xlim()[1] - ax.get_xlim()[0] == pytest.approx(x1 - x0)
+
+
+def test_the_home_button_resets_after_scrolling(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    ax = d.figure.axes[0]
+    d.canvas.draw()
+    full = (ax.get_xlim(), ax.get_ylim())
+    p = _px(ax, *[sum(v) / 2 for v in full])
+    for _ in range(4):
+        _scroll_px(d.figure, ax, *p, "up")
+    assert ax.get_xlim() != full[0]
+    d.toolbar.home()
+    assert (ax.get_xlim(), ax.get_ylim()) == full
+
+
+def test_ctrl_shift_p_opens_the_pulse_sequence_and_pan_mode_moved(window, tmp_path):
+    from PySide6.QtGui import QKeySequence
+    assert window.pulse_sequence_menu_action.shortcut() == QKeySequence("Ctrl+Shift+P")
+    pans = [a for a in window.findChildren(type(window.pulse_sequence_menu_action))
+            if a.text().replace("&", "") == "Pan Mode"]
+    assert pans and pans[0].shortcut() == QKeySequence("Ctrl+Alt+P")
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path))
+    window.pulse_sequence_menu_action.trigger()
+    d = window._pulse_sequence_dialog
+    assert d.isVisible() and d.sequence is not None
+
+
+# ======================================================================
+# 2026-10-22: (center ...) blocks over several lines, sequences inside a
+# channel's group, preprocessor line markers, the mc command, and the phase
+# tables after "exit"
+# ======================================================================
+
+CENTER_PP = '''\
+# 1 "/opt/topspin/exp/stan/nmr/lists/pp/user/cp-J-HMQC_.tI"
+# 1 "<built-in>"
+;Avance III version
+"d8 = (l23*(1.0s/cnst31)-p6/2)"
+define delay MCWRK
+define delay MCREST
+"MCWRK = 0.333333*30m"
+"MCREST = 30m - 30m"
+# 50 "/opt/topspin/exp/stan/nmr/lists/pp/user/cp-J-HMQC_.tI"
+1 ze
+LBLAV, MCWRK
+  1m fq=cnst31:f1
+2 MCWRK  do:f2
+LBLSTS1, MCWRK
+LBLF1, MCWRK
+  MCREST
+3 d20
+	(p4 pl4 ph4):f2
+	d20
+lo to 3 times l20
+4 d1
+  (p3 pl2 ph1):f2
+5 d6
+	(center
+  (p8 pl3 ph8 d0 p8 pl3 ph9):f3
+  (d8 p6 pl6 ph6 d9):f1
+  )
+	d7
+  1u
+  go=2 ph31
+  1m do:f2
+# 1 "mc_line 72 file /x/y exp. mc cmd. in line"
+  MCWRK  wr #0 if #0 zd ip8
+  lo to LBLSTS1 times 2
+exit
+
+ph4= 0
+ph31= 0 2 2 0 2 0 0 2
+      0 2 2 0 2 0 0 2
+'''
+CENTER_CONSTS = {"p4": 20.0, "p3": 10.0, "p6": 10.0, "p8": 4.6, "d0": 90.8e-6, "d8": 95e-6,
+                 "d6": 300e-6, "d7": 300e-6, "d1": 2.0, "d20": 10e-6, "cnst31": 20000.0, "aq": 0.05}
+
+
+def _center_seq():
+    return parse_pulse_sequence(CENTER_PP, "bruker", constants=CENTER_CONSTS)[0] \
+        if isinstance(parse_pulse_sequence(CENTER_PP, "bruker"), list) \
+        else parse_pulse_sequence(CENTER_PP, "bruker", constants=CENTER_CONSTS)
+
+
+def _by(seq, label, channel=None):
+    return [e for e in seq.events if (e.label or e.expr) == label and (channel is None or e.channel == channel)]
+
+
+def test_a_centre_block_over_several_lines_is_read_not_shown_as_a_pulse_called_cente():
+    seq = _center_seq()
+    assert not [e for e in seq.events if "cente" in (e.label + e.expr).lower()]
+    assert not [e for e in seq.events if e.kind == "hard" and e.label in ("center", "")]
+
+
+def test_the_centred_groups_keep_every_pulse_and_delay_inside_them():
+    seq = _center_seq()
+    assert len(_by(seq, "p8", "f3")) == 2 and len(_by(seq, "d0", "f3")) == 1
+    d8, p6, d9 = _by(seq, "d8")[0], _by(seq, "p6")[0], _by(seq, "d9")[0]
+    assert (d8.channel, p6.channel, d9.channel) == ("f1", "f1", "f1")
+    assert d8.t1 == pytest.approx(p6.t0) and p6.t1 == pytest.approx(d9.t0)
+    assert _by(seq, "p6")[0].phase == "ph6"
+
+
+def test_the_shorter_group_is_centred_on_the_longer_one():
+    seq = _center_seq()
+    p8s = sorted(_by(seq, "p8", "f3"), key=lambda e: e.t0)
+    f3_mid = 0.5 * (p8s[0].t0 + p8s[1].t1)
+    f1 = [e for e in seq.events if e.channel == "f1" and e.label in ("d8", "p6", "d9")]
+    f1_mid = 0.5 * (min(e.t0 for e in f1) + max(e.t1 for e in f1))
+    assert f3_mid == pytest.approx(f1_mid)
+
+
+def test_the_block_takes_the_time_of_its_longest_group():
+    seq = _center_seq()
+    d7 = _by(seq, "d7")[0]
+    d9 = _by(seq, "d9")[0]
+    assert d7.t0 == pytest.approx(max(d9.t1, max(e.t1 for e in _by(seq, "p8", "f3"))))
+
+
+def test_preprocessor_line_markers_are_not_delays():
+    seq = _center_seq()
+    texts = [e.expr for e in seq.events]
+    assert not any(t in ("50", "1", "72", '"mc_line', "#") for t in texts)
+
+
+def test_the_phase_tables_after_exit_are_not_delays():
+    seq = _center_seq()
+    assert max(e.t1 for e in seq.events) < 10.0
+    assert not [e for e in seq.events if e.expr in ("0", "2")]
+
+
+def test_the_mc_command_timing_is_one_delay_not_three():
+    seq = _center_seq()
+    mc = [e for e in seq.events if e.expr.startswith("mc:")]
+    assert mc and any(e.value == pytest.approx(0.03, rel=1e-3) for e in mc)
+    assert any(e.name == "30m" for e in mc)
+
+
+def test_a_delay_inside_a_channel_group_is_drawn_on_that_channels_line():
+    import matplotlib.pyplot as plt
+    seq = _center_seq()
+    fig, ax = ps.plot_pulse_sequence(seq, acquire_separate=True)
+    ys = {t.get_text(): t.get_position()[1] for t in ax.texts}
+    d0_y = next(y for txt, y in ys.items() if "d" in txt and "0" in txt and "20" not in txt)
+    d9_y = next(y for txt, y in ys.items() if "9" in txt)
+    assert d0_y < d9_y            # d0 sits on f3's line, below the f1 line d9 is on
+    plt.close(fig)
+
+
+def test_a_single_pulse_group_is_unchanged():
+    seq = parse_pulse_sequence("1 ze\n2 d1\n  (p1 ph1):f1 (p2 ph2):f2\n  go=2 ph31\nexit\n", "bruker")[0]
+    assert [(e.kind, e.channel, e.label) for e in seq.events if e.kind == "hard"] == \
+        [("hard", "f1", "p1"), ("hard", "f2", "p2")]
+    p1, p2 = seq.of_kind("hard")
+    assert p1.t0 == p2.t0

@@ -40,8 +40,9 @@ def test_brackets_style_is_fully_mathregular_and_bracketed():
 def test_slash_style_matches_the_older_manuscript_form():
     label = NUC_label("1H", x_unit="ppm", style="slash")
     _renders_as_valid_mathtext(label)
-    # δ italic like every quantity symbol (2026-10-17).
-    assert label == r"$\delta \,\, ({}^{1}$H) / ppm"
+    # δ italic like every quantity symbol (2026-10-17); the bracket and the
+    # mass number upright (2026-10-22).
+    assert label == r"$\delta \,\, \mathregular{(}{}^{\mathregular{1}}$H) / ppm"
     assert "(ppm)" not in label
 
 

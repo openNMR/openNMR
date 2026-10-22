@@ -414,7 +414,8 @@ def _draw_pulse_sequence(seq, ax, colors, show_pulse_names, show_delay_names, sh
         t = delay_text(e)
         est = text_width(t[1])
         xm = 0.5 * (lay.x0[e.uid] + lay.x1[e.uid])
-        ends = lane_ends.setdefault(lay.lane[e.uid] if style != "line" else 0, [-9e9, -9e9, -9e9])
+        ends = lane_ends.setdefault(lay.lane[e.uid] if style != "line" else e.channel,
+                                    [-9e9, -9e9, -9e9])
         level = next((k for k in range(3) if ends[k] <= xm - est / 2), ends.index(min(ends)))
         ends[level] = xm + est / 2
         delay_level[e.uid] = level
@@ -541,11 +542,14 @@ def _draw_pulse_sequence(seq, ax, colors, show_pulse_names, show_delay_names, sh
     if style == "line":
         # the name sits on the first channel's line, in the gap between pulses
         # (above the FID where a delay runs under the acquisition)
-        y0 = row_y[chans[0]]
         for e in shown_delays:
             t = delay_text(e)
+            # a delay written inside one channel's group (``(d8 p6 d9):f1``,
+            # ``(p8 d0 p8):f3``) sits on that channel's own line
+            y0 = row_y.get(e.channel, row_y[chans[0]])
             xm = 0.5 * (lay.x0[e.uid] + lay.x1[e.uid])
-            lift = (ha + 0.1) if any(a <= xm <= b for a, b in acq_spans) else 0.0
+            on_first = e.channel not in row_y or e.channel == chans[0]
+            lift = (ha + 0.1) if on_first and any(a <= xm <= b for a, b in acq_spans) else 0.0
             ax.text(xm, y0 + 0.12 + lift + 0.42 * delay_level.get(e.uid, 0), t[0], ha="center",
                     va="bottom", fontsize=fontsize, color=dcol, zorder=5)
             if show_values and e.value is not None and e.label:
@@ -635,13 +639,17 @@ def _fit_texts_inside_right_edge(ax, texts, pad_px: float = 6.0) -> None:
 # scrolling / zooming
 # ---------------------------------------------------------------------------
 
-def enable_zoom_pan(fig, *, factor: float = 1.25, busy=None, max_out: float = 1.6):
+def enable_zoom_pan(fig, *, factor: float = 1.25, busy=None, max_out: float = 1.6,
+                    drag_mode="pan"):
     """Let the mouse zoom and pan a pulse-sequence figure.
 
     * **scroll** zooms in / out under the cursor along the time axis;
       **Ctrl + scroll** zooms the vertical axis; **Shift + scroll** pans
       along time.
-    * **drag** (left button) pans; **double-click** returns to the full view.
+    * **drag** (left button) pans -- or, with ``drag_mode="zoom"``, draws a
+      box to zoom into (``drag_mode`` may be a function returning either,
+      so a setting can change it while the window is open); **double-click**
+      returns to the full view.
 
     The full view is the one :func:`plot_pulse_sequence` drew (it is kept on
     the axes), and zooming out never goes beyond ``max_out`` times it. Works
@@ -649,7 +657,11 @@ def enable_zoom_pan(fig, *, factor: float = 1.25, busy=None, max_out: float = 1.
     ``qt``) and is what the GUI's Pulse sequence window uses. ``busy`` is an
     optional callable returning True while another tool (a toolbar's own
     pan / zoom) owns the mouse. Returns a function that switches it off."""
-    state = {"drag": None}
+    state = {"drag": None, "box": None}
+
+    def mode():
+        m = drag_mode() if callable(drag_mode) else drag_mode
+        return "zoom" if m == "zoom" else "pan"
 
     def home(ax):
         return getattr(ax, "_opennmr_home_view", None) or (ax.get_xlim(), ax.get_ylim())
@@ -696,23 +708,51 @@ def enable_zoom_pan(fig, *, factor: float = 1.25, busy=None, max_out: float = 1.
             fig.canvas.draw_idle()
             return
         state["drag"] = (event.inaxes, event.x, event.y, event.inaxes.get_xlim(),
-                         event.inaxes.get_ylim())
+                         event.inaxes.get_ylim(), mode())
 
     def on_move(event):
         d = state["drag"]
         if d is None or event.x is None or (busy and busy()):
             return
-        ax, x0, y0, xlim, ylim = d
+        ax, x0, y0, xlim, ylim, how = d
+        if how == "zoom":
+            _draw_box(ax, x0, y0, event.x, event.y)
+            return
         inv = ax.transData.inverted()
         (a0, b0), (a1, b1) = inv.transform((x0, y0)), inv.transform((event.x, event.y))
         ax.set_xlim(xlim[0] - (a1 - a0), xlim[1] - (a1 - a0))
         ax.set_ylim(ylim[0] - (b1 - b0), ylim[1] - (b1 - b0))
         # the limits just changed, so the inverse used above is stale: re-anchor
-        state["drag"] = (ax, event.x, event.y, ax.get_xlim(), ax.get_ylim())
+        state["drag"] = (ax, event.x, event.y, ax.get_xlim(), ax.get_ylim(), "pan")
         fig.canvas.draw_idle()
 
-    def on_release(_event):
-        state["drag"] = None
+    def _draw_box(ax, x0, y0, x1, y1):
+        from matplotlib.patches import Rectangle
+        inv = ax.transData.inverted()
+        (a0, b0), (a1, b1) = inv.transform((x0, y0)), inv.transform((x1, y1))
+        box = state["box"]
+        if box is None:
+            box = Rectangle((0, 0), 0, 0, fill=False, edgecolor="#333333", linestyle="--",
+                            linewidth=1.0, zorder=100)
+            box._opennmr_zoom_box = True
+            ax.add_patch(box)
+            state["box"] = box
+        box.set_bounds(min(a0, a1), min(b0, b1), abs(a1 - a0), abs(b1 - b0))
+        fig.canvas.draw_idle()
+
+    def on_release(event):
+        d, box = state["drag"], state["box"]
+        state["drag"], state["box"] = None, None
+        if box is not None:
+            box.remove()
+        if d is not None and d[5] == "zoom" and event.x is not None:
+            ax, x0, y0 = d[0], d[1], d[2]
+            if abs(event.x - x0) > 5 and abs(event.y - y0) > 5:         # a click is not a box
+                inv = ax.transData.inverted()
+                (a0, b0), (a1, b1) = inv.transform((x0, y0)), inv.transform((event.x, event.y))
+                ax.set_xlim(min(a0, a1), max(a0, a1))
+                ax.set_ylim(min(b0, b1), max(b0, b1))
+        fig.canvas.draw_idle()
 
     cids = [fig.canvas.mpl_connect("scroll_event", on_scroll),
             fig.canvas.mpl_connect("button_press_event", on_press),

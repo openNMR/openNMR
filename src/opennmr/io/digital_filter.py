@@ -167,6 +167,17 @@ def remove_digital_filter(dic: dict, data: np.ndarray, truncate: bool = True,
         raise ValueError("acqus does not contain a DECIM parameter")
     if "DSPFVS" not in acqus:
         raise ValueError("acqus does not contain a DSPFVS parameter")
+    if float(acqus["DSPFVS"]) == 0 and float(acqus.get("GRPDLY", 0) or 0) <= 0:
+        # DSPFVS 0 and no group delay recorded: an acquisition with no
+        # digital filter (an older console, or parameters stripped by a
+        # conversion). Nothing to remove -- raising here made such data
+        # impossible to open (user report, 2026-10-22).
+        import warnings
+        warnings.warn(
+            "DSPFVS is 0 and GRPDLY is not recorded: treating the FID as having no digital "
+            "filter, so none is removed. If this acquisition did use one, the spectrum will "
+            "need a large first-order phase correction (PHC1).", UserWarning, stacklevel=2)
+        return np.array(data, copy=True)
     return rm_dig_filter(
         data, acqus["DECIM"], acqus["DSPFVS"], acqus.get("GRPDLY", 0),
         truncate_grpdly=truncate, post_proc=post_proc,

@@ -41,7 +41,8 @@ from ..core.spectrum import NMRSpectrum
 LAYOUTS = ("row", "column", "grid")
 
 __all__ = ["LAYOUTS", "ComparePanels", "PanelLink", "plot_compare_panels",
-           "grid_shape", "panel_groups", "draw_kept_fit_overlays"]
+           "grid_shape", "panel_groups", "draw_kept_fit_overlays", "apply_axis_styles",
+           "AXIS_STYLE_KEYS", "TICK_DIRECTIONS", "AXIS_LABEL_MODES"]
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +229,77 @@ def _spectrum_label(spectrum, fallback: str) -> str:
     return str(raw.get("display_label") or fallback)
 
 
+#: Per-panel axis options (``axis_styles``): every key is optional.
+AXIS_STYLE_KEYS = ("xlabel", "show_xlabel", "xlabel_fontsize", "tick_direction", "tick_length",
+                   "tick_width", "tick_labelsize", "minor_ticks", "num_ticks", "show_tick_labels",
+                   "spine_width")
+TICK_DIRECTIONS = ("in", "out", "inout")
+AXIS_LABEL_MODES = ("auto", "all", "bottom")
+
+
+def _style_for(axis_styles, k: int) -> dict:
+    """The options of panel ``k`` (0-based): the ``"all"`` entry, then the
+    panel's own on top. ``axis_styles`` is ``{k or "all": {...}}`` or a
+    list (one dict per panel; ``None`` for none)."""
+    if not axis_styles:
+        return {}
+    if isinstance(axis_styles, dict):
+        merged = dict(axis_styles.get("all") or {})
+        merged.update(axis_styles.get(k) or {})
+    else:
+        merged = dict(axis_styles[k] or {}) if k < len(axis_styles) else {}
+    unknown = set(merged) - set(AXIS_STYLE_KEYS)
+    if unknown:
+        raise ValueError(f"unknown axis option(s) {sorted(unknown)}; use {AXIS_STYLE_KEYS}")
+    if merged.get("tick_direction") not in (None, *TICK_DIRECTIONS):
+        raise ValueError(f"tick_direction must be one of {TICK_DIRECTIONS}")
+    return merged
+
+
+def apply_axis_styles(axes, axis_styles, fontsize: float = 12.0) -> None:
+    """Apply ``axis_styles`` (see :func:`plot_compare_panels`) to each of
+    ``axes``. Safe to call again after anything that restyles the ticks --
+    the GUI does, so its own tick defaults never override yours."""
+    from matplotlib.ticker import MaxNLocator
+    for k, ax in enumerate(axes):
+        st = _style_for(axis_styles, k)
+        if not st:
+            continue
+        kw = {}
+        for key, name in (("tick_direction", "direction"), ("tick_length", "length"),
+                          ("tick_width", "width"), ("tick_labelsize", "labelsize")):
+            if st.get(key) is not None:
+                kw[name] = st[key]
+        if kw:
+            ax.tick_params(axis="x", which="major", **kw)
+            minor = {n: v for n, v in kw.items() if n != "labelsize"}
+            if "length" in minor:
+                minor["length"] = minor["length"] / 2
+            if "width" in minor:
+                minor["width"] = minor["width"] * 0.75
+            if minor:
+                ax.tick_params(axis="x", which="minor", **minor)
+        if st.get("minor_ticks") is not None:
+            ax.minorticks_on() if st["minor_ticks"] else ax.minorticks_off()
+            if st["minor_ticks"] and kw:
+                ax.tick_params(axis="x", which="minor", direction=kw.get("direction", "in"))
+        if st.get("num_ticks"):
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=int(st["num_ticks"])))
+        if st.get("show_tick_labels") is not None:
+            ax.tick_params(axis="x", labelbottom=bool(st["show_tick_labels"]))
+        if st.get("spine_width") is not None:
+            ax.spines["bottom"].set_linewidth(st["spine_width"])
+        text = st.get("xlabel")
+        if text is not None:
+            ax.set_xlabel(text, fontsize=st.get("xlabel_fontsize") or fontsize)
+        elif st.get("xlabel_fontsize"):
+            ax.xaxis.label.set_fontsize(st["xlabel_fontsize"])
+        if st.get("show_xlabel") is False:
+            ax.set_xlabel("")
+        elif st.get("show_xlabel") and not ax.get_xlabel():
+            ax.set_xlabel(getattr(ax, "_opennmr_auto_xlabel", ""), fontsize=st.get("xlabel_fontsize") or fontsize)
+
+
 def _as_panels(panels) -> list:
     """Each panel -> ``{"spectra": [...], "title": ..., "labels": [...],
     "colors": [...]}``. A panel may be a spectrum, a list of them, or such a
@@ -275,7 +347,8 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
                         x_unit: str = "ppm", full_resolution: bool = False,
                         linewidth: float = 1.5, fontsize: float = 12.0, fig=None,
                         figsize=None, tight: bool = True, gap_below: float = 0.05,
-                        gap_above: float = 0.08, model_for=None) -> ComparePanels:
+                        gap_above: float = 0.08, model_for=None, axis_labels: str = "auto",
+                        axis_styles=None) -> ComparePanels:
     """Draw ``panels`` side by side (``layout="row"``), one above another
     (``"column"``) or in a grid (``"grid"``, ``ncols`` columns).
 
@@ -298,6 +371,19 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
         spectrum's own display name and a colour-blind-safe palette).
     legend
         Draw a legend in panels holding more than one trace.
+    axis_labels
+        Which panels carry a shift-axis label: ``"every"``/``"all"`` (each
+        panel has its own), ``"bottom"`` (only the bottom panel of each
+        column, as one shared axis), or ``"auto"`` (default): every panel
+        when the panels' axes read differently -- different nuclei -- and
+        the bottom ones when they all read the same.
+    axis_styles
+        Per-panel axis options, ``{panel: {...}}`` (0-based; ``"all"`` for
+        every panel; a list works too). Keys: ``xlabel`` (text, LaTeX
+        allowed; ``""`` hides it), ``show_xlabel``, ``xlabel_fontsize``,
+        ``tick_direction`` (``"in"``, ``"out"``, ``"inout"``), ``tick_length``,
+        ``tick_width``, ``tick_labelsize``, ``minor_ticks``, ``num_ticks``,
+        ``show_tick_labels``, ``spine_width``. See :func:`apply_axis_styles`.
     fig, figsize, tight
         Draw into an existing figure (the GUI does); ``tight`` runs
         ``fig.tight_layout()`` afterwards.
@@ -307,7 +393,13 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
     import matplotlib.pyplot as plt
     from ..plotting import apply_spine_style, apply_tick_style, plot_1d, qualitative_colors, safe_xlim
 
+    if axis_labels == "every":
+        axis_labels = "all"
+    if axis_labels not in AXIS_LABEL_MODES:
+        raise ValueError(f"axis_labels must be one of {AXIS_LABEL_MODES + ('every',)}, not {axis_labels!r}")
     spec = _as_panels(panels)
+    for k in range(len(spec)):
+        _style_for(axis_styles, k)                       # validate before drawing
     n = len(spec)
     nrows, ncols_ = grid_shape(n, layout, ncols)
     if fig is None:
@@ -321,6 +413,7 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
 
     xmins, xmaxs = [], []
     label_text = ""
+    label_texts = []
     for k, (ax, p) in enumerate(zip(axes, spec)):
         m = len(p["spectra"])
         pal = qualitative_colors(m)
@@ -352,6 +445,8 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
         apply_spine_style(ax, top=False, right=False, bottom=True, left=False)
         apply_tick_style(ax, axis="x", labelsize=fontsize * 0.85)
         ax.set_xlabel(label_text, fontsize=fontsize)
+        ax._opennmr_auto_xlabel = label_text
+        label_texts.append(label_text)
 
     # shift axes: the union of every panel's range when linked, each its own otherwise
     per_panel = []
@@ -378,11 +473,15 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
         ax.set_ylim(r[0] - gap_below * span, r[1] + gap_above * span)
         ax._opennmr_fitted_ylim = ax.get_ylim()
 
-    # only the bottom row of a grid / column carries the axis label
-    if layout in ("grid", "column"):
+    # shared-axis convention: only the bottom panel of each column carries the
+    # label -- unless the panels' axes read differently (different nuclei) or
+    # every panel was asked for, when each keeps its own
+    each = axis_labels == "all" or (axis_labels == "auto" and len(set(label_texts)) > 1)
+    if layout in ("grid", "column") and not each:
         for i, ax in enumerate(axes):
             if i + ncols_ < n:
                 ax.set_xlabel("")
+    apply_axis_styles(axes, axis_styles, fontsize)
     controller = PanelLink(axes, x=link, y=link_y)
     fig._opennmr_panel_link = controller            # the callbacks hold only weak references
     if tight:

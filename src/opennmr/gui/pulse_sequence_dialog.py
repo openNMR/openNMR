@@ -141,14 +141,21 @@ class PulseSequenceDialog(QDialog):
         diagram = QWidget()
         dl = QVBoxLayout(diagram)
         dl.setContentsMargins(0, 0, 0, 0)
-        self.toolbar = NavigationToolbar2QT(self.canvas, diagram)
+        dialog = self
+
+        class _Toolbar(NavigationToolbar2QT):
+            def home(self, *args):      # the house icon: the whole diagram, even after scroll / drag
+                dialog.reset_view()
+
+        self.toolbar = _Toolbar(self.canvas, diagram)
         dl.addWidget(self.toolbar)
         dl.addWidget(self.canvas, 1)
         # Scroll to zoom along time (Ctrl: vertical, Shift: pan), drag to pan,
         # double-click for the full view -- unless the toolbar's own pan /
         # zoom tool is active and owns the mouse.
         self._disable_zoom = self._ps.enable_zoom_pan(
-            self.figure, busy=lambda: bool(getattr(self.toolbar, "mode", "")))
+            self.figure, busy=lambda: bool(getattr(self.toolbar, "mode", "")),
+            drag_mode=lambda: "pan" if self._settings.get("drag_mode") == "pan" else "zoom")
         self.tabs.addTab(diagram, "Diagram")
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
@@ -244,7 +251,7 @@ class PulseSequenceDialog(QDialog):
 
         bottom = QHBoxLayout()
         self.note = QLabel("Schematic – not to scale: long delays are compressed so every "
-                           "pulse stays visible. Scroll to zoom, drag to pan, double-click to reset.")
+                           "pulse stays visible. Scroll to zoom; drag zooms into a box or pans (Settings ▸ Click and drag); double-click to reset.")
         self.note.setStyleSheet("color:#666;")
         bottom.addWidget(self.note, 1)
         reset_view = QPushButton("Reset view")

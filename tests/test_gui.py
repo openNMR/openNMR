@@ -9628,7 +9628,7 @@ def test_main_window_loading_does_not_force_a_navigation_mode(qapp, tmp_path, mo
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
 
     assert window._navigation_mode() == ""
-    # Still one click (or Ctrl+Shift+P) away, just not automatic.
+    # Still one click (or Ctrl+Alt+P) away, just not automatic.
     window._set_navigation_mode("pan")
     assert window._navigation_mode() == "pan"
 

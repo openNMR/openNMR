@@ -3214,6 +3214,7 @@ class MplCanvas(QWidget):
         for ax in self.figure.get_axes():
             if getattr(ax, "name", "") != "3d":
                 ax.tick_params(which="both", direction=self._TICK_DIRECTION)
+        self._reapply_panel_axis_styles()
         threes = [ax for ax in self.figure.get_axes() if getattr(ax, "name", "") == "3d"]
         if threes:
             # A 3D picture keeps the text at the size asked for (tick
@@ -4525,12 +4526,21 @@ class MplCanvas(QWidget):
             if self._font_family:
                 suptitle.set_fontfamily(self._font_family)
         self._apply_curve_spines()
+        self._reapply_panel_axis_styles()
         self._restyle_existing_legends()
         threes = [ax for ax in self.figure.get_axes() if getattr(ax, "name", "") == "3d"]
         if threes:
             # After the relabelling above: a label's text sets its width.
             self._fit_3d_layout(threes)
         self._apply_colorbar_gap()
+
+    def _reapply_panel_axis_styles(self) -> None:
+        """Compare ▸ Panels: the user's per-panel axis options go on top of
+        the global Plot Style, whenever that restyles the axes."""
+        kw = self._compare_panels_kwargs
+        if kw and self._spectrum_panels and kw.get("axis_styles"):
+            from ...notebook.compare_panels import apply_axis_styles
+            apply_axis_styles(self._spectrum_panels, kw["axis_styles"], self._AXIS_LABELSIZE)
 
     def _apply_colorbar_gap(self) -> None:
         """Plot Style's colour-bar gap, on Simulate's pictures (a Czjzek
@@ -6849,7 +6859,12 @@ class MplCanvas(QWidget):
                 # any row below the one bleeding into it) would just
                 # paint over the bleed with its own opaque background,
                 # hiding it again.
-                row_ax.lines[-1].set_clip_on(False)
+                # Clip sideways to the row (so the zoom is what is seen
+                # *and* what is exported -- an unclipped line made the
+                # export's tight bounding box as wide as the whole
+                # spectrum, reported 2026-10-22), but let a tall peak
+                # spill up and down.
+                self._clip_sideways_only(row_ax, row_ax.lines[-1])
                 row_ax.lines[-1].set_label(entries[i].label)
                 row_ax.patch.set_alpha(0.0)
                 xmin = this_xmin if xmin is None else min(xmin, this_xmin)
@@ -6946,7 +6961,8 @@ class MplCanvas(QWidget):
     def show_compare_panels(self, spectra: list, groups: list, *, layout: str = "row",
                             ncols: int | None = None, linked: bool = True, link_y: bool = False,
                             normalize: bool = False, series_keys: list | None = None,
-                            legend_labels: list | None = None) -> None:
+                            legend_labels: list | None = None, axis_labels: str = "auto",
+                            axis_styles=None) -> None:
         """Compare 1D spectra as separate panels. ``groups`` says which of
         ``spectra`` (indices) share a panel: ``[[0, 1], [2]]`` is two panels,
         the first holding two superimposed spectra. Names and colours come
@@ -6954,10 +6970,11 @@ class MplCanvas(QWidget):
         a spectrum made from a kept fit brings its fit, components and
         residual. ``linked`` ties the panels' shift axes together (and
         ``link_y`` the intensity axes); see :meth:`set_spectrum_panels_linked`."""
-        from ...notebook.compare_panels import plot_compare_panels
+        from ...notebook.compare_panels import apply_axis_styles, plot_compare_panels
         groups = [list(g) for g in groups]
         kwargs = {"layout": layout, "ncols": ncols, "linked": linked, "link_y": link_y,
-                  "normalize": normalize, "series_keys": series_keys, "legend_labels": legend_labels}
+                  "normalize": normalize, "series_keys": series_keys, "legend_labels": legend_labels,
+                  "axis_labels": axis_labels, "axis_styles": axis_styles}
         self._enter_plot_kind("compare")
         self._contour_spectrum = None
         self._contour_factor = None
@@ -6988,13 +7005,17 @@ class MplCanvas(QWidget):
         result = plot_compare_panels(
             panels, layout=layout, ncols=ncols, link=linked, link_y=link_y, normalize=normalize,
             full_resolution=self._full_resolution, fig=self.figure, fontsize=self._AXIS_LABELSIZE,
-            tight=False, model_for=self.compare_fit_model)
+            tight=False, model_for=self.compare_fit_model, axis_labels=axis_labels,
+            axis_styles=axis_styles)
         for ax in result.axes:
             ax.patch.set_alpha(0.0)
             plotting.apply_spine_style(ax, top=False, right=False, bottom=True, left=False,
                                        linewidth=self._AXIS_LINEWIDTH)
             plotting.apply_tick_style(ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
                                       minor=self._minor_ticks_visible, labelsize=self._AXIS_LABELSIZE)
+        # the canvas's own tick defaults were just applied: the user's per-panel
+        # choices go on top of them
+        apply_axis_styles(result.axes, axis_styles, self._AXIS_LABELSIZE)
         self._spectrum_panels = list(result.axes)
         self._spectrum_panel_groups = groups
         self._spectrum_panel_link = result.link
@@ -8417,13 +8438,22 @@ class MplCanvas(QWidget):
         self._fit_y_to_data(self.ax, y_range=(float(np.nanmin(y)), float(np.nanmax(y))))
         self.canvas.draw_idle()
 
+    @staticmethod
+    def _clip_sideways_only(ax, line) -> None:
+        """Clip ``line`` to ``ax``'s own x-range but not its height."""
+        from matplotlib.transforms import Bbox, TransformedBbox
+        line.set_clip_box(TransformedBbox(Bbox([[0.0, -50.0], [1.0, 50.0]]), ax.transAxes))
+        line.set_clip_path(None)
+        line.set_clip_on(True)
+
     def _lines_for_export(self) -> list:
         """Every currently-plotted Line2D across whichever axes this
         canvas is actually showing -- ``self.ax`` alone for every
         ordinary view, or all of :attr:`_compare_axes` for a "Stacked"
         Compare view (several real axes, not one shared by every
         line)."""
-        axes = self._compare_axes if self._compare_axes is not None else [self.ax]
+        axes = self._compare_axes if self._compare_axes is not None else (
+            list(self._spectrum_panels) if self._spectrum_panels else [self.ax])
         return [line for ax in axes for line in ax.lines]
 
     def has_downsampled_data(self) -> bool:

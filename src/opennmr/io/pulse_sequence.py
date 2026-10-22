@@ -92,6 +92,8 @@ class Event:
         if self.label:
             return self.label
         text = self.expr.strip().strip("()").strip() if self.expr else ""
+        if text.startswith("mc:"):
+            text = text[3:]
         if text and len(text) <= 12:
             return text
         return format_time(self.value) if self.value is not None else ""
@@ -134,6 +136,17 @@ class PulseSequence:
         counts = {k: len(self.of_kind(k)) for k in KINDS}
         parts = [f"{n} {k}" for k, n in counts.items() if n]
         return f"{self.name} ({self.vendor}): " + ", ".join(parts)
+
+
+def _compact_time(v: float) -> str:
+    """``0.03`` -> ``"30m"``, ``1e-5`` -> ``"10u"`` (as a pulse programme writes it)."""
+    if v >= 1.0:
+        return f"{v:g}s"
+    if v >= 1e-3:
+        return f"{v * 1e3:g}m"
+    if v >= 1e-6:
+        return f"{v * 1e6:g}u"
+    return f"{v * 1e9:g}n"
 
 
 def format_time(value) -> str:
@@ -182,6 +195,28 @@ class _Timeline:
             self.t = start
             ev = self.add(advance=False, **s)
             longest = max(longest, ev.duration)
+        self.t = start + longest
+
+    def tracks(self, tracks, align="start"):
+        """Parallel *sequences*: every track starts at the current time and
+        runs its specs one after another; ``align`` is ``"start"`` (default),
+        ``"center"`` or ``"end"`` -- where a shorter track sits in the
+        longest one (TopSpin's ``(center ...)``). Advances by the longest."""
+        start = self.t
+        lengths = []
+        for specs in tracks:
+            total = 0.0
+            for s in specs:
+                d = s.get("dur")
+                total += d if d is not None else NOMINAL[s["kind"]]
+            lengths.append(total)
+        longest = max(lengths, default=0.0)
+        for specs, total in zip(tracks, lengths):
+            offset = {"center": (longest - total) / 2, "end": longest - total}.get(align, 0.0)
+            self.t = start + offset
+            for s in specs:
+                ev = self.add(advance=False, **s)
+                self.t += ev.duration
         self.t = start + longest
 
     def open_dec(self, channel, label="", expr="", at=None):
@@ -419,34 +454,81 @@ def _split_items(line: str):
     return items
 
 
-def _bruker_group_specs(inner, suffix, consts):
-    """Specs (for ``_Timeline.parallel``) for one ``( ... ):fN`` group."""
-    specs = []
-    if "(" in inner:                       # (center (p1 ph1):f1 (p2 ph2):f2 )
+_G_PULSE = re.compile(r"(\d*\.?\d+\*)?p\d+(\*\d*\.?\d+)?(:[A-Za-z]\w*)?$", re.I)
+_G_PHASE = re.compile(r"ph\d+\^?$", re.I)
+_G_POWER = re.compile(r"(pl|plw|spw|spoal|spoffs|sp|pld?b?)\d+(:f\d)?$", re.I)
+_G_ALIGN = ("center", "start", "end", "aligned")
+
+
+def _group_item_specs(toks, ch, consts, user_delays=()):
+    """One group's words -> specs, in order: pulses (with their phase), and
+    the delays written between them (``(d8 p6 pl6 ph6 d9):f1``)."""
+    specs, first = [], True
+    for w in toks:
+        lw = w.lower()
+        if _G_PHASE.match(w):
+            if specs and specs[-1]["kind"] != "delay" and specs[-1].get("phase") is None:
+                specs[-1]["phase"] = w
+        elif _G_POWER.match(w):
+            pass
+        elif _G_PULSE.match(w) or (first and not (_B_NUM.match(w) or re.fullmatch(r"d\d+|de", lw)
+                                                  or lw in user_delays)):
+            shape, name = None, w
+            if ":" in w:
+                name, shape = w.split(":", 1)
+            kind = "hard"
+            gch = ch
+            if (shape or "").lower().startswith("gp"):
+                kind, gch = "gradient", "G"
+            elif shape and not re.fullmatch(r"f\d", shape, re.I):
+                kind = "shaped"
+            value, _ = _bruker_value(name, consts)
+            specs.append(dict(kind=kind, channel=gch, label=name, expr=name, dur=value,
+                              shape=shape if kind != "hard" else None))
+        elif (_B_NUM.match(w) or re.fullmatch(r"d\d+|de", lw) or lw in user_delays
+              or _is_calculated_delay(w, user_delays)):
+            v, lit = _bruker_value(w, consts)
+            specs.append(dict(kind="delay", channel=ch if re.fullmatch(r"f\d", ch or "") else "delay",
+                              label="" if lit else w, expr=w, dur=v))
+        first = False
+    return specs
+
+
+def _bruker_group_tracks(inner, suffix, consts, user_delays=()):
+    """``( ... ):fN`` -> ``(align, [track, ...])``: a track is a list of specs
+    run one after another on one channel; the tracks run side by side.
+    ``(center (A):f3 (B):f1 )`` holds two tracks, centred on each other."""
+    align = "start"
+    if "(" in inner:
+        head = inner.split("(", 1)[0].split()
+        if head and head[-1].lower() in _G_ALIGN:
+            align = head[-1].lower()
+        tracks = []
         for it in _split_items(inner):
             if it[0] == "group":
-                specs += _bruker_group_specs(it[1], it[2] or suffix, consts)
-        return specs
+                sub_align, sub = _bruker_group_tracks(it[1], it[2] or suffix, consts, user_delays)
+                tracks += sub
+        return align, tracks
     toks = inner.split()
-    if toks and toks[0].lower() in ("center", "start", "end", "aligned"):
-        toks = toks[1:]
-    if not toks:
-        return specs
-    head = toks[0]
-    shape, name = None, head
-    if ":" in head:
-        name, shape = head.split(":", 1)
+    if toks and toks[0].lower() in _G_ALIGN:
+        align, toks = toks[0].lower(), toks[1:]
     ch = suffix if re.fullmatch(r"f\d", suffix or "") else "f1"
-    kind = "hard"
-    if suffix.startswith("gp") or (shape or "").lower().startswith("gp"):
-        kind, ch = "gradient", "G"
-    elif shape and not shape.lower().startswith("f"):
-        kind = "shaped"
-    value, _ = _bruker_value(name, consts)
-    phase = next((t for t in toks[1:] if re.fullmatch(r"ph\d+\^?", t, re.I)), None)
-    specs.append(dict(kind=kind, channel=ch, label=name, expr=name, dur=value,
-                      shape=shape, phase=phase))
-    return specs
+    if suffix.startswith("gp"):
+        ch = "G"
+    specs = _group_item_specs(toks, ch, consts, user_delays)
+    if suffix.startswith("gp"):
+        for sp in specs:
+            if sp["kind"] != "delay":
+                sp["kind"], sp["channel"] = "gradient", "G"
+    return align, ([specs] if specs else [])
+
+
+def _bruker_group_specs(inner, suffix, consts):
+    """Flat specs (for ``_Timeline.parallel``) of one group: the first item
+    of each track. Kept for callers that only need the pulses starting
+    together; the parser itself uses :func:`_bruker_group_tracks`."""
+    _align, tracks = _bruker_group_tracks(inner, suffix, consts)
+    return [t[0] for t in tracks if t]
 
 
 def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
@@ -465,8 +547,15 @@ def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
     def on() -> bool:
         return all(c[0] for c in cond)
 
+    pending, pending_n = "", 0
+    finished = False
+    skip_mc = False
     for raw in text.splitlines():
+        if finished:
+            break
         line = raw.strip()
+        if re.match(r"#\s*\d+\s+\"", line):          # preprocessor line marker: # 54 "file"
+            continue
         pp = re.match(r"#\s*(ifdef|ifndef|else|endif|define|undef|include|if|elif)\b(.*)", line)
         if pp:
             d, arg = pp.group(1), pp.group(2).strip()
@@ -492,6 +581,13 @@ def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
         if not on():
             continue
         line = line.split(";", 1)[0].strip()
+        if pending:
+            line, pending, pending_n = (pending + " " + line).strip(), "", pending_n
+        if line.count("(") > line.count(")") and not line.startswith('"') and pending_n < 12:
+            # a bracketed block that continues on the next line(s): "(center" ... ")"
+            pending, pending_n = line, pending_n + 1
+            continue
+        pending_n = 0
         if line.startswith('"'):
             # "d6=d20-p1" -- the programme calculates this value itself, so
             # it replaces whatever the parameter table holds for that name.
@@ -512,9 +608,14 @@ def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
             line = line[m.end():]
         items = _split_items(line)
         par: list = []
+        trk: list = []                      # sequences that run side by side
+        trk_align = "start"
 
         def flush():
-            nonlocal par
+            nonlocal par, trk, trk_align
+            if trk:
+                tl.tracks(trk, trk_align)
+                trk, trk_align = [], "start"
             if par:
                 tl.parallel(par)
                 par = []
@@ -525,7 +626,10 @@ def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
             it = items[k]
             k += 1
             if it[0] == "group":
-                par += _bruker_group_specs(it[1], it[2], consts)
+                g_align, g_tracks = _bruker_group_tracks(it[1], it[2], consts, user_delays)
+                trk += g_tracks
+                if g_align != "start":
+                    trk_align = g_align
                 continue
             w = it[1].rstrip(",")
             lw = w.lower()
@@ -562,13 +666,38 @@ def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
                 # the older spelling of a pulse: "p1 ph1", "p1*0.33 ph1", "p3:f2 ph2"
                 head, _, tail = w.partition(":")
                 suffix = tail if re.fullmatch(r"f\d", tail, re.I) else ""
-                par += _bruker_group_specs(head + (":" + tail if tail and not suffix else "")
-                                           + " " + items[k][1], suffix.lower(), consts)
+                _a, g_tracks = _bruker_group_tracks(
+                    head + (":" + tail if tail and not suffix else "") + " " + items[k][1],
+                    suffix.lower(), consts, user_delays)
+                trk += g_tracks
                 k += 1
             elif lw in ("ze", "exit", "zd", "wr", "st", "rcyc", "if", "endif", "goto"):
                 if lw == "exit":
                     flush()
+                    if not cond:
+                        finished = True          # what follows is the phase-program tables
+                        stop = True
                 continue
+            elif lw == "lblav":
+                skip_mc = True              # the mc command's first slot is not drawn
+            elif lw in ("mcwrk", "mcrest") and skip_mc:
+                skip_mc = False
+            elif lw in ("mcwrk", "mcrest"):
+                # the pieces of the mc command's own timing (30m in all, as TopSpin's
+                # display shows it): one delay, not three; MCREST is often zero
+                flush()
+                v, _lit = _bruker_value(w, consts)
+                if v:
+                    last = tl.events[-1] if tl.events else None
+                    if last is not None and last.label == "" and last.expr.startswith("mc:") \
+                            and abs(last.t1 - tl.t) < 1e-12:
+                        last.t1 += v
+                        last.value = (last.value or 0.0) + v
+                        tl.t += v
+                    else:
+                        tl.add("delay", "delay", "", expr="mc:", dur=v)
+                    last = tl.events[-1]
+                    last.expr = "mc:" + _compact_time(last.value)
             elif (_B_NUM.match(w) or re.fullmatch(r"d\d+|de", lw) or _B_LISTDELAY.match(w)
                   or lw in user_delays or _is_calculated_delay(w, user_delays)):
                 flush()

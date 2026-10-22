@@ -1530,7 +1530,13 @@ def test_show_compare_stack_lines_are_not_clipped_to_their_own_row(qapp):
     canvas.show_compare(specs, mode="stack")
     canvas.canvas.draw()
     for ax in canvas._compare_axes:
-        assert ax.lines[0].get_clip_on() is False
+        # Clipped sideways only (so an export is as wide as the view,
+        # 2026-10-22), never to the row's own height.
+        line = ax.lines[0]
+        assert line.get_clip_path() is None and line.get_clip_box() is not None
+        canvas.canvas.draw()
+        assert line.get_clip_box().y1 > ax.get_window_extent().y1
+        assert line.get_clip_box().y0 < ax.get_window_extent().y0
         # Also not opaque -- otherwise a row drawn *after* (below) one
         # bleeding into it would just paint over the bleed with its
         # own background.

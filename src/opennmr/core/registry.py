@@ -278,11 +278,14 @@ def NUC_label(NUC, x_unit='ppm', style='brackets', template=None):
     # unrecorded nucleus) gets no superscript at all, rather than an
     # empty ^{} that mathtext renders as a stray raised nothing.
     superscript = r'^{\mathregular{' + NUCnum + r'}}' if NUCnum else ''
-    superscript_slash = r'{}^{' + NUCnum + r'}' if NUCnum else ''
+    # Upright (\mathregular) superscript and bracket: in the 'slash' style
+    # the mass number and the "(" were italic (explicit user report,
+    # 2026-10-22) -- only the delta is a quantity symbol.
+    superscript_slash = r'{}^{\mathregular{' + NUCnum + r'}}' if NUCnum else ''
 
     if style == 'slash':
         labeltext = (
-            r'$\delta \,\, (' + superscript_slash + r'$'
+            r'$\delta \,\, \mathregular{(}' + superscript_slash + r'$'
             + NUCalpha + ") / " + x_unit
         )
     elif style == 'brackets':

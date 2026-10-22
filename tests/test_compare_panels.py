@@ -382,3 +382,116 @@ def test_going_back_to_stacked_hides_the_panel_controls(window, tmp_path):
     window._refresh_compare_view(force_render=True)
     assert window.compare_panels_controls.isHidden()
     assert window.compare_canvas._spectrum_panels == []
+
+
+# ======================================================================
+# 2026-10-22: an axis label on every panel for different nuclei, and per-panel
+# axis options (label text, tick direction, sizes ...)
+# ======================================================================
+
+def _nuc_spec(nucleus, centre=5.0):
+    s = _spec(centre)
+    s.metadata.nucleus = nucleus
+    return s
+
+
+def _labels(axes):
+    return [ax.get_xlabel() for ax in axes]
+
+
+def test_different_nuclei_stacked_each_keep_their_own_axis_label():
+    fig, axes, _ = cp.plot_compare_panels([_nuc_spec("1H"), _nuc_spec("23Na"), _nuc_spec("13C")],
+                                          layout="column")
+    labels = _labels(axes)
+    assert all(labels) and len(set(labels)) == 3
+
+
+def test_same_nucleus_stacked_keeps_one_shared_label():
+    fig, axes, _ = cp.plot_compare_panels([_nuc_spec("1H"), _nuc_spec("1H")], layout="column")
+    assert _labels(axes)[0] == "" and _labels(axes)[1] != ""
+
+
+def test_different_nuclei_in_a_grid_all_labelled():
+    fig, axes, _ = cp.plot_compare_panels([_nuc_spec("1H"), _nuc_spec("23Na"), _nuc_spec("13C")],
+                                          layout="grid", ncols=2)
+    assert all(_labels(axes))
+
+
+@pytest.mark.parametrize("mode,expected", [("all", [True, True]), ("bottom", [False, True])])
+def test_axis_labels_mode_overrides_the_automatic_choice(mode, expected):
+    fig, axes, _ = cp.plot_compare_panels([_nuc_spec("1H"), _nuc_spec("1H")], layout="column",
+                                          axis_labels=mode)
+    assert [bool(t) for t in _labels(axes)] == expected
+    fig, axes, _ = cp.plot_compare_panels([_nuc_spec("1H"), _nuc_spec("23Na")], layout="column",
+                                          axis_labels="bottom")
+    assert [bool(t) for t in _labels(axes)] == [False, True]
+
+
+def test_bad_axis_labels_mode_is_refused():
+    with pytest.raises(ValueError):
+        cp.plot_compare_panels([_spec(3)], axis_labels="sometimes")
+
+
+def _tick_dirs(ax):
+    return ax.xaxis.get_major_ticks()[0].tick1line.get_markeredgewidth(), ax.xaxis._major_tick_kw["tickdir"]
+
+
+def test_axis_styles_change_one_panel_and_all_panels():
+    fig, axes, _ = cp.plot_compare_panels(
+        [_spec(3), _spec(5), _spec(7)], layout="column",
+        axis_styles={"all": {"tick_direction": "out", "tick_labelsize": 9},
+                     1: {"xlabel": r"$\delta$ custom", "tick_direction": "inout", "tick_length": 9,
+                         "xlabel_fontsize": 15}})
+    assert [ax.xaxis._major_tick_kw["tickdir"] for ax in axes] == ["out", "inout", "out"]
+    assert axes[1].get_xlabel() == r"$\delta$ custom"
+    assert axes[1].xaxis.label.get_fontsize() == 15
+    assert axes[1].xaxis._major_tick_kw["size"] == 9
+    assert axes[0].xaxis._major_tick_kw["labelsize"] == 9
+
+
+def test_axis_styles_as_a_list_hide_labels_ticks_and_minor_ticks():
+    fig, axes, _ = cp.plot_compare_panels(
+        [_spec(3), _spec(5)], layout="column", axis_labels="all",
+        axis_styles=[{"show_xlabel": False, "show_tick_labels": False, "minor_ticks": False}, None])
+    assert axes[0].get_xlabel() == "" and axes[1].get_xlabel() != ""
+    assert not axes[0].xaxis._major_tick_kw.get("label1On", True)
+    assert not axes[0].xaxis.get_minor_locator().__class__.__name__ == "AutoMinorLocator"
+    assert axes[1].xaxis.get_minor_locator().__class__.__name__ == "AutoMinorLocator"
+
+
+def test_axis_styles_num_ticks_and_spine_width():
+    fig, axes, _ = cp.plot_compare_panels([_spec(3)], axis_styles={0: {"num_ticks": 3, "spine_width": 2.5}})
+    assert axes[0].spines["bottom"].get_linewidth() == 2.5
+    assert len(axes[0].get_xticks()) <= 6
+
+
+def test_unknown_axis_option_or_direction_is_refused():
+    with pytest.raises(ValueError):
+        cp.plot_compare_panels([_spec(3)], axis_styles={0: {"colour": "red"}})
+    with pytest.raises(ValueError):
+        cp.plot_compare_panels([_spec(3)], axis_styles={0: {"tick_direction": "sideways"}})
+
+
+def test_gui_each_nucleus_panel_labelled_and_styles_survive_canvas_defaults(window, tmp_path):
+    _window_with_three_compared(window, tmp_path)
+    for i, nuc in enumerate(("1H", "23Na", "13C")):
+        window.session.spectra[i].metadata.nucleus = nuc
+    window.layout_mode_combo.setCurrentText("Panels: column")
+    window._refresh_compare_view(force_render=True)
+    axes = window.compare_canvas._spectrum_panels
+    assert all(ax.get_xlabel() for ax in axes)
+    c = window.compare_panels_controls
+    c.axis_target_combo.setCurrentIndex(c.axis_target_combo.findData(1))
+    c.axis_direction_combo.setCurrentIndex(c.axis_direction_combo.findData("out"))
+    c.axis_label_edit.setText("middle")
+    c.axis_label_edit.editingFinished.emit()
+    window._refresh_compare_view(force_render=True)
+    axes = window.compare_canvas._spectrum_panels
+    assert axes[1].xaxis._major_tick_kw["tickdir"] == "out" and axes[0].xaxis._major_tick_kw["tickdir"] != "out"
+    assert axes[1].get_xlabel() == "middle"
+    c.axis_labels_combo.setCurrentIndex(c.axis_labels_combo.findData("bottom"))
+    window._refresh_compare_view(force_render=True)
+    assert [bool(ax.get_xlabel()) for ax in window.compare_canvas._spectrum_panels][-1]
+    c.reset_axes()
+    window._refresh_compare_view(force_render=True)
+    assert window.compare_canvas._spectrum_panels[1].xaxis._major_tick_kw["tickdir"] != "out"

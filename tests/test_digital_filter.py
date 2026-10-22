@@ -83,3 +83,23 @@ def test_group_delay_prefers_grpdly_then_the_table():
     with pytest.raises(ValueError, match="DSPFVS"):
         df.group_delay(decim=24, dspfvs=9, grpdly=0)
     assert df.group_delay(decim=24, dspfvs=99, grpdly=0) == 0.0
+
+
+def test_dspfvs_zero_without_a_group_delay_means_no_filter_and_warns():
+    data = (np.arange(64) + 1j * np.arange(64)).astype(np.complex128)
+    dic = {"acqus": {"DECIM": 12, "DSPFVS": 0.0, "GRPDLY": 0}}
+    with pytest.warns(UserWarning, match="no digital filter"):
+        out = df.remove_digital_filter(dic, data)
+    assert np.array_equal(out, data) and out is not data
+
+
+def test_dspfvs_zero_with_a_recorded_group_delay_is_still_corrected():
+    data = np.exp(2j * np.pi * 0.05 * np.arange(256))
+    dic = {"acqus": {"DECIM": 12, "DSPFVS": 0.0, "GRPDLY": 20.0}}
+    out = df.remove_digital_filter(dic, data)
+    assert len(out) == 256 - 22
+
+
+def test_other_unknown_dspfvs_values_still_raise():
+    with pytest.raises(ValueError, match="DSPFVS"):
+        df.remove_digital_filter({"acqus": {"DECIM": 24, "DSPFVS": 9, "GRPDLY": 0}}, np.zeros(64, complex))
