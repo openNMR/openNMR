@@ -26,9 +26,11 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-    QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QLineEdit, QScrollArea, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
+
+from .widgets.typed_spinbox import TypedDoubleSpinBox, TypedSpinBox
 
 
 class ClickableLabel(QLabel):
@@ -52,6 +54,7 @@ class _ShowAllCheck(QCheckBox):
 
 
 _UID = Qt.ItemDataRole.UserRole
+_EXPORT_FORMATS = ("pdf", "svg", "png", "tiff", "eps")
 _GROUPS = (("Pulses", ("hard", "shaped", "decoupling")), ("Gradients", ("gradient",)),
            ("Delays", ("delay",)))
 
@@ -60,6 +63,15 @@ class PulseSequenceDialog(QDialog):
     """``spectrum``: the open experiment (its own parameter values fill in
     ``d1``, ``p1``...). ``settings``: the window's ``_ui_settings`` dict,
     where the colours and options persist; ``save_settings`` writes it."""
+
+    #: Look-and-feel options (and their defaults) kept with the window's settings.
+    _STYLE_DEFAULTS = {
+        "acquire_separate": False, "fontfamily": "", "fontsize": 10.0, "channel_fontsize": 0.0,
+        "legend_fontsize": 0.0, "title_fontsize": 0.0, "linewidth": 1.0, "pulse_height": 1.0,
+        "title": True, "title_text": "", "title_position": "left", "legend": True,
+        "legend_position": "below", "note": True,
+        "export_width": 0.0, "export_height": 0.0, "export_dpi": 300, "export_format": "pdf",
+    }
 
     def __init__(self, spectrum=None, settings: dict | None = None, save_settings=None,
                  parent=None) -> None:
@@ -85,6 +97,15 @@ class PulseSequenceDialog(QDialog):
         self._opts = {"show_values": bool(opts.get("show_values", False)),
                       "show_loops": bool(opts.get("show_loops", True)),
                       "delay_style": style}
+        for key, default in self._STYLE_DEFAULTS.items():
+            value = opts.get(key, default)
+            self._opts[key] = value if isinstance(value, type(default)) or (
+                isinstance(default, float) and isinstance(value, int)) else default
+        for key, allowed in (("legend_position", ps.LEGEND_POSITIONS),
+                             ("title_position", ps.TITLE_POSITIONS)):
+            if self._opts[key] not in allowed:
+                self._opts[key] = self._STYLE_DEFAULTS[key]
+        self._renames = {"names": {}, "channels": {}, "legend": {}}
 
         root = QVBoxLayout(self)
         top = QHBoxLayout()
@@ -183,6 +204,13 @@ class PulseSequenceDialog(QDialog):
             chk.setChecked(self._opts[key])
             chk.toggled.connect(lambda v, k=key: self._set_option(k, v))
             ol.addWidget(chk)
+        self.acquire_check = QCheckBox("Acquisition on the pulse line")
+        self.acquire_check.setToolTip(
+            "On (default): the acquisition is drawn on the first channel's line after the "
+            "pulses and delays, as in TopSpin. Off: on a line of its own.")
+        self.acquire_check.setChecked(not self._opts["acquire_separate"])
+        self.acquire_check.toggled.connect(lambda v: self._set_option("acquire_separate", not v))
+        ol.addWidget(self.acquire_check)
         ol.addWidget(QLabel("Delays:"))
         self.delay_style_combo = QComboBox()
         for key, text in (("line", "Named on the pulse line"),
@@ -204,7 +232,13 @@ class PulseSequenceDialog(QDialog):
         self.flag_box = QGroupBox("Conditional blocks (#ifdef / flags)")
         self.flag_layout = QVBoxLayout(self.flag_box)
         sl.addWidget(self.flag_box)
-        split.addWidget(side)
+        self._build_style_groups(sl)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(side)
+        scroll.setMinimumWidth(300)
+        split.addWidget(scroll)
         split.setStretchFactor(0, 4)
         split.setStretchFactor(1, 1)
 
@@ -284,6 +318,7 @@ class PulseSequenceDialog(QDialog):
         else:
             self._rebuild_flags()
             self._rebuild_names()
+            self._load_renames()
 
     def _on_sequence_chosen(self, i: int) -> None:
         if not self._building and i >= 0:
@@ -295,6 +330,7 @@ class PulseSequenceDialog(QDialog):
             self.sequence.channel_nuclei = self._ps.channel_nuclei(self.spectrum)
         self._rebuild_flags()
         self._rebuild_names()
+        self._load_renames()
         self._fill_table()
         self._redraw()
 
@@ -391,11 +427,228 @@ class PulseSequenceDialog(QDialog):
             self._save_settings()
             self._redraw()
 
-    def _set_option(self, key: str, value: bool) -> None:
-        self._opts[key] = bool(value)
+    #: Options that change the layout (the view goes back to the whole diagram).
+    _LAYOUT_KEYS = ("show_values", "show_loops", "acquire_separate", "pulse_height", "fontsize",
+                    "channel_fontsize", "title", "legend", "legend_position", "note")
+
+    def _set_option(self, key: str, value) -> None:
+        self._opts[key] = value if not isinstance(value, (bool, int)) or key == "export_dpi" else bool(value)
         self._settings["pulse_sequence_options"] = dict(self._opts)
         self._save_settings()
-        self._redraw()
+        self._redraw(keep_view=key not in self._LAYOUT_KEYS)
+
+    # -- look and feel ---------------------------------------------------
+    def _spin(self, key: str, lo: float, hi: float, step: float, decimals: int = 2, special: str = ""):
+        box = TypedDoubleSpinBox()
+        box.setRange(lo, hi)
+        box.setSingleStep(step)
+        box.setDecimals(decimals)
+        if special:
+            box.setSpecialValueText(special)
+        box.setValue(float(self._opts[key]))
+        box.valueChanged.connect(lambda v, k=key: self._set_option(k, float(v)))
+        return box
+
+    def _build_style_groups(self, sl) -> None:
+        from PySide6.QtGui import QFontDatabase
+        ps = self._ps
+        # rename
+        rbox = QGroupBox("Rename (drawing only)")
+        rl = QVBoxLayout(rbox)
+        hint = QLabel("Double-click a name in the right-hand column to change what the diagram "
+                      "shows; the file and the order stay as they are. LaTeX works: "
+                      "<code>\\tau_{c}</code>, <code>\\pi/2</code>, <code>$t_1$</code>. "
+                      "Empty = the original.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#666;")
+        rl.addWidget(hint)
+        self.rename_table = QTableWidget(0, 2)
+        self.rename_table.setHorizontalHeaderLabels(["Name in the file", "Shown as"])
+        self.rename_table.verticalHeader().setVisible(False)
+        self.rename_table.horizontalHeader().setStretchLastSection(True)
+        self.rename_table.setMinimumHeight(150)
+        self.rename_table.itemChanged.connect(self._on_rename_changed)
+        rl.addWidget(self.rename_table)
+        reset = QPushButton("Reset names")
+        reset.clicked.connect(self._reset_renames)
+        rl.addWidget(reset)
+        sl.addWidget(rbox)
+        # text
+        tbox = QGroupBox("Text")
+        tg = QGridLayout(tbox)
+        tg.addWidget(QLabel("Typeface"), 0, 0)
+        self.font_combo = QComboBox()
+        self.font_combo.setEditable(True)
+        self.font_combo.addItem("(default)", "")
+        self.font_combo.addItems(sorted(set(QFontDatabase.families())))
+        current = self._opts["fontfamily"]
+        self.font_combo.setCurrentText(current if current else "(default)")
+        self.font_combo.setToolTip("One typeface for every label, the legend, the title and the "
+                                   "maths in $...$ names.")
+        self.font_combo.currentTextChanged.connect(self._on_font_chosen)
+        tg.addWidget(self.font_combo, 0, 1)
+        self.size_spins = {}
+        for row, (key, text, tip) in enumerate((
+                ("fontsize", "Names", "Size of the pulse and delay names (pt)."),
+                ("channel_fontsize", "Channels", "Size of the channel labels (0 = as Names)."),
+                ("legend_fontsize", "Legend", "Size of the legend (0 = automatic)."),
+                ("title_fontsize", "Title", "Size of the title (0 = automatic)."))):
+            tg.addWidget(QLabel(text), row + 1, 0)
+            box = self._spin(key, 0.0 if key != "fontsize" else 4.0, 60.0, 0.5, 1,
+                             special="auto" if key != "fontsize" else "")
+            box.setToolTip(tip)
+            tg.addWidget(box, row + 1, 1)
+            self.size_spins[key] = box
+        sl.addWidget(tbox)
+        # lines and pulses
+        lbox = QGroupBox("Lines and pulses")
+        lg = QGridLayout(lbox)
+        lg.addWidget(QLabel("Line thickness"), 0, 0)
+        self.linewidth_spin = self._spin("linewidth", 0.2, 8.0, 0.25, 2)
+        self.linewidth_spin.setToolTip("Multiplies every line: baselines, brackets, pulse outlines, loops.")
+        lg.addWidget(self.linewidth_spin, 0, 1)
+        lg.addWidget(QLabel("Pulse height"), 1, 0)
+        self.pulse_height_spin = self._spin("pulse_height", 0.3, 4.0, 0.1, 2)
+        self.pulse_height_spin.setToolTip("Multiplies the height of every pulse, gradient and the "
+                                          "acquisition by the same factor.")
+        lg.addWidget(self.pulse_height_spin, 1, 1)
+        sl.addWidget(lbox)
+        # title and legend
+        gbox = QGroupBox("Title and legend")
+        gg = QGridLayout(gbox)
+        self.title_check = QCheckBox("Title")
+        self.title_check.setChecked(self._opts["title"])
+        self.title_check.toggled.connect(lambda v: self._set_option("title", bool(v)))
+        gg.addWidget(self.title_check, 0, 0)
+        self.title_edit = QLineEdit(self._opts["title_text"])
+        self.title_edit.setPlaceholderText("(the sequence name)")
+        self.title_edit.setToolTip("Text of the title; LaTeX works. Empty = the sequence's name.")
+        self.title_edit.editingFinished.connect(
+            lambda: self._set_option("title_text", self.title_edit.text()))
+        gg.addWidget(self.title_edit, 0, 1)
+        gg.addWidget(QLabel("Title position"), 1, 0)
+        self.title_position_combo = QComboBox()
+        self.title_position_combo.addItems(list(ps.TITLE_POSITIONS))
+        self.title_position_combo.setCurrentText(self._opts["title_position"])
+        self.title_position_combo.currentTextChanged.connect(
+            lambda t: self._set_option("title_position", t))
+        gg.addWidget(self.title_position_combo, 1, 1)
+        self.legend_check = QCheckBox("Legend")
+        self.legend_check.setChecked(self._opts["legend"])
+        self.legend_check.toggled.connect(lambda v: self._set_option("legend", bool(v)))
+        gg.addWidget(self.legend_check, 2, 0)
+        self.legend_position_combo = QComboBox()
+        self.legend_position_combo.addItems([p for p in ps.LEGEND_POSITIONS if p != "none"])
+        self.legend_position_combo.setCurrentText(
+            self._opts["legend_position"] if self._opts["legend_position"] != "none" else "below")
+        self.legend_position_combo.currentTextChanged.connect(
+            lambda t: self._set_option("legend_position", t))
+        gg.addWidget(self.legend_position_combo, 2, 1)
+        self.note_check = QCheckBox("“schematic – not to scale” note")
+        self.note_check.setChecked(self._opts["note"])
+        self.note_check.toggled.connect(lambda v: self._set_option("note", bool(v)))
+        gg.addWidget(self.note_check, 3, 0, 1, 2)
+        sl.addWidget(gbox)
+        # export
+        ebox = QGroupBox("Export")
+        eg = QGridLayout(ebox)
+        eg.addWidget(QLabel("Width (in)"), 0, 0)
+        self.export_width_spin = self._spin("export_width", 0.0, 60.0, 0.5, 2, special="auto")
+        eg.addWidget(self.export_width_spin, 0, 1)
+        eg.addWidget(QLabel("Height (in)"), 1, 0)
+        self.export_height_spin = self._spin("export_height", 0.0, 60.0, 0.5, 2, special="auto")
+        eg.addWidget(self.export_height_spin, 1, 1)
+        eg.addWidget(QLabel("DPI"), 2, 0)
+        self.export_dpi_spin = TypedSpinBox()
+        self.export_dpi_spin.setRange(50, 4800)
+        self.export_dpi_spin.setValue(int(self._opts["export_dpi"]))
+        self.export_dpi_spin.valueChanged.connect(lambda v: self._set_option("export_dpi", int(v)))
+        eg.addWidget(self.export_dpi_spin, 2, 1)
+        eg.addWidget(QLabel("Format"), 3, 0)
+        self.export_format_combo = QComboBox()
+        self.export_format_combo.addItems(list(_EXPORT_FORMATS))
+        self.export_format_combo.setCurrentText(self._opts["export_format"])
+        self.export_format_combo.currentTextChanged.connect(
+            lambda t: self._set_option("export_format", t))
+        eg.addWidget(self.export_format_combo, 3, 1)
+        note = QLabel("Width / height “auto” keep the diagram's own size; give one and the other "
+                      "follows. DPI matters for PNG and TIFF; PDF, SVG and EPS stay vector.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#666;")
+        eg.addWidget(note, 4, 0, 1, 2)
+        sl.addWidget(ebox)
+
+    def _on_font_chosen(self, text: str) -> None:
+        family = "" if text in ("", "(default)") else text
+        self._set_option("fontfamily", family)
+
+    # -- renaming --------------------------------------------------------
+    def _renames_key(self) -> str:
+        return self.sequence.name if self.sequence else ""
+
+    def _load_renames(self) -> None:
+        stored = (self._settings.get("pulse_sequence_renames") or {}).get(self._renames_key()) or {}
+        self._renames = {g: dict(stored.get(g) or {}) for g in ("names", "channels", "legend")}
+        self._rebuild_renames()
+
+    def _save_renames(self) -> None:
+        book = self._settings.setdefault("pulse_sequence_renames", {})
+        mine = {g: v for g, v in self._renames.items() if v}
+        if mine:
+            book[self._renames_key()] = mine
+        else:
+            book.pop(self._renames_key(), None)
+        self._save_settings()
+
+    def _rebuild_renames(self) -> None:
+        self._building = True
+        t = self.rename_table
+        t.setRowCount(0)
+        rows = []
+        seq = self.sequence
+        if seq:
+            seen = set()
+            for e in seq.events:
+                name = e.label if e.kind != "delay" else e.name
+                if e.kind == "acquire" or not name or name in seen:
+                    continue
+                seen.add(name)
+                rows.append(("names", name, f"{name}  ({self._ps.KIND_NAMES.get(e.kind, e.kind).lower()})"))
+            nuc = getattr(seq, "channel_nuclei", {}) or {}
+            chans = seq.channels or ["f1"]
+            for c in chans:
+                rows.append(("channels", c, f"channel {c}" + (f"  ({nuc[c]})" if c in nuc else "")))
+            for k in ("hard", "shaped", "decoupling", "gradient", "acquire"):
+                if any(e.kind == k for e in seq.events):
+                    rows.append(("legend", k, f"legend: {self._ps.KIND_NAMES[k]}"))
+        for group, key, text in rows:
+            r = t.rowCount()
+            t.insertRow(r)
+            left = QTableWidgetItem(text)
+            left.setFlags(left.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            left.setData(_UID, (group, key))
+            t.setItem(r, 0, left)
+            t.setItem(r, 1, QTableWidgetItem(self._renames[group].get(key, "")))
+        t.resizeColumnToContents(0)
+        self._building = False
+
+    def _on_rename_changed(self, item) -> None:
+        if self._building or item.column() != 1:
+            return
+        group, key = self.rename_table.item(item.row(), 0).data(_UID)
+        text = item.text().strip()
+        if text:
+            self._renames[group][key] = text
+        else:
+            self._renames[group].pop(key, None)
+        self._save_renames()
+        self._redraw(keep_view=True)
+
+    def _reset_renames(self) -> None:
+        self._renames = {"names": {}, "channels": {}, "legend": {}}
+        self._save_renames()
+        self._rebuild_renames()
+        self._redraw(keep_view=True)
 
     def _pick_colour(self, kind: str) -> None:
         c = QColorDialog.getColor(QColor(self.colors[kind]), self,
@@ -424,7 +677,23 @@ class PulseSequenceDialog(QDialog):
         return dict(colors=dict(self.colors), show_names=self._shown_uids(),
                     show_values=self._opts["show_values"],
                     show_loops=self._opts["show_loops"],
-                    delay_style=self._opts["delay_style"])
+                    delay_style=self._opts["delay_style"],
+                    renames=dict(self._renames["names"]),
+                    channel_labels=dict(self._renames["channels"]),
+                    legend_labels=dict(self._renames["legend"]),
+                    acquire_separate=self._opts["acquire_separate"],
+                    fontfamily=self._opts["fontfamily"] or None,
+                    fontsize=float(self._opts["fontsize"]),
+                    channel_fontsize=float(self._opts["channel_fontsize"]) or None,
+                    legend_fontsize=float(self._opts["legend_fontsize"]) or None,
+                    title_fontsize=float(self._opts["title_fontsize"]) or None,
+                    linewidth=float(self._opts["linewidth"]),
+                    pulse_height=float(self._opts["pulse_height"]),
+                    title=self._opts["title"],
+                    title_text=self._opts["title_text"] or None,
+                    title_position=self._opts["title_position"],
+                    legend=self._opts["legend"], legend_position=self._opts["legend_position"],
+                    note=self._opts["note"])
 
     def _redraw(self, keep_view: bool = False) -> None:
         """Draw the sequence again. ``keep_view``: stay at the zoomed /
@@ -469,20 +738,35 @@ class PulseSequenceDialog(QDialog):
     def _save_figure(self) -> None:
         if self.sequence is None:
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save pulse sequence figure", f"{self.sequence.name}.pdf",
-            "PDF (*.pdf);;SVG (*.svg);;PNG (*.png)")
+        fmt = self._opts["export_format"]
+        filters = ";;".join(f"{f.upper()} (*.{f})" for f in _EXPORT_FORMATS)
+        path, chosen = QFileDialog.getSaveFileName(
+            self, "Save pulse sequence figure", f"{self.sequence.name}.{fmt}", filters)
         if path:
+            if not os.path.splitext(path)[1]:
+                path += f".{fmt}"
             self.save_figure(path)
 
-    def save_figure(self, path: str, dpi: int = 300) -> str:
-        """Write the diagram with the current colours, names and options,
-        at its own proportions (not the window's)."""
-        opts = self.draw_options()
+    def save_figure(self, path: str, dpi: int | None = None, width: float | None = None,
+                    height: float | None = None) -> str:
+        """Write the diagram with the current colours, names and options, at
+        the Export size and DPI (inches; a missing size keeps the diagram's
+        own proportions). The format follows the file name's extension."""
         import matplotlib.pyplot as plt
-        fig, ax = self._ps.plot_pulse_sequence(self.sequence, None, **opts)
+        dpi = int(dpi or self._opts["export_dpi"])
+        width = width if width is not None else float(self._opts["export_width"])
+        height = height if height is not None else float(self._opts["export_height"])
+        fig, ax = self._ps.plot_pulse_sequence(self.sequence, None, **self.draw_options())
         try:
-            fig.subplots_adjust(left=0.01, right=0.99, top=0.93, bottom=0.04)
+            w0, h0 = fig.get_size_inches()
+            if width and not height:
+                height = width * h0 / w0
+            elif height and not width:
+                width = height * w0 / h0
+            if width and height:
+                fig.set_size_inches(width, height)
+            fig.subplots_adjust(left=0.01, right=0.99, top=0.93 if self._opts["title"] else 0.99,
+                                bottom=0.04)
             fig.savefig(path, dpi=dpi, facecolor="white")
         finally:
             plt.close(fig)

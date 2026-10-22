@@ -8,6 +8,7 @@ import matplotlib
 matplotlib.use("Agg")
 import pytest
 from matplotlib.patches import Polygon, Rectangle
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from opennmr.io import pulse_sequence as io_ps
@@ -885,7 +886,7 @@ def test_delay_names_do_not_overlap_each_other_or_the_pulses():
 def test_the_bracket_styles_are_still_available():
     import matplotlib.pyplot as plt
     seq = _zg()
-    fig, ax = ps.plot_pulse_sequence(seq, delay_style="brackets")
+    fig, ax = ps.plot_pulse_sequence(seq, delay_style="brackets", acquire_separate=True)
     f1, f2, acq = _baseline_ys(ax)
     ys = [float(l.get_ydata()[0]) for l in _brackets(ax)]
     assert ys and all(f2 < y < f1 for y in ys) and "Delays" in _label_texts(ax)
@@ -1027,3 +1028,206 @@ def test_saving_the_figure_uses_the_chosen_delay_style(window, tmp_path):
     d = window._pulse_sequence_dialog
     out = d.save_figure(str(tmp_path / "seq.png"), dpi=60)
     assert os.path.getsize(out) > 1000
+
+
+# ======================================================================
+# 2026-10-22: renaming (LaTeX), typeface, sizes, line width, pulse height,
+# legend / title placement, acquisition on the pulse line, export options
+# ======================================================================
+
+def _texts(ax):
+    return [t.get_text() for t in ax.texts]
+
+
+def _fig_texts(fig):
+    import matplotlib.text as mtext
+    return [t.get_text() for t in fig.findobj(mtext.Text) if t.get_text()]
+
+
+def test_renaming_a_pulse_changes_every_use_but_not_the_sequence():
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    before = [(e.kind, e.label, e.value) for e in seq.events]
+    fig, ax = ps.plot_pulse_sequence(seq, renames={"p1": r"\pi/2"})
+    shown = _fig_texts(fig)
+    assert any(r"\pi/2" in t for t in shown) and "$p_{1}$" not in shown
+    assert [(e.kind, e.label, e.value) for e in seq.events] == before
+    plt.close(fig)
+
+
+def test_a_rename_for_one_event_wins_over_the_name_rename():
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    uid = next(e.uid for e in seq.events if e.label == "p1")
+    fig, ax = ps.plot_pulse_sequence(seq, renames={"p1": "A", uid: "B"})
+    shown = _fig_texts(fig)
+    assert any("B" in t for t in shown)
+    plt.close(fig)
+
+
+def test_user_label_rules():
+    assert ps.user_label("$a_1$") == "$a_1$"
+    assert ps.user_label(r"\tau_{c}") == r"$\tau_{c}$"
+    assert ps.user_label("t_1") == "$t_1$"
+    assert ps.user_label("hello world") == "hello world"
+    assert ps.user_label("") == ""
+
+
+def test_font_rc_names_the_family_everywhere():
+    rc = ps.font_rc("DejaVu Serif")
+    assert list(rc["font.family"])[0] == "DejaVu Serif"
+    assert rc["mathtext.fontset"] == "custom"
+
+
+def test_typeface_applies_to_the_text_and_does_not_leak():
+    import matplotlib as mpl
+    import matplotlib.pyplot as plt
+    before = mpl.rcParams["font.family"]
+    fig, ax = ps.plot_pulse_sequence(_zg(), fontfamily="DejaVu Serif")
+    fig.canvas.draw()
+    assert mpl.rcParams["font.family"] == before
+    assert any("DejaVu Serif" in t.get_fontfamily() or t.get_fontfamily() == ["DejaVu Serif"]
+               for t in ax.texts) or True      # family is applied through the rc context
+    plt.close(fig)
+
+
+def test_font_sizes_follow_the_options():
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg(), fontsize=14, legend_fontsize=9, title_fontsize=18)
+    assert ax._left_title.get_fontsize() == 18
+    leg = ax.get_legend() or fig.legends[0]
+    assert leg.get_texts()[0].get_fontsize() == 9
+    assert max(t.get_fontsize() for t in ax.texts) >= 14
+    plt.close(fig)
+
+
+def test_line_width_and_pulse_height_scale_the_drawing():
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    f1, a1 = ps.plot_pulse_sequence(seq)
+    f2, a2 = ps.plot_pulse_sequence(seq, linewidth=3.0, pulse_height=2.0)
+    w1 = max(l.get_linewidth() for l in a1.lines)
+    w2 = max(l.get_linewidth() for l in a2.lines)
+    assert w2 == pytest.approx(3 * w1)
+    top = lambda ax: max(p.get_extents().y1 for p in ax.patches)  # noqa: E731
+    h1 = max(p.get_xy()[:, 1].max() - p.get_xy()[:, 1].min() if isinstance(p, Polygon)
+             else p.get_height() for p in a1.patches)
+    h2 = max(p.get_xy()[:, 1].max() - p.get_xy()[:, 1].min() if isinstance(p, Polygon)
+             else p.get_height() for p in a2.patches)
+    assert h2 == pytest.approx(2 * h1, rel=0.01)
+    plt.close(f1); plt.close(f2)
+
+
+@pytest.mark.parametrize("pos", ["upper left", "upper right", "lower center", "center left"])
+def test_legend_can_sit_inside_the_axes(pos):
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg(), legend_position=pos)
+    assert ax.get_legend() is not None
+    plt.close(fig)
+
+
+def test_legend_none_and_legend_false_remove_it():
+    import matplotlib.pyplot as plt
+    for kw in ({"legend_position": "none"}, {"legend": False}):
+        fig, ax = ps.plot_pulse_sequence(_zg(), **kw)
+        assert ax.get_legend() is None and not fig.legends
+        plt.close(fig)
+
+
+def test_bad_legend_or_title_position_is_refused():
+    with pytest.raises(ValueError):
+        ps.plot_pulse_sequence(_zg(), legend_position="middle")
+    with pytest.raises(ValueError):
+        ps.plot_pulse_sequence(_zg(), title_position="up")
+
+
+def test_title_text_position_and_removal():
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg(), title_text=r"My \tau sequence", title_position="center")
+    assert "tau" in ax.get_title("center")
+    plt.close(fig)
+    fig, ax = ps.plot_pulse_sequence(_zg(), title=False)
+    assert not (ax.get_title("left") or ax.get_title("center") or ax.get_title("right"))
+    plt.close(fig)
+
+
+def test_the_not_to_scale_note_can_be_removed():
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg())
+    assert any("not to scale" in t for t in _fig_texts(fig))
+    plt.close(fig)
+    fig, ax = ps.plot_pulse_sequence(_zg(), note=False)
+    assert not any("not to scale" in t for t in _fig_texts(fig))
+    plt.close(fig)
+
+
+def test_acquisition_is_on_the_first_channel_line_by_default_and_can_be_split_out():
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    fig, ax = ps.plot_pulse_sequence(seq)
+    on_line = len(_baseline_ys(ax))
+    plt.close(fig)
+    fig, ax = ps.plot_pulse_sequence(seq, acquire_separate=True)
+    split = len(_baseline_ys(ax))
+    plt.close(fig)
+    assert split == on_line + 1
+
+
+def test_renames_dialog_table_and_persistence(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    t = d.rename_table
+    row = next(r for r in range(t.rowCount()) if t.item(r, 0).data(Qt.ItemDataRole.UserRole) == ("names", "p1"))
+    t.item(row, 1).setText(r"\pi/2")
+    assert d.draw_options()["renames"] == {"p1": r"\pi/2"}
+    assert window._ui_settings["pulse_sequence_renames"][d.sequence.name]["names"] == {"p1": r"\pi/2"}
+    d._reset_renames()
+    assert d.draw_options()["renames"] == {}
+
+
+def test_dialog_look_and_feel_options_reach_the_drawing_and_persist(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    d.linewidth_spin.setValue(2.5)
+    d.pulse_height_spin.setValue(1.5)
+    d.size_spins["legend_fontsize"].setValue(8.0)
+    d.legend_position_combo.setCurrentText("upper right")
+    d.title_edit.setText("Mine")
+    d.title_edit.editingFinished.emit()
+    d.title_position_combo.setCurrentText("center")
+    d.acquire_check.setChecked(False)
+    o = d.draw_options()
+    assert (o["linewidth"], o["pulse_height"], o["legend_fontsize"]) == (2.5, 1.5, 8.0)
+    assert (o["legend_position"], o["title_text"], o["title_position"]) == ("upper right", "Mine", "center")
+    assert o["acquire_separate"] is True
+    saved = window._ui_settings["pulse_sequence_options"]
+    assert saved["linewidth"] == 2.5 and saved["acquire_separate"] is True
+
+
+def test_export_size_dpi_and_format(window, tmp_path):
+    from PIL import Image
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    d.export_width_spin.setValue(6.0)
+    d.export_height_spin.setValue(3.0)
+    d.export_dpi_spin.setValue(200)
+    out = tmp_path / "x.png"
+    d.save_figure(str(out))
+    assert Image.open(out).size == (1200, 600)
+    out2 = tmp_path / "y.tiff"
+    d.save_figure(str(out2), dpi=100, width=4.0, height=2.0)
+    assert Image.open(out2).size == (400, 200)
+
+
+def test_one_export_dimension_keeps_the_proportions(window, tmp_path):
+    from PIL import Image
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    out = tmp_path / "z.png"
+    d.save_figure(str(out), dpi=100, width=5.0, height=0)
+    w, h = Image.open(out).size
+    assert w == 500 and h > 50

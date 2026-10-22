@@ -65,7 +65,8 @@ __all__ = [
     "DEFAULT_COLORS", "KIND_NAMES", "PulseSequence", "PulseSequenceError",
     "read_pulse_sequences", "parse_pulse_sequence", "pulse_sequence_for",
     "find_sequence_file", "plot_pulse_sequence", "figure_size", "event_table", "channel_nuclei",
-    "pulse_label", "enable_zoom_pan", "housekeeping_delays", "DELAY_STYLES",
+    "pulse_label", "enable_zoom_pan", "housekeeping_delays", "DELAY_STYLES", "LEGEND_POSITIONS",
+    "TITLE_POSITIONS", "font_rc", "user_label",
 ]
 
 
@@ -195,6 +196,9 @@ def event_table(seq: PulseSequence) -> list:
 # ---------------------------------------------------------------------------
 
 DELAY_STYLES = ("line", "brackets", "block")
+LEGEND_POSITIONS = ("below", "above", "upper left", "upper center", "upper right", "center left",
+                    "center right", "lower left", "lower center", "lower right", "none")
+TITLE_POSITIONS = ("left", "center", "right")
 _ROW_H = 1.9
 _H_PULSE, _H_DEC, _H_GRAD, _H_ACQ = 1.0, 0.34, 0.8, 0.55
 
@@ -210,13 +214,58 @@ def figure_size(seq: PulseSequence, show_minor_delays=False,
     return (min(max(6.0, 0.62 * lay.width + 2.0), 16.0), height)
 
 
+def font_rc(family: str | None = None) -> dict:
+    """matplotlib ``rcParams`` that put **all** text -- and the maths in
+    ``$...$`` labels -- in one typeface. Use it around code that draws or
+    saves a figure outside :func:`plot_pulse_sequence`::
+
+        with matplotlib.rc_context(ps.font_rc("Times New Roman")):
+            fig.savefig("sequence.pdf")
+
+    (``plot_pulse_sequence(fontfamily=...)`` already does this for its own figure.)"""
+    if not family:
+        return {}
+    return {"font.family": [family, "sans-serif"], "mathtext.fontset": "custom",
+            "mathtext.rm": family, "mathtext.it": f"{family}:italic", "mathtext.bf": f"{family}:bold",
+            "mathtext.sf": family, "mathtext.tt": family, "mathtext.cal": family,
+            "mathtext.fallback": "cm"}
+
+
+def user_label(text) -> str:
+    """Text a user typed as a name, ready for matplotlib. Anything with a
+    ``$`` is taken as written (``'$\\tau_{c}$'``); a bare LaTeX fragment
+    (``'\\pi/2'``, ``'t^2'``, ``'\\tau_1'``) is wrapped in ``$...$``; a plain
+    symbol name (``'p1'``, ``'tau'``) is set like the file's own names
+    (italic, subscripted number); anything else is plain text."""
+    text = str(text)
+    if "$" in text:
+        return text
+    if re.search(r"[\\^_]", text):
+        return f"${text}$"
+    if re.fullmatch(r"[0-9.]*[A-Za-z]{1,6}\d*", text):
+        return pulse_label(text)
+    return text
+
+
+def _plain_width_text(text: str) -> str:
+    return re.sub(r"\\(?:mathit|mathrm|mathregular)|[$\\{}_^]", "", text)
+
+
 def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = None,
                         show_pulse_names: bool = True, show_delay_names: bool = True,
                         show_names=None, show_values: bool = False,
                         show_minor_delays=False, show_loops: bool = True,
                         delay_style: str | None = None, delays_inline: bool | None = None,
-                        legend: bool = True, title: bool = True,
-                        figsize=None, fontsize: float = 10.0):
+                        renames: dict | None = None, channel_labels: dict | None = None,
+                        legend_labels: dict | None = None,
+                        acquire_separate: bool = False,
+                        legend: bool = True, legend_position: str = "below",
+                        title: bool = True, title_text: str | None = None,
+                        title_position: str = "left", note: bool = True,
+                        figsize=None, fontsize: float = 10.0, channel_fontsize: float | None = None,
+                        legend_fontsize: float | None = None, title_fontsize: float | None = None,
+                        fontfamily: str | None = None, linewidth: float = 1.0,
+                        pulse_height: float = 1.0):
     """Draw ``seq`` as a pulse-sequence diagram. Returns ``(fig, ax)``.
 
     Parameters
@@ -246,7 +295,60 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
     delays_inline
         Old spelling: ``True`` is ``delay_style="brackets"``, ``False``
         is ``"block"``.
+    renames
+        What to call things on the drawing -- the file and the order of
+        events are untouched. ``{'p1': r'\\pi/2', 'tau': r'\\tau_{c}', 7: '$t_1$'}``:
+        a name (every event called that) or an event ``uid`` (just that one,
+        which wins) -> text. LaTeX works (see :func:`user_label`).
+    channel_labels, legend_labels
+        Same for the channel names (``{'f1': r'$^{19}$F'}``) and the legend
+        entries (``{'hard': r'$\\pi/2$ pulse'}``).
+    acquire_separate
+        ``False`` (the default): the acquisition is drawn **on the first
+        channel's line**, after the pulses and delays, as in TopSpin.
+        ``True``: on a line of its own.
+    legend, legend_position
+        ``legend_position`` is one of :data:`LEGEND_POSITIONS` (``"below"``
+        and ``"above"`` the diagram, a corner / side inside it, or ``"none"``).
+    title, title_text, title_position
+        ``title=False`` removes it; ``title_text`` replaces the sequence name
+        (LaTeX allowed); ``title_position`` is ``"left"``, ``"center"`` or
+        ``"right"``. ``note=False`` removes "schematic – not to scale".
+    fontsize, channel_fontsize, legend_fontsize, title_fontsize
+        Point sizes of the names (and the delay names), the channel labels, the
+        legend and the title (defaults: ``fontsize``, 0.85x and 1.15x it).
+    fontfamily
+        A typeface for everything, maths included (see :func:`font_rc`).
+    linewidth
+        Multiplies every line (baselines, brackets, pulse outlines, loops).
+    pulse_height
+        Multiplies the height of every pulse, gradient and the acquisition
+        by the same factor.
     """
+    import matplotlib
+    kw = dict(locals())
+    kw.pop("matplotlib", None)
+    rc = font_rc(fontfamily)
+    with matplotlib.rc_context(rc):
+        fig, ax = _draw_pulse_sequence(**kw)
+    fig._opennmr_font_rc = rc
+    if not getattr(fig, "_opennmr_rc_wrapped", False):
+        original = fig.draw
+
+        def draw(renderer, *a, **k):
+            with matplotlib.rc_context(getattr(fig, "_opennmr_font_rc", {})):
+                return original(renderer, *a, **k)
+        fig.draw = draw
+        fig._opennmr_rc_wrapped = True
+    return fig, ax
+
+
+def _draw_pulse_sequence(seq, ax, colors, show_pulse_names, show_delay_names, show_names,
+                         show_values, show_minor_delays, show_loops, delay_style, delays_inline,
+                         renames, channel_labels, legend_labels, acquire_separate, legend,
+                         legend_position, title, title_text, title_position, note, figsize,
+                         fontsize, channel_fontsize, legend_fontsize, title_fontsize, fontfamily,
+                         linewidth, pulse_height):
     import matplotlib.pyplot as plt
     from matplotlib.patches import Polygon, Rectangle
     import numpy as np
@@ -256,19 +358,39 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
                             else "line")
     if style not in DELAY_STYLES:
         raise ValueError(f"delay_style must be one of {DELAY_STYLES}, got {style!r}.")
+    if legend_position not in LEGEND_POSITIONS:
+        raise ValueError(f"legend_position must be one of {LEGEND_POSITIONS}, got {legend_position!r}.")
+    if title_position not in TITLE_POSITIONS:
+        raise ValueError(f"title_position must be one of {TITLE_POSITIONS}, got {title_position!r}.")
+    renames = dict(renames or {})
+    lw = float(linewidth)
+    hp, hd, hg, ha = (_H_PULSE * pulse_height, _H_DEC * pulse_height, _H_GRAD * pulse_height,
+                      _H_ACQ * pulse_height)
+    row_h = _ROW_H + max(0.0, pulse_height - 1.0) * _H_PULSE
+    cfs = channel_fontsize or fontsize
+    lfs = legend_fontsize or fontsize * 0.85
+    tfs = title_fontsize or fontsize * 1.15
 
     def named(e) -> bool:
         if show_names is not None:
             return e.uid in set(show_names)
         return show_delay_names if e.kind == "delay" else show_pulse_names
 
+    def shown(e, base: str) -> str:
+        """The drawn text for ``e``'s name ``base``: a rename (by uid, then by
+        name) or the file's own name set as a symbol."""
+        r = renames.get(e.uid, renames.get(base))
+        if r is not None:
+            return user_label(r)
+        return pulse_label(e.label) if e.label else base
+
     def delay_text(e):
         """(drawn text, plain text for width) of a delay's name, or None."""
         name = e.name
         if not name or not named(e):
             return None
-        txt = pulse_label(e.label) if e.label else name
-        plain = name
+        txt = shown(e, name)
+        plain = _plain_width_text(txt) if "$" in txt else (name if not e.label else _plain_width_text(txt))
         if style != "line" and show_values and e.value is not None and e.label:
             extra = f"  {format_time(e.value)}"
             txt, plain = txt + extra, plain + extra
@@ -283,7 +405,6 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
     min_widths = ({e.uid: text_width(delay_text(e)[1]) + 0.1 for e in shown_delays}
                   if style == "line" else None)
     lay = compute_layout(seq, False, min_widths)
-    shown_uids = {e.uid for e in shown_delays}
 
     # Delay names are staggered onto up to three levels so neighbours never
     # overlap; the lane is made tall enough for the levels actually used.
@@ -299,33 +420,37 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
         delay_level[e.uid] = level
     n_levels = max(delay_level.values(), default=0) + 1
     chans = seq.channels or ["f1"]
+    acq_on_line = (not acquire_separate) and "ACQ" in chans and len(chans) > 1
+    if acq_on_line:
+        chans = [c for c in chans if c != "ACQ"]
     nrows = len(chans)
     lane_h = 0.95 + 0.42 * max(0, n_levels - 2)
     has_delays = bool(shown_delays) and style != "line"
     n_lanes = (max(lay.lane[e.uid] for e in shown_delays) + 1) if has_delays else 0
     if style == "line":
-        row_y = {c: -(i * _ROW_H) for i, c in enumerate(chans)}
+        row_y = {c: -(i * row_h) for i, c in enumerate(chans)}
         delay_top = row_y[chans[0]]
         bottom = row_y[chans[-1]] - 0.9
     elif style == "brackets":
         # The delay brackets sit right under the first channel's line, among
         # the pulses; the other channels are pushed down to make room.
         block = (n_lanes * lane_h + 0.6) if has_delays else 0.0
-        row_y = {c: -(i * _ROW_H) - (block if i > 0 else 0.0) for i, c in enumerate(chans)}
+        row_y = {c: -(i * row_h) - (block if i > 0 else 0.0) for i, c in enumerate(chans)}
         delay_top = row_y[chans[0]] - 0.9
         bottom = row_y[chans[-1]] - 0.9
     else:
-        row_y = {c: -(i * _ROW_H) for i, c in enumerate(chans)}
-        delay_top = -(nrows - 1) * _ROW_H - 0.9
+        row_y = {c: -(i * row_h) for i, c in enumerate(chans)}
+        delay_top = -(nrows - 1) * row_h - 0.9
         bottom = delay_top - n_lanes * lane_h - 0.5
+    if acq_on_line:
+        row_y["ACQ"] = row_y[chans[0]]
     loop_depth = max([lp.depth for lp, _, _ in lay.loops] + [-1]) + 1 if show_loops else 0
-    top = _H_PULSE + 0.9 + 0.5 * loop_depth
+    top = hp + 0.9 + 0.5 * loop_depth
 
     if ax is None:
         if figsize is None:
-            depth = (max([lp.depth for lp, _, _ in lay.loops] + [-1]) + 1) if show_loops else 0
             figsize = (min(max(6.0, 0.62 * lay.width + 2.0), 24.0),
-                       0.55 * (nrows * _ROW_H + 0.95 * n_lanes + 1.6 + 0.5 * depth) + 0.6)
+                       0.55 * (nrows * row_h + 0.95 * n_lanes + 1.6 + 0.5 * loop_depth) + 0.6)
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
@@ -342,35 +467,39 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
 
     # channel baselines and labels
     nuc = getattr(seq, "channel_nuclei", {}) or {}
+    channel_labels = channel_labels or {}
     for c in chans:
         y = row_y[c]
-        ax.plot([0, lay.width], [y, y], color="#9a9a9a", lw=0.8, zorder=1, solid_capstyle="butt")
-        if c == "G":
+        ax.plot([0, lay.width], [y, y], color="#9a9a9a", lw=0.8 * lw, zorder=1, solid_capstyle="butt")
+        if c in channel_labels:
+            lab = user_label(channel_labels[c])
+        elif c == "G":
             lab = "Gradient"
         elif c == "ACQ":
             lab = "Acquire"
         else:
             lab = f"{nuc[c]}" if c in nuc else c
             lab = lab if c not in nuc else f"{lab}  ({c})"
-        ax.text(-0.35, y + 0.18, lab, ha="right", va="center", fontsize=fontsize, color="#222")
+        ax.text(-0.35, y + 0.18, lab, ha="right", va="center", fontsize=cfs, color="#222")
 
     last_end: dict = {}
 
     def put_label(e, x_mid, y_base, h, fill):
         if not named(e) or not e.label or e.kind == "acquire":
             return
-        txt = pulse_label(e.label)
+        txt = shown(e, e.label)
         if show_values and e.value is not None:
             txt += "\n" + format_time(e.value)
         level = 0
         key = e.channel
-        est = 0.115 * len(e.label) * fontsize / 10.0 + 0.1
+        est = 0.115 * len(_plain_width_text(txt)) * fontsize / 10.0 + 0.1
         if last_end.get(key, (-9e9, 0))[0] > x_mid - est / 2:
             level = 1 - last_end[key][1]
         last_end[key] = (x_mid + est / 2, level)
         ax.text(x_mid, y_base + h + 0.1 + 0.5 * level, txt, ha="center", va="bottom",
                 fontsize=fontsize, color=fill, zorder=5, linespacing=1.0)
 
+    acq_spans = []
     for e in seq.events:
         if e.kind == "delay":
             continue
@@ -379,59 +508,63 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
         c = col.get(e.kind, "#444")
         xm = 0.5 * (x0 + x1)
         if e.kind == "hard":
-            ax.add_patch(Rectangle((x0, y), max(x1 - x0, 0.05), _H_PULSE, fc=c, ec=c, lw=0.8, zorder=3))
-            put_label(e, xm, y, _H_PULSE, c)
+            ax.add_patch(Rectangle((x0, y), max(x1 - x0, 0.05), hp, fc=c, ec=c, lw=0.8 * lw, zorder=3))
+            put_label(e, xm, y, hp, c)
         elif e.kind == "shaped":
             n = 60
             xs = np.linspace(x0, x1, n)
             a = max((x1 - x0) / 2, 1e-6)
-            ys = y + _H_PULSE * np.sqrt(np.clip(1 - ((xs - xm) / a) ** 2, 0, 1))
+            ys = y + hp * np.sqrt(np.clip(1 - ((xs - xm) / a) ** 2, 0, 1))
             ax.add_patch(Polygon(np.column_stack([np.r_[xs, xs[0]], np.r_[ys, y]]),
-                                 closed=True, fc=c, ec=c, lw=0.8, zorder=3, joinstyle="round"))
-            put_label(e, xm, y, _H_PULSE, c)
+                                 closed=True, fc=c, ec=c, lw=0.8 * lw, zorder=3, joinstyle="round"))
+            put_label(e, xm, y, hp, c)
         elif e.kind == "decoupling":
-            ax.add_patch(Rectangle((x0, y), max(x1 - x0, 0.05), _H_DEC, fc=c, ec=c, lw=0.8,
+            ax.add_patch(Rectangle((x0, y), max(x1 - x0, 0.05), hd, fc=c, ec=c, lw=0.8 * lw,
                                    alpha=0.9, zorder=2))
-            put_label(e, xm, y, _H_DEC, c)
+            put_label(e, xm, y, hd, c)
         elif e.kind == "gradient":
-            ax.add_patch(Rectangle((x0, y), max(x1 - x0, 0.05), _H_GRAD, fc=c, ec=c, lw=0.8,
+            ax.add_patch(Rectangle((x0, y), max(x1 - x0, 0.05), hg, fc=c, ec=c, lw=0.8 * lw,
                                    alpha=0.9, zorder=2))
-            put_label(e, xm, y, _H_GRAD, c)
+            put_label(e, xm, y, hg, c)
         elif e.kind == "acquire":
             xs = np.linspace(x0, x1, 240)
             f = max((x1 - x0) * 2.2, 3.0)
-            ys = y + _H_ACQ * np.exp(-3.0 * (xs - x0) / max(x1 - x0, 1e-6)) * np.cos(
+            ys = y + ha * np.exp(-3.0 * (xs - x0) / max(x1 - x0, 1e-6)) * np.cos(
                 2 * math.pi * f * (xs - x0) / max(x1 - x0, 1e-6) * 2.0)
-            ax.plot(xs, ys, color=c, lw=1.3, zorder=3)
-            put_label(e, xm, y, _H_ACQ + 0.2, c)
+            ax.plot(xs, ys, color=c, lw=1.3 * lw, zorder=3)
+            put_label(e, xm, y, ha + 0.2, c)
+            if acq_on_line:
+                acq_spans.append((x0, x1))
 
     # delays
     dcol = col["delay"]
     if style == "line":
         # the name sits on the first channel's line, in the gap between pulses
+        # (above the FID where a delay runs under the acquisition)
         y0 = row_y[chans[0]]
         for e in shown_delays:
             t = delay_text(e)
             xm = 0.5 * (lay.x0[e.uid] + lay.x1[e.uid])
-            ax.text(xm, y0 + 0.12 + 0.42 * delay_level.get(e.uid, 0), t[0], ha="center",
+            lift = (ha + 0.1) if any(a <= xm <= b for a, b in acq_spans) else 0.0
+            ax.text(xm, y0 + 0.12 + lift + 0.42 * delay_level.get(e.uid, 0), t[0], ha="center",
                     va="bottom", fontsize=fontsize, color=dcol, zorder=5)
             if show_values and e.value is not None and e.label:
-                ax.text(xm, y0 - 0.12, format_time(e.value), ha="center", va="top",
-                        fontsize=fontsize * 0.8, color=dcol, zorder=5)
+                ax.text(xm, y0 - 0.12 - (ha if lift else 0.0), format_time(e.value), ha="center",
+                        va="top", fontsize=fontsize * 0.8, color=dcol, zorder=5)
     else:
         # thin brackets on lanes under the first channel (or, as a block, under the last)
         for e in sorted(shown_delays, key=lambda ev: lay.x0[ev.uid]):
             x0, x1 = lay.x0[e.uid], lay.x1[e.uid]
             y = delay_top - lay.lane.get(e.uid, 0) * lane_h
-            ax.plot([x0, x1], [y, y], color=dcol, lw=0.9, zorder=2, solid_capstyle="butt")
+            ax.plot([x0, x1], [y, y], color=dcol, lw=0.9 * lw, zorder=2, solid_capstyle="butt")
             for xx in (x0, x1):
-                ax.plot([xx, xx], [y - 0.1, y + 0.1], color=dcol, lw=0.9, zorder=2)
+                ax.plot([xx, xx], [y - 0.1, y + 0.1], color=dcol, lw=0.9 * lw, zorder=2)
             t = delay_text(e)
             xm = 0.5 * (x0 + x1)
             ax.text(xm, y - 0.14 - 0.42 * delay_level.get(e.uid, 0), t[0], ha="center", va="top",
                     fontsize=fontsize, color=dcol, zorder=5)
         if has_delays:
-            ax.text(-0.35, delay_top, "Delays", ha="right", va="center", fontsize=fontsize,
+            ax.text(-0.35, delay_top, "Delays", ha="right", va="center", fontsize=cfs,
                     color="#222")
 
     # loops
@@ -440,25 +573,38 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
         for lp, lx0, lx1 in lay.loops:
             y = top - 0.55 - 0.5 * lp.depth
             c = "#555"
-            ax.plot([lx0, lx0, lx1, lx1], [y - 0.14, y, y, y - 0.14], color=c, lw=1.0, zorder=4)
+            ax.plot([lx0, lx0, lx1, lx1], [y - 0.14, y, y, y - 0.14], color=c, lw=1.0 * lw, zorder=4)
             cnt = f"{lp.n}" if lp.n else (pulse_label(lp.count) if lp.count else "n")
             loop_texts.append(ax.text(lx1 + 0.06, y, f"×{cnt}", ha="left", va="center",
                                       fontsize=fontsize * 0.9, color=c))
         _fit_texts_inside_right_edge(ax, loop_texts)
 
-    if legend:
+    if legend and legend_position != "none":
         present = [k for k in ("hard", "shaped", "decoupling", "gradient", "acquire")
                    if any(e.kind == k for e in seq.events)]
         if present:
             from matplotlib.patches import Patch
-            ax.legend(handles=[Patch(fc=col[k], ec=col[k], label=KIND_NAMES[k]) for k in present],
-                      loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=len(present),
-                      frameon=False, fontsize=fontsize * 0.85, handlelength=1.2,
-                      bbox_transform=ax.transAxes)
-    ax.text(lay.width + 0.5, bottom - 0.3, "schematic – not to scale", ha="right", va="bottom",
-            fontsize=fontsize * 0.75, style="italic", color="#777")
+            names = legend_labels or {}
+            handles = [Patch(fc=col[k], ec=col[k],
+                             label=user_label(names[k]) if k in names else KIND_NAMES[k])
+                       for k in present]
+            if legend_position in ("below", "above"):
+                where = dict(loc="upper center", bbox_to_anchor=(0.5, 0.0), bbox_transform=ax.transAxes) \
+                    if legend_position == "below" else \
+                    dict(loc="lower center", bbox_to_anchor=(0.5, 1.0), bbox_transform=ax.transAxes)
+                ncol = len(present)
+            else:
+                where = dict(loc=legend_position)
+                ncol = 1 if ("left" in legend_position or "right" in legend_position
+                             or legend_position == "center") else len(present)
+            ax.legend(handles=handles, ncol=ncol, frameon=False, fontsize=lfs, handlelength=1.2,
+                      **where)
+    if note:
+        ax.text(lay.width + 0.5, bottom - 0.3, "schematic – not to scale", ha="right", va="bottom",
+                fontsize=fontsize * 0.75, style="italic", color="#777")
     if title:
-        ax.set_title(seq.name, fontsize=fontsize * 1.15, loc="left")
+        ax.set_title(user_label(title_text) if title_text is not None else seq.name,
+                     fontsize=tfs, loc=title_position)
     # The full view, for "reset" after scrolling / dragging (enable_zoom_pan).
     ax._opennmr_home_view = (ax.get_xlim(), ax.get_ylim())
     return fig, ax
