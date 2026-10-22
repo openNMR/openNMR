@@ -302,3 +302,44 @@ def test_crosshair_does_not_pull_the_view_out_to_zero(window):
     assert ax.get_xlim() == pytest.approx(start[0]) and ax.get_ylim() == pytest.approx(start[1])
     # The crosshair lines are not data.
     assert not any(line in ax.lines for line in canvas._crosshair._vlines)
+
+
+# -- label height (explicit user request, 2026-10-22) ------------------------------------
+
+def test_label_height_lifts_the_names_clear_of_the_noise():
+    fig, ax = _agg_axes()
+    x, y = _noisy()
+    line, = ax.plot(x, y, label="sample")
+    ax.set_xlim(100, 0)
+    fig.canvas.draw()
+    low = label_traces(ax, [line], ["sample"], position=0.5)[0]
+    low_y = low.get_window_extent(fig.canvas.get_renderer()).y0
+    low.remove()
+    high = label_traces(ax, [line], ["sample"], position=0.5, height=0.25)[0]
+    high_y = high.get_window_extent(fig.canvas.get_renderer()).y0
+    axes_h = ax.get_window_extent(fig.canvas.get_renderer()).height
+    assert high_y - low_y == pytest.approx(0.25 * axes_h, rel=0.05)
+
+
+def test_label_height_slider_reaches_the_canvas_and_reads_back(window):
+    canvas = _compare(window, 1)
+    window.output_legend_style_combo.setCurrentIndex(
+        window.output_legend_style_combo.findData("labels"))
+    assert window.output_trace_label_height_slider.isEnabled()
+    before = [t.get_window_extent().y0 for t in canvas.trace_labels()]
+    window.output_trace_label_height_slider.setValue(30)
+    canvas.canvas.draw()
+    assert canvas.style_settings()["trace_label_height"] == pytest.approx(0.3)
+    after = [t.get_window_extent().y0 for t in canvas.trace_labels()]
+    assert len(after) == len(before) == 3
+    assert all(a > b for a, b in zip(after, before))
+    assert "trace_label_height" in canvas._STYLE_KEYS
+    window.output_legend_style_combo.setCurrentIndex(
+        window.output_legend_style_combo.findData("legend"))
+    assert not window.output_trace_label_height_slider.isEnabled()
+
+
+def test_plot_style_dialog_stays_wide(window):
+    window._on_plot_style_clicked()
+    dialog = window._style_dialog
+    assert dialog.minimumWidth() >= 560 and dialog.width() >= 560

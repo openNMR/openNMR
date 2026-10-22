@@ -1113,3 +1113,17 @@ def test_the_noesy_matches_mestrenovas_own_processing():
     # The solvent self-correlation lands on the diagonal.
     i1, i2 = np.unravel_index(np.argmax(magnitude), magnitude.shape)
     assert f1[i1] == pytest.approx(f2[i2], abs=0.3)
+
+
+def test_missing_o1_is_zero_not_one_hertz(tmp_path):
+    """No ``$O1`` in the file means no offset. The reader used to fall back
+    to 1 Hz, which shifted every axis by 1 Hz (explicit user report)."""
+    without = tmp_path / "no_o1.jdx"
+    without.write_text(FIXTURE.replace("##$O1= 2400.500000\n", ""))
+    zero = tmp_path / "zero_o1.jdx"
+    zero.write_text(FIXTURE.replace("##$O1= 2400.500000", "##$O1= 0.0"))
+    a = xpulse.read_1d(str(without), autophase=False, baseline_correct=False)
+    b = xpulse.read_1d(str(zero), autophase=False, baseline_correct=False)
+    assert a.metadata.o1 == 0.0
+    np.testing.assert_allclose(a.axes[0].hz, b.axes[0].hz, atol=1e-9)
+    np.testing.assert_allclose(a.axes[0].ppm, b.axes[0].ppm, atol=1e-12)

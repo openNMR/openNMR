@@ -5046,6 +5046,24 @@ class MainWindow(QMainWindow):
         position_layout.addWidget(self.output_trace_label_slider, 1)
         position_layout.addWidget(QLabel("Right"))
         style_form.addRow("Label position:", position_row, section="Legend")
+
+        height_row = QWidget()
+        height_layout = QHBoxLayout(height_row)
+        height_layout.setContentsMargins(0, 0, 0, 0)
+        height_layout.addWidget(QLabel("Low"))
+        self.output_trace_label_height_slider = QSlider(Qt.Orientation.Horizontal)
+        self.output_trace_label_height_slider.setRange(0, 50)
+        self.output_trace_label_height_slider.setValue(0)
+        self.output_trace_label_height_slider.setAccessibleName("Trace label height")
+        self.output_trace_label_height_slider.setToolTip(
+            "How far above its spectrum's noise each name sits, as a percentage of "
+            "the plot's height: 0 is just above the noise, higher lifts the names "
+            "clear of a peak or of the trace above.")
+        self.output_trace_label_height_slider.valueChanged.connect(
+            self._on_legend_appearance_changed)
+        height_layout.addWidget(self.output_trace_label_height_slider, 1)
+        height_layout.addWidget(QLabel("High"))
+        style_form.addRow("Label height:", height_row, section="Legend")
         self._sync_legend_frame_controls()
 
         # --- Accessible palettes -----------------------------------
@@ -5394,6 +5412,7 @@ class MainWindow(QMainWindow):
             "legend_linewidth": self.output_legend_linewidth_spin.value(),
             "legend_style": self.output_legend_style_combo.currentData(),
             "trace_label_position": self.output_trace_label_slider.value() / 100.0,
+            "trace_label_height": self.output_trace_label_height_slider.value() / 100.0,
             "line_width_scale": self.output_line_scale_spin.value(),
             # Not here: the series palette is app-wide and has its own
             # handler (_on_series_colormap_changed), so a per-plot style
@@ -5787,6 +5806,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "output_trace_label_slider"):
             # Each control is live only where it does something.
             self.output_trace_label_slider.setEnabled(labels)
+            self.output_trace_label_height_slider.setEnabled(labels)
             self.output_legend_linewidth_spin.setEnabled(not labels)
             self.output_legend_frame_checkbox.setEnabled(not labels)
 
@@ -5801,6 +5821,7 @@ class MainWindow(QMainWindow):
                 legend_linewidth=self.output_legend_linewidth_spin.value(),
                 legend_style=self.output_legend_style_combo.currentData(),
                 trace_label_position=self.output_trace_label_slider.value() / 100.0,
+                trace_label_height=self.output_trace_label_height_slider.value() / 100.0,
             )
 
     def _on_legend_color_clicked(self) -> None:
@@ -5873,6 +5894,8 @@ class MainWindow(QMainWindow):
             (self.output_legend_alpha_spin, settings["legend_framealpha"]),
             (self.output_legend_linewidth_spin, settings["legend_linewidth"] or 0.0),
             (self.output_trace_label_slider, int(round(settings["trace_label_position"] * 100))),
+            (self.output_trace_label_height_slider,
+             int(round(settings.get("trace_label_height", 0.0) * 100))),
             (self.output_line_scale_spin, settings.get("line_width_scale", 1.0)),
             (self.output_baseline_gap_spin, 100.0 * float(settings.get("baseline_gap", MplCanvas._BASELINE_GAP))),
             (self.output_stack_gap_spin, 100.0 * float(settings.get("stack_gap", MplCanvas._STACK_GAP))),
@@ -29365,18 +29388,25 @@ class _PlotStyleDialog(QDialog):
     a plot while looking at it.
     """
 
+    MIN_WIDTH = 560
+
     def __init__(self, parent, panel: QWidget) -> None:
         super().__init__(parent)
         self.setWindowTitle("Plot style")
         # Wide enough for the longest row without a sideways scroll.
-        self.resize(max(540, panel.sizeHint().width() + 40), 700)
+        # Never narrower than MIN_WIDTH, however the sections are collapsed
+        # when it opens: the hint of a panel of collapsed sections
+        # under-reads the width once they are expanded (the label-position
+        # and -height sliders, the font and colour rows).
+        self.setMinimumWidth(self.MIN_WIDTH)
+        self.resize(max(self.MIN_WIDTH + 80, panel.sizeHint().width() + 40), 700)
         layout = QVBoxLayout(self)
 
         scroll = QScrollArea()
         scroll.setWidget(panel)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         layout.addWidget(scroll)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)

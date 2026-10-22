@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from importlib import metadata
 
-_FALLBACK_VERSION = "0.5.3"
+_FALLBACK_VERSION = "0.5.4"
 
 try:
     __version__ = metadata.version("opennmr")

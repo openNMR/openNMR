@@ -123,7 +123,7 @@ def _noise_level(x, y, xlo, xhi, x_at, n_sigma, window_fraction):
 
 def label_traces(ax, lines=None, names=None, position: float = 0.02, fontsize=None,
                  n_sigma: float = 3.0, pad_points: float = 2.0, window_fraction: float = 0.04,
-                 fontfamily=None):
+                 fontfamily=None, height: float = 0.0):
     """Write each trace's name on the plot just above its own noise,
     instead of a legend (explicit user request, 2026-09-28).
 
@@ -133,6 +133,12 @@ def label_traces(ax, lines=None, names=None, position: float = 0.02, fontsize=No
     The name slides smoothly with it: at 0 it starts at the left edge,
     at 1 it ends at the right edge, at 0.5 it is centred -- so it never
     runs off the plot. The noise is read under the name's centre.
+
+    ``height`` : extra lift of every name above that noise level, as a
+    fraction of the axes' height (0 = just above the noise, 0.25 = a
+    quarter of the plot higher), so a name can be moved clear of a
+    peak or a neighbouring trace. It is the vertical counterpart of
+    ``position``.
 
     Each name's height is its trace's baseline at that position plus
     ``n_sigma`` times the trace's noise, and ``pad_points`` above that --
@@ -192,7 +198,9 @@ def label_traces(ax, lines=None, names=None, position: float = 0.02, fontsize=No
     # Collision handling in display space: each name at least one text
     # line above the one below it on the same axes.
     line_height_px = fontsize * 1.25 * ax.figure.dpi / 72.0
-    pad_px = pad_points * ax.figure.dpi / 72.0
+    axes_height_px = ax.get_window_extent(renderer).height or 1.0
+    height = min(max(float(height or 0.0), 0.0), 1.0)
+    pad_px = pad_points * ax.figure.dpi / 72.0 + height * axes_height_px
     texts = []
     previous_top = None
     for y, line, name, left, x_at in placed:

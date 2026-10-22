@@ -1206,6 +1206,8 @@ class MplCanvas(QWidget):
         # at _trace_label_position (0 = plot's left edge, 1 = right).
         self._legend_style = "legend"
         self._trace_label_position = 0.02
+        # Lift of the names above the noise, as a fraction of the plot height.
+        self._trace_label_height = 0.0
         self._trace_label_artists: list = []
         #: True while the figure is one drawn by show_external_plot.
         self._external_plot = False
@@ -4754,7 +4756,7 @@ class MplCanvas(QWidget):
             texts = plotting.label_traces(
                 ax, [h for h, _l in pairs], [l for _h, l in pairs],
                 position=self._trace_label_position, fontsize=fontsize,
-                fontfamily=self._font_family or None)
+                fontfamily=self._font_family or None, height=self._trace_label_height)
             self._trace_label_artists.extend(texts)
             if not getattr(ax, "_opennmr_label_cid", None):
                 ax._opennmr_label_cid = ax.callbacks.connect(
@@ -5302,6 +5304,7 @@ class MplCanvas(QWidget):
             "legend_linewidth": self._legend_linewidth,
             "legend_style": self._legend_style,
             "trace_label_position": self._trace_label_position,
+            "trace_label_height": self._trace_label_height,
             "line_width_scale": self._line_width_scale,
             "line_overrides": copy.deepcopy(self._line_overrides),
         }
@@ -5314,7 +5317,7 @@ class MplCanvas(QWidget):
                   axis_label_template=None, legend_frameon=None,
                   legend_fontsize=None, legend_framealpha=None, legend_facecolor=None,
                   legend_linewidth=None, legend_style=None,
-                  trace_label_position=None, top_spine=None, right_spine=None,
+                  trace_label_position=None, trace_label_height=None, top_spine=None, right_spine=None,
                   line_width_scale=None, line_overrides=None,
                   baseline_gap=None, stack_gap=None) -> None:
         """The Output tab's live style panel -- updates whichever of
@@ -5425,6 +5428,8 @@ class MplCanvas(QWidget):
             self._legend_style = "labels" if legend_style == "labels" else "legend"
         if trace_label_position is not None:
             self._trace_label_position = min(max(float(trace_label_position), 0.0), 1.0)
+        if trace_label_height is not None:
+            self._trace_label_height = min(max(float(trace_label_height), 0.0), 1.0)
         if line_width_scale is not None:
             if float(line_width_scale) <= 0:
                 raise ValueError("line_width_scale must be positive.")
@@ -5511,6 +5516,7 @@ class MplCanvas(QWidget):
         # just applied to its Text artists.
         self._apply_current_axis_style()
         if (legend_style is not None or trace_label_position is not None
+                or trace_label_height is not None
                 or labelsize is not None or legend_fontsize is not None
                 or font_family is not None):
             # Legend <-> names on the traces, or where/how big the names
@@ -5554,7 +5560,7 @@ class MplCanvas(QWidget):
         "contour_clevels", "contour_level_mode", "contour_power", "title_visible",
         "font_family", "axis_label_style", "axis_label_template", "legend_frameon",
         "legend_fontsize", "legend_framealpha", "legend_facecolor",
-        "legend_linewidth", "legend_style", "trace_label_position",
+        "legend_linewidth", "legend_style", "trace_label_position", "trace_label_height",
         "top_spine", "right_spine", "line_width_scale", "line_overrides",
         "baseline_gap", "stack_gap",
     )

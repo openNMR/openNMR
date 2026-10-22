@@ -519,7 +519,7 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     dt = 1.0 / sw
     sfo1_hz = float(params.get("$SFO1", 1.0)) * 1e6
     sf_hz = float(params.get("$SF", 1.0)) * 1e6
-    o1_hz = float(params.get("$O1", 1.0))
+    o1_hz = float(params.get("$O1", 0.0))
 
     if drift_shift_hz:
         # One step of an arrayed series (read_array) undoing the field
