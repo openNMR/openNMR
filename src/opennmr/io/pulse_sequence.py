@@ -73,7 +73,7 @@ class Event:
     t0: float = 0.0               # nominal start (s)
     t1: float = 0.0               # nominal end (s)
     value: float | None = None    # real duration (s) when known
-    minor: bool = False           # housekeeping delay, hidden by default
+    minor: bool = False           # kept for old code; no delay is "housekeeping" any more
     shape: str | None = None
     phase: str | None = None
     uid: int = -1
@@ -84,6 +84,17 @@ class Event:
 
     def value_text(self) -> str:
         return format_time(self.value)
+
+    @property
+    def name(self) -> str:
+        """What to call this event on a drawing: its short name (``d6``, ``tau``),
+        else the text written in the file (``30u``, ``1m``), else its duration."""
+        if self.label:
+            return self.label
+        text = self.expr.strip().strip("()").strip() if self.expr else ""
+        if text and len(text) <= 12:
+            return text
+        return format_time(self.value) if self.value is not None else ""
 
 
 @dataclass
@@ -154,8 +165,10 @@ class _Timeline:
     def add(self, kind, channel, label="", *, expr="", dur=None, shape=None,
             phase=None, minor=False, advance=True) -> Event:
         d = dur if dur is not None else NOMINAL[kind]
+        # Every delay is just a delay: nothing is hidden for being short
+        # (fast MAS experiments live on delays of a few microseconds).
         ev = Event(kind, channel, label, expr, self.t, self.t + d,
-                   dur, minor, shape, phase)
+                   dur, False, shape, phase)
         if self.recording:
             self.events.append(ev)
         if advance:
@@ -487,7 +500,9 @@ def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
                 if v is not None:
                     consts[nm.lower()] = v * 1e6 if _B_MICROSECONDS.fullmatch(nm) else v
             continue
-        if not line or re.match(r"(define|ph\d+\s*=|haltacqu)", line, re.I):
+        # "HaltAcqu, 1m": a label, then a real instruction (the final settle)
+        line = re.sub(r"^haltacqu\s*,?\s*", "", line, flags=re.I)
+        if not line or re.match(r"(define|ph\d+\s*=)", line, re.I):
             continue
         # leading label ("1 ze", "2 d1")
         m = re.match(r"(\d+)(?:\s+|$)", line)
@@ -1403,11 +1418,14 @@ def shown_minor_uids(seq: PulseSequence, show_minor=False) -> set:
     return minor & {int(u) for u in show_minor}
 
 
-def compute_layout(seq: PulseSequence, show_minor=False) -> Layout:
+def compute_layout(seq: PulseSequence, show_minor=False, min_widths=None) -> Layout:
     """Schematic x position of every event (log-compressed time, not to
     scale). Housekeeping delays that are not shown collapse to a thin gap
     (one gap for a run of them); ``show_minor`` is ``True``, ``False`` or
-    the uids of the housekeeping delays to show (:func:`shown_minor_uids`)."""
+    the uids of the housekeeping delays to show (:func:`shown_minor_uids`).
+    ``min_widths`` -- ``{event uid: width}``: a delay is stretched (never
+    shrunk) to at least this schematic width, so a name written in its gap
+    fits between the neighbouring pulses."""
     import bisect
     evs = seq.events
     shown = shown_minor_uids(seq, show_minor)
@@ -1418,7 +1436,7 @@ def compute_layout(seq: PulseSequence, show_minor=False) -> Layout:
         pts = [0.0, 1e-3]
     hidden_ids = {e.uid for e in hidden}
     visible_cover = [e for e in evs if e.uid not in hidden_ids]
-    xs = [0.0]
+    widths = []
     previous_collapsed = False
     for a, b in zip(pts[:-1], pts[1:]):
         mid = 0.5 * (a + b)
@@ -1430,6 +1448,19 @@ def compute_layout(seq: PulseSequence, show_minor=False) -> Layout:
         else:
             w = _interval_width(b - a)
             previous_collapsed = False
+        widths.append(w)
+    for e in evs:
+        need = (min_widths or {}).get(e.uid)
+        if not need or e.kind != "delay":
+            continue
+        idx = [i for i, (a, b) in enumerate(zip(pts[:-1], pts[1:]))
+               if e.t0 - 1e-12 <= 0.5 * (a + b) <= e.t1 + 1e-12]
+        have = sum(widths[i] for i in idx)
+        if idx and have < need:
+            for i in idx:
+                widths[i] += (need - have) / len(idx)
+    xs = [0.0]
+    for w in widths:
         xs.append(xs[-1] + w)
 
     def x(t):

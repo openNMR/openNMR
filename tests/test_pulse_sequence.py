@@ -167,10 +167,11 @@ def _kinds(seq, minor=True):
 def test_bruker_pulses_delays_and_acquisition():
     seq, = parse_pulse_sequence(BRUKER, "bruker",
                                 constants={"d1": 5.0, "p1": 10.0, "p2": 20.0, "d6": 1e-3, "l1": 8})
-    kinds = _kinds(seq, minor=False)
-    assert kinds == ["delay", "hard", "hard", "delay", "shaped", "hard", "delay", "acquire"]
+    kinds = _kinds(seq)
+    assert kinds == ["delay", "delay", "delay", "hard", "hard", "delay", "shaped", "delay", "hard",
+                     "delay", "acquire", "delay"]
     d1 = next(e for e in seq.events if e.label == "d1")
-    assert d1.value == 5.0 and not d1.minor
+    assert d1.value == 5.0
     p1 = next(e for e in seq.events if e.label == "p1")
     assert p1.value == pytest.approx(10e-6) and p1.channel == "f1"
     p6 = next(e for e in seq.events if e.label == "p6")
@@ -183,15 +184,6 @@ def test_bruker_two_groups_on_one_line_are_simultaneous():
     p3 = next(e for e in seq.events if e.label == "p3")
     assert (p1.channel, p3.channel) == ("f1", "f2")
     assert p1.t0 == p3.t0
-
-
-def test_bruker_housekeeping_delays_are_minor_and_each_its_own_event():
-    """2026-10-22: every housekeeping delay stays its own event (so the viewer
-    can offer a tick box for each) instead of neighbours being fused."""
-    seq, = parse_pulse_sequence(BRUKER, "bruker")
-    short = [e for e in seq.events if e.kind == "delay" and e.minor]
-    assert [e.expr for e in short] == ["1m", "1m", "30u", "1m"]
-    assert all(e.value is not None and e.value <= 1e-3 + 1e-12 for e in short)
 
 
 def test_bruker_ifdef_blocks_follow_zgoptns_and_flags():
@@ -303,7 +295,7 @@ def test_xpulse_without_events_says_so():
 
 def test_magritek_macro():
     seq, = parse_pulse_sequence(MAGRITEK, "magritek", name="COSY")
-    assert _kinds(seq, minor=False) == ["hard", "delay", "gradient", "hard", "acquire"]
+    assert _kinds(seq) == ["hard", "delay", "gradient", "delay", "hard", "acquire"]
     assert seq.of_kind("hard")[0].label == "d90"
 
 
@@ -314,19 +306,6 @@ def test_magritek_macro():
     (JEOL, "x.jxp", "jeol"), (BRUKER, "hahn.enb", "bruker")])
 def test_vendor_detection(text, path, vendor):
     assert io_ps.detect_vendor(text, path) == vendor
-
-
-# ----------------------------------------------------------------- layout
-
-def test_layout_is_ordered_and_collapses_housekeeping_delays():
-    seq, = parse_pulse_sequence(BRUKER, "bruker")
-    narrow = compute_layout(seq, show_minor=False)
-    wide = compute_layout(seq, show_minor=True)
-    assert narrow.width < wide.width
-    for e in seq.events:
-        assert narrow.x1[e.uid] >= narrow.x0[e.uid]
-    hard = seq.of_kind("hard")
-    assert all(a.t0 <= b.t0 for a, b in zip(hard, hard[1:]))
 
 
 def test_overlapping_delays_get_separate_lanes():
@@ -568,8 +547,8 @@ def test_display_options_persist(window, tmp_path):
     _load_spectrum_directly(window, _experiment_with_programme(tmp_path))
     window._show_pulse_sequence(0)
     d = window._pulse_sequence_dialog
-    d.minor_check.setChecked(True)
-    assert window._ui_settings["pulse_sequence_options"]["show_minor"] is True
+    d.delay_style_combo.setCurrentIndex(d.delay_style_combo.findData("block"))
+    assert window._ui_settings["pulse_sequence_options"]["delay_style"] == "block"
 
 
 def test_events_tab_lists_every_event(window, tmp_path):
@@ -669,51 +648,6 @@ def test_a_bracketed_calculated_delay_is_not_mistaken_for_a_pulse_group():
     assert not [e for e in seq.events if e.label == "(d12-p1)/2" and e.kind != "delay"]
 
 
-def test_literal_settling_delays_are_housekeeping_and_each_is_separate():
-    seq = _zg()
-    minor = [e for e in seq.events if e.minor]
-    assert [e.expr for e in minor] == ["30m", "1m", "30m"]
-    assert len({e.uid for e in minor}) == 3
-
-
-def test_shown_minor_uids_semantics():
-    from opennmr.io.pulse_sequence import shown_minor_uids
-    seq = _zg()
-    ids = [e.uid for e in seq.events if e.minor]
-    assert shown_minor_uids(seq, False) == set() and shown_minor_uids(seq, None) == set()
-    assert shown_minor_uids(seq, True) == set(ids)
-    assert shown_minor_uids(seq, [ids[1]]) == {ids[1]}
-    assert shown_minor_uids(seq, [ids[1], 9999]) == {ids[1]}      # not a housekeeping delay
-
-
-def test_layout_widens_with_each_ticked_housekeeping_delay():
-    seq, = parse_pulse_sequence(
-        "1 ze\n2 30m\n  d1\n  (p1 ph1):f1\n  20m\n  (p2 ph2):f1\n  4u\n  go=2 ph31\nexit\n",
-        "bruker", constants={"d1": 1.0, "p1": 10.0, "p2": 20.0})
-    ids = [e.uid for e in seq.events if e.minor]
-    assert len(ids) == 3
-    w = [compute_layout(seq, show_minor=s).width for s in (False, ids[:1], ids[:2], True)]
-    assert w[0] < w[1] < w[2] < w[3]
-
-
-def test_a_housekeeping_delay_under_a_decoupling_block_adds_no_width():
-    """The 1m under cpds/the acquisition: that stretch is already as wide as
-    those events make it, so ticking the delay changes only its bracket."""
-    seq = _zg()
-    ids = [e.uid for e in seq.events if e.minor]
-    mid = next(e.uid for e in seq.events if e.minor and e.expr == "1m")
-    assert compute_layout(seq, show_minor=[mid]).width == pytest.approx(
-        compute_layout(seq, show_minor=False).width)
-    assert ids
-
-
-def test_hidden_housekeeping_delays_take_no_lane():
-    seq = _zg()
-    lay = compute_layout(seq, show_minor=False)
-    assert all(not e.minor for e in seq.events if e.uid in lay.lane)
-    assert lay.n_lanes == 1
-
-
 def _bracket_ys(ax):
     """y of every horizontal delay bracket (two-point black lines)."""
     return sorted({round(float(l.get_ydata()[0]), 6) for l in ax.lines
@@ -726,53 +660,10 @@ def _baseline_ys(ax):
                    if len(l.get_xdata()) == 2 and l.get_color() == "#9a9a9a"}, reverse=True)
 
 
-def test_delays_are_drawn_among_the_pulses_by_default():
-    import matplotlib.pyplot as plt
-    seq = _zg()
-    fig, ax = ps.plot_pulse_sequence(seq)
-    f1, f2, acq = _baseline_ys(ax)
-    brackets = _bracket_ys(ax)
-    assert brackets and all(f2 < y < f1 for y in brackets)        # between the channels
-    plt.close(fig)
-    fig, ax = ps.plot_pulse_sequence(seq, delays_inline=False)
-    brackets = _bracket_ys(ax)
-    assert all(y < _baseline_ys(ax)[-1] for y in brackets)         # below every channel
-    plt.close(fig)
-
-
-def test_drawing_shows_exactly_the_ticked_housekeeping_delays():
-    import matplotlib.pyplot as plt
-    seq = _zg()
-    ids = [e.uid for e in seq.events if e.minor]
-    counts = []
-    for shown in (False, [ids[1]], True):
-        fig, ax = ps.plot_pulse_sequence(seq, show_minor_delays=shown)
-        counts.append(len(_bracket_ys(ax)) and sum(
-            1 for l in ax.lines if len(l.get_xdata()) == 2 and l.get_ydata()[0] == l.get_ydata()[1]
-            and l.get_color() == "#333333"))
-        plt.close(fig)
-    assert counts[1] == counts[0] + 1 and counts[2] == counts[0] + 3
-
-
-def test_a_ticked_unnamed_housekeeping_delay_shows_its_text():
-    import matplotlib.pyplot as plt
-    seq = _zg()
-    one = next(e.uid for e in seq.events if e.expr == "1m")
-    fig, ax = ps.plot_pulse_sequence(seq, show_minor_delays=[one], show_names=set())
-    assert "1m" in _label_texts(ax)
-    plt.close(fig)
-
-
 def test_pulse_label_of_a_calculated_value():
     assert ps.pulse_label("d20-p1") == r"$\mathit{d}_{20}$−$\mathit{p}_{1}$"
     assert ps.pulse_label("p1*0.33") == r"$\mathit{p}_{1}$·0.33"
     assert ps.pulse_label("(d3-p2)/2") == r"($\mathit{d}_{3}$−$\mathit{p}_{2}$)/2"
-
-
-def test_housekeeping_delays_listed_for_the_notebook():
-    seq = _zg()
-    assert [e.expr for e in ps.housekeeping_delays(seq)] == ["30m", "1m", "30m"]
-    assert all(r["housekeeping"] for r in ps.event_table(seq) if r["expression"] in ("30m", "1m"))
 
 
 def test_name_levels_keep_neighbouring_delay_names_apart():
@@ -780,7 +671,7 @@ def test_name_levels_keep_neighbouring_delay_names_apart():
     names overlap (they are staggered onto separate levels)."""
     import matplotlib.pyplot as plt
     seq = _zg()
-    fig, ax = ps.plot_pulse_sequence(seq, show_values=True, show_minor_delays=True)
+    fig, ax = ps.plot_pulse_sequence(seq, show_values=True, delay_style="brackets")
     fig.canvas.draw()
     rend = fig.canvas.get_renderer()
     delay_texts = [t for t in ax.texts if t.get_va() == "top" and t.get_text()
@@ -888,61 +779,11 @@ def test_zoom_can_be_switched_off():
     plt.close(fig)
 
 
-# ----------------------------------------------------------------------- GUI
-
-def test_housekeeping_tick_boxes_one_per_delay_and_drive_the_drawing(window, tmp_path):
-    from PySide6.QtCore import Qt
-    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
-    window._show_pulse_sequence(0)
-    d = window._pulse_sequence_dialog
-    assert d.minor_list.count() == 3
-    assert d.minor_list.item(0).text().startswith("30m")
-    assert d._shown_minor_uids() == set() and d.minor_check.checkState() == Qt.CheckState.Unchecked
-    d.minor_list.item(1).setCheckState(Qt.CheckState.Checked)
-    assert len(d._shown_minor_uids()) == 1
-    assert d.minor_check.checkState() == Qt.CheckState.PartiallyChecked
-    assert d.draw_options()["show_minor_delays"] == d._shown_minor_uids()
-    d.minor_check.setChecked(True)
-    assert len(d._shown_minor_uids()) == 3
-    assert all(d.minor_list.item(i).checkState() == Qt.CheckState.Checked for i in range(3))
-    d.minor_check.setChecked(False)
-    assert d._shown_minor_uids() == set()
-
-
-def test_master_choice_is_remembered_and_applied_to_the_next_sequence(window, tmp_path):
-    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
-    window._show_pulse_sequence(0)
-    d = window._pulse_sequence_dialog
-    d.minor_check.setChecked(True)
-    assert window._ui_settings["pulse_sequence_options"]["show_minor"] is True
-    d.load()
-    assert len(d._shown_minor_uids()) == 3
-
-
-def test_sequence_without_housekeeping_disables_the_box(window, tmp_path):
-    _load_spectrum_directly(window, _experiment_with_programme(
-        tmp_path, "1 ze\n2 d1\n  (p1 ph1):f1\n  go=2 ph31\nexit\n"))
-    window._show_pulse_sequence(0)
-    d = window._pulse_sequence_dialog
-    assert d.minor_list.count() == 0 and not d.minor_check.isEnabled()
-
-
 def test_the_recycle_delay_appears_in_the_window(window, tmp_path):
     _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
     window._show_pulse_sequence(0)
     d = window._pulse_sequence_dialog
     assert ps.pulse_label("d1") in _label_texts(d.figure.axes[0])
-
-
-def test_inline_option_persists_and_redraws(window, tmp_path):
-    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
-    window._show_pulse_sequence(0)
-    d = window._pulse_sequence_dialog
-    assert d.inline_check.isChecked() and d.draw_options()["delays_inline"] is True
-    inline_ylim = d.figure.axes[0].get_ylim()
-    d.inline_check.setChecked(False)
-    assert window._ui_settings["pulse_sequence_options"]["delays_inline"] is False
-    assert d.figure.axes[0].get_ylim() != inline_ylim
 
 
 def test_window_scroll_zooms_and_reset_view_restores(window, tmp_path):
@@ -973,7 +814,7 @@ def test_changing_a_colour_or_names_keeps_the_zoom_but_a_layout_change_resets_it
     d.colors["hard"] = "#123456"
     d._store_colours()
     assert d.figure.axes[0].get_xlim() == pytest.approx(zoomed)         # colour: same view
-    d.minor_check.setChecked(True)                                      # widths change -> full view
+    d.delay_style_combo.setCurrentIndex(d.delay_style_combo.findData("brackets"))   # layout change
     assert d.figure.axes[0].get_xlim() != pytest.approx(zoomed)
 
 
@@ -987,3 +828,202 @@ def test_toolbar_tool_owns_the_mouse_over_our_zoom(window, tmp_path):
     d.toolbar.mode = "zoom rect"                  # the toolbar's own zoom tool is on
     _scroll(d.figure, ax, 0.5 * sum(home), 0.0, "up")
     assert ax.get_xlim() == pytest.approx(home)
+
+
+
+# ------------------------------------------------- 2026-10-22: delays, round 2
+
+def _brackets(ax):
+    return [l for l in ax.lines if len(l.get_xdata()) == 2 and l.get_ydata()[0] == l.get_ydata()[1]
+            and l.get_color() == "#333333"]
+
+
+def test_no_delay_is_housekeeping_however_short():
+    seq = _zg()
+    assert not any(e.minor for e in seq.events)
+    short = [e.expr for e in seq.events if e.kind == "delay" and e.expr in ("30m", "1m")]
+    assert short == ["30m", "1m", "30m"]
+    fast, = parse_pulse_sequence("1 ze\n2 1u\n  (p1 ph1):f1\n  2u\n  go=2 ph31\nexit\n", "bruker",
+                                 constants={"p1": 3.0})
+    assert [e.name for e in fast.events if e.kind == "delay"] == ["1u", "2u"]
+    assert ps.housekeeping_delays(fast) == []
+
+
+def test_every_delay_has_a_name_to_draw():
+    seq = _zg()
+    assert all(e.name for e in seq.events if e.kind == "delay")
+    assert next(e for e in seq.events if e.expr == "1m").name == "1m"          # literal text
+    assert next(e for e in seq.events if e.label == "tau1").name == "tau1"
+
+
+def test_delay_names_sit_on_the_first_channel_line_by_default():
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    fig, ax = ps.plot_pulse_sequence(seq)
+    base = _baseline_ys(ax)[0]
+    assert not _brackets(ax) and "Delays" not in _label_texts(ax)
+    d1 = next(t for t in ax.texts if t.get_text() == ps.pulse_label("d1"))
+    assert 0.0 < d1.get_position()[1] - base < 0.5 and d1.get_va() == "bottom"
+    assert "1m" in _label_texts(ax) and "30m" in _label_texts(ax)
+    plt.close(fig)
+
+
+def test_delay_names_do_not_overlap_each_other_or_the_pulses():
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg(), show_values=True)
+    fig.canvas.draw()
+    rend = fig.canvas.get_renderer()
+    names = [t for t in ax.texts if t.get_text() and t.get_color() == "#333333"]
+    boxes = [t.get_window_extent(rend) for t in names]
+    assert len(boxes) >= 6
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1:]:
+            assert not a.overlaps(b), (names[i].get_text(), names[i + 1].get_text())
+    plt.close(fig)
+
+
+def test_the_bracket_styles_are_still_available():
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    fig, ax = ps.plot_pulse_sequence(seq, delay_style="brackets")
+    f1, f2, acq = _baseline_ys(ax)
+    ys = [float(l.get_ydata()[0]) for l in _brackets(ax)]
+    assert ys and all(f2 < y < f1 for y in ys) and "Delays" in _label_texts(ax)
+    plt.close(fig)
+    fig, ax = ps.plot_pulse_sequence(seq, delay_style="block")
+    ys = [float(l.get_ydata()[0]) for l in _brackets(ax)]
+    assert ys and all(y < _baseline_ys(ax)[-1] for y in ys)
+    plt.close(fig)
+
+
+def test_the_old_delays_inline_spelling_still_works():
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    fig, ax = ps.plot_pulse_sequence(seq, delays_inline=True)
+    assert _brackets(ax)
+    plt.close(fig)
+    fig, ax = ps.plot_pulse_sequence(seq, delays_inline=False)
+    assert _brackets(ax) and max(float(l.get_ydata()[0]) for l in _brackets(ax)) < _baseline_ys(ax)[-1]
+    plt.close(fig)
+
+
+def test_unknown_delay_style_is_refused():
+    with pytest.raises(ValueError):
+        ps.plot_pulse_sequence(_zg(), delay_style="sideways")
+
+
+@pytest.mark.parametrize("style", ["line", "brackets", "block"])
+def test_with_no_delay_names_there_is_no_delay_row(style):
+    """Reported: switching every delay off still left the empty 'Delays' line."""
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    fig, ax = ps.plot_pulse_sequence(seq, show_delay_names=False, delay_style=style)
+    assert not _brackets(ax) and "Delays" not in _label_texts(ax)
+    assert ps.pulse_label("d1") not in _label_texts(ax)
+    assert ps.pulse_label("p1") in _label_texts(ax)                  # the pulses are untouched
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("style", ["line", "brackets"])
+def test_a_single_delay_can_be_left_out(style):
+    import matplotlib.pyplot as plt
+    seq = _zg()
+    keep = {e.uid for e in seq.events if e.expr != "1m"}
+    fig, ax = ps.plot_pulse_sequence(seq, show_names=keep, delay_style=style)
+    assert "1m" not in _label_texts(ax) and "30m" in _label_texts(ax)
+    plt.close(fig)
+
+
+def test_a_short_gap_is_stretched_so_its_name_fits():
+    seq = _zg()
+    base = compute_layout(seq)
+    uid = next(e.uid for e in seq.events if e.expr == "1m")
+    wide = compute_layout(seq, min_widths={uid: 3.0})
+    assert wide.x1[uid] - wide.x0[uid] >= 3.0 - 1e-9
+    assert wide.width >= base.width
+    never_shrinks = compute_layout(seq, min_widths={uid: 0.01})
+    assert never_shrinks.width == pytest.approx(base.width)
+
+
+def test_the_loop_count_is_not_cut_off_at_the_right_edge():
+    import matplotlib.pyplot as plt
+    seq, = parse_pulse_sequence(
+        "define loopcounter count\n\"count=td1/2\"\n1 d1\n  (p1 ph1):f1\n  d21\n  go=1 ph31\n"
+        "  lo to 1 times count\nexit\n", "bruker", constants={"p1": 3.0, "d1": 1.0})
+    fig, ax = ps.plot_pulse_sequence(seq)
+    fig.canvas.draw()
+    rend = fig.canvas.get_renderer()
+    loop_text = next(t for t in ax.texts if t.get_text().startswith("×"))
+    assert loop_text.get_window_extent(rend).x1 <= ax.get_window_extent(rend).x1 + 1e-6
+    plt.close(fig)
+
+
+def test_the_final_settling_delay_after_haltacqu_is_drawn():
+    seq, = parse_pulse_sequence(
+        "1 ze\n2 d1\n  (p1 ph1):f1\n  go=2 ph31\n  100m wr #0\n  lo to 1 times td1\n"
+        "HaltAcqu, 1m\nexit\n", "bruker", constants={"p1": 3.0, "d1": 1.0})
+    delays = [e for e in seq.events if e.kind == "delay"]
+    assert delays[-1].expr == "1m" and delays[-1].t0 >= seq.events[-2].t0
+
+
+def test_figure_is_wide_enough_for_the_names_it_stretched():
+    import matplotlib.pyplot as plt
+    fig, ax = ps.plot_pulse_sequence(_zg())
+    assert fig.get_size_inches()[0] >= 6.0
+    plt.close(fig)
+
+
+def test_window_has_a_delay_style_choice_not_a_housekeeping_group(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    assert not hasattr(d, "minor_check") and not hasattr(d, "minor_list")
+    assert d.delay_style_combo.currentData() == "line"
+    opts = d.draw_options()
+    assert opts["delay_style"] == "line" and "show_minor_delays" not in opts
+
+
+def test_window_delay_style_redraws_and_is_remembered(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    assert not _brackets(d.figure.axes[0])
+    d.delay_style_combo.setCurrentIndex(d.delay_style_combo.findData("brackets"))
+    assert _brackets(d.figure.axes[0])
+    assert window._ui_settings["pulse_sequence_options"]["delay_style"] == "brackets"
+    d.load()
+    assert d.delay_style_combo.currentData() == "brackets" and _brackets(d.figure.axes[0])
+
+
+def test_every_delay_is_in_the_names_tree_including_literal_ones(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    delays = next(d.name_tree.topLevelItem(i) for i in range(d.name_tree.topLevelItemCount())
+                  if d.name_tree.topLevelItem(i).text(0) == "Delays")
+    texts = [delays.child(j).text(0) for j in range(delays.childCount())]
+    assert delays.childCount() == len([e for e in d.sequence.events if e.kind == "delay"])
+    assert any(t.startswith("1m") for t in texts) and any(t.startswith("30m") for t in texts)
+    assert not any("(short)" in t for t in texts)
+
+
+def test_unticking_the_delays_group_removes_every_delay_mark(window, tmp_path):
+    from PySide6.QtCore import Qt
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    for i in range(d.name_tree.topLevelItemCount()):
+        if d.name_tree.topLevelItem(i).text(0) == "Delays":
+            d.name_tree.topLevelItem(i).setCheckState(0, Qt.CheckState.Unchecked)
+    texts = _label_texts(d.figure.axes[0])
+    assert ps.pulse_label("d1") not in texts and "1m" not in texts and "Delays" not in texts
+    d.delay_style_combo.setCurrentIndex(d.delay_style_combo.findData("brackets"))
+    assert not _brackets(d.figure.axes[0]) and "Delays" not in _label_texts(d.figure.axes[0])
+
+
+def test_saving_the_figure_uses_the_chosen_delay_style(window, tmp_path):
+    _load_spectrum_directly(window, _experiment_with_programme(tmp_path, ZG_LIKE))
+    window._show_pulse_sequence(0)
+    d = window._pulse_sequence_dialog
+    out = d.save_figure(str(tmp_path / "seq.png"), dpi=60)
+    assert os.path.getsize(out) > 1000

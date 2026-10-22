@@ -65,7 +65,7 @@ __all__ = [
     "DEFAULT_COLORS", "KIND_NAMES", "PulseSequence", "PulseSequenceError",
     "read_pulse_sequences", "parse_pulse_sequence", "pulse_sequence_for",
     "find_sequence_file", "plot_pulse_sequence", "figure_size", "event_table", "channel_nuclei",
-    "pulse_label", "enable_zoom_pan", "housekeeping_delays",
+    "pulse_label", "enable_zoom_pan", "housekeeping_delays", "DELAY_STYLES",
 ]
 
 
@@ -194,6 +194,7 @@ def event_table(seq: PulseSequence) -> list:
 # drawing
 # ---------------------------------------------------------------------------
 
+DELAY_STYLES = ("line", "brackets", "block")
 _ROW_H = 1.9
 _H_PULSE, _H_DEC, _H_GRAD, _H_ACQ = 1.0, 0.34, 0.8, 0.55
 
@@ -213,7 +214,7 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
                         show_pulse_names: bool = True, show_delay_names: bool = True,
                         show_names=None, show_values: bool = False,
                         show_minor_delays=False, show_loops: bool = True,
-                        delays_inline: bool = True,
+                        delay_style: str | None = None, delays_inline: bool | None = None,
                         legend: bool = True, title: bool = True,
                         figsize=None, fontsize: float = 10.0):
     """Draw ``seq`` as a pulse-sequence diagram. Returns ``(fig, ax)``.
@@ -232,55 +233,67 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
     show_values
         Add the duration under a name where the file records it.
     show_minor_delays
-        Housekeeping delays (``30u``, ``de``, hardware set-up) to draw:
-        ``True`` for all of them, ``False`` for none (the default), or a
-        collection of event ``uid`` values to draw just those -- see
-        :func:`housekeeping_delays`.
+        Kept for old code and ignored: every delay, however short, is an
+        ordinary delay (switch single ones off with ``show_names``).
+    delay_style
+        ``"line"`` (the default): each delay's name is written **on the
+        first channel's line**, in its gap between the pulses (``d6``,
+        ``30u``, ``tau``), the way TopSpin does. ``"brackets"``: a bracket
+        per delay on lanes right under that line. ``"block"``: the brackets
+        in a block of their own below every channel. A delay whose name is
+        switched off is not drawn at all -- with no delay names there is no
+        delay row.
     delays_inline
-        ``True`` (the default): delays are drawn **with the pulses**, as
-        brackets directly under the first channel's line, on the same time
-        axis. ``False``: in a block of their own below every channel.
+        Old spelling: ``True`` is ``delay_style="brackets"``, ``False``
+        is ``"block"``.
     """
     import matplotlib.pyplot as plt
     from matplotlib.patches import Polygon, Rectangle
     import numpy as np
 
     col = {**DEFAULT_COLORS, **(colors or {})}
-    lay = compute_layout(seq, show_minor_delays)
-    shown_minor = shown_minor_uids(seq, show_minor_delays)
+    style = delay_style or ("brackets" if delays_inline else "block" if delays_inline is False
+                            else "line")
+    if style not in DELAY_STYLES:
+        raise ValueError(f"delay_style must be one of {DELAY_STYLES}, got {style!r}.")
+
     def named(e) -> bool:
-        # A ticked housekeeping delay with no name of its own (a literal
-        # ``30u``) always carries its text: ticking it is the request.
-        if e.kind == "delay" and e.uid in shown_minor and not e.label:
-            return True
         if show_names is not None:
             return e.uid in set(show_names)
         return show_delay_names if e.kind == "delay" else show_pulse_names
 
     def delay_text(e):
         """(drawn text, plain text for width) of a delay's name, or None."""
-        name = e.label or (e.expr if e.minor else "")
+        name = e.name
         if not name or not named(e):
             return None
         txt = pulse_label(e.label) if e.label else name
         plain = name
-        if show_values and e.value is not None and e.label:
+        if style != "line" and show_values and e.value is not None and e.label:
             extra = f"  {format_time(e.value)}"
             txt, plain = txt + extra, plain + extra
         return txt, plain
+
+    def text_width(plain: str, size: float = fontsize) -> float:
+        return 0.115 * len(plain) * size / 10.0 + 0.2
+
+    shown_delays = [e for e in seq.events if e.kind == "delay" and delay_text(e) is not None]
+    # In "line" style the name sits in the delay's own gap: stretch short gaps
+    # so it fits between the neighbouring pulses.
+    min_widths = ({e.uid: text_width(delay_text(e)[1]) + 0.1 for e in shown_delays}
+                  if style == "line" else None)
+    lay = compute_layout(seq, False, min_widths)
+    shown_uids = {e.uid for e in shown_delays}
 
     # Delay names are staggered onto up to three levels so neighbours never
     # overlap; the lane is made tall enough for the levels actually used.
     delay_level: dict = {}
     lane_ends: dict = {}
-    for e in sorted((e for e in seq.events if e.kind == "delay" and e.uid in lay.lane),
-                    key=lambda ev: lay.x0[ev.uid]):
+    for e in sorted((e for e in shown_delays), key=lambda ev: lay.x0[ev.uid]):
         t = delay_text(e)
-        if t is None:
-            continue
-        est = 0.115 * len(t[1]) * fontsize / 10.0 + 0.2
+        est = text_width(t[1])
         xm = 0.5 * (lay.x0[e.uid] + lay.x1[e.uid])
-        ends = lane_ends.setdefault(lay.lane[e.uid], [-9e9, -9e9, -9e9])
+        ends = lane_ends.setdefault(lay.lane[e.uid] if style != "line" else 0, [-9e9, -9e9, -9e9])
         level = next((k for k in range(3) if ends[k] <= xm - est / 2), ends.index(min(ends)))
         ends[level] = xm + est / 2
         delay_level[e.uid] = level
@@ -288,27 +301,43 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
     chans = seq.channels or ["f1"]
     nrows = len(chans)
     lane_h = 0.95 + 0.42 * max(0, n_levels - 2)
-    has_delays = any(e.kind == "delay" and e.uid in lay.lane for e in seq.events)
-    if delays_inline:
+    has_delays = bool(shown_delays) and style != "line"
+    n_lanes = (max(lay.lane[e.uid] for e in shown_delays) + 1) if has_delays else 0
+    if style == "line":
+        row_y = {c: -(i * _ROW_H) for i, c in enumerate(chans)}
+        delay_top = row_y[chans[0]]
+        bottom = row_y[chans[-1]] - 0.9
+    elif style == "brackets":
         # The delay brackets sit right under the first channel's line, among
         # the pulses; the other channels are pushed down to make room.
-        block = (lay.n_lanes * lane_h + 0.6) if has_delays else 0.0
+        block = (n_lanes * lane_h + 0.6) if has_delays else 0.0
         row_y = {c: -(i * _ROW_H) - (block if i > 0 else 0.0) for i, c in enumerate(chans)}
         delay_top = row_y[chans[0]] - 0.9
         bottom = row_y[chans[-1]] - 0.9
     else:
         row_y = {c: -(i * _ROW_H) for i, c in enumerate(chans)}
         delay_top = -(nrows - 1) * _ROW_H - 0.9
-        bottom = delay_top - lay.n_lanes * lane_h - 0.5
+        bottom = delay_top - n_lanes * lane_h - 0.5
     loop_depth = max([lp.depth for lp, _, _ in lay.loops] + [-1]) + 1 if show_loops else 0
     top = _H_PULSE + 0.9 + 0.5 * loop_depth
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=figsize or figure_size(seq, show_minor_delays, show_loops))
+        if figsize is None:
+            depth = (max([lp.depth for lp, _, _ in lay.loops] + [-1]) + 1) if show_loops else 0
+            figsize = (min(max(6.0, 0.62 * lay.width + 2.0), 24.0),
+                       0.55 * (nrows * _ROW_H + 0.95 * n_lanes + 1.6 + 0.5 * depth) + 0.6)
+        fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
     ax.set_axis_off()
-    ax.set_xlim(-2.2, lay.width + 0.6)
+    # room on the right for the longest loop label ("×count"), which hangs
+    # off the end of its bracket
+    right = lay.width + 0.6
+    if show_loops:
+        for lp, _lx0, lx1 in lay.loops:
+            cnt = f"{lp.n}" if lp.n else (lp.count if lp.count else "n")
+            right = max(right, lx1 + 0.12 + 0.115 * (len(cnt) + 1) * fontsize * 0.9 / 10.0)
+    ax.set_xlim(-2.2, right + 0.1)
     ax.set_ylim(bottom - 0.4, top + (0.6 if title else 0.1))
 
     # channel baselines and labels
@@ -376,34 +405,46 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
             ax.plot(xs, ys, color=c, lw=1.3, zorder=3)
             put_label(e, xm, y, _H_ACQ + 0.2, c)
 
-    # delays: thin brackets on lanes under the first channel (or, not inline, the last)
-    for e in sorted(seq.events, key=lambda ev: lay.x0[ev.uid]):
-        if e.kind != "delay":
-            continue
-        if e.minor and e.uid not in shown_minor:
-            continue
-        x0, x1 = lay.x0[e.uid], lay.x1[e.uid]
-        y = delay_top - lay.lane.get(e.uid, 0) * lane_h
-        c = col["delay"]
-        ax.plot([x0, x1], [y, y], color=c, lw=0.9, zorder=2, solid_capstyle="butt")
-        for xx in (x0, x1):
-            ax.plot([xx, xx], [y - 0.1, y + 0.1], color=c, lw=0.9, zorder=2)
-        t = delay_text(e)
-        if t is not None:
+    # delays
+    dcol = col["delay"]
+    if style == "line":
+        # the name sits on the first channel's line, in the gap between pulses
+        y0 = row_y[chans[0]]
+        for e in shown_delays:
+            t = delay_text(e)
+            xm = 0.5 * (lay.x0[e.uid] + lay.x1[e.uid])
+            ax.text(xm, y0 + 0.12 + 0.42 * delay_level.get(e.uid, 0), t[0], ha="center",
+                    va="bottom", fontsize=fontsize, color=dcol, zorder=5)
+            if show_values and e.value is not None and e.label:
+                ax.text(xm, y0 - 0.12, format_time(e.value), ha="center", va="top",
+                        fontsize=fontsize * 0.8, color=dcol, zorder=5)
+    else:
+        # thin brackets on lanes under the first channel (or, as a block, under the last)
+        for e in sorted(shown_delays, key=lambda ev: lay.x0[ev.uid]):
+            x0, x1 = lay.x0[e.uid], lay.x1[e.uid]
+            y = delay_top - lay.lane.get(e.uid, 0) * lane_h
+            ax.plot([x0, x1], [y, y], color=dcol, lw=0.9, zorder=2, solid_capstyle="butt")
+            for xx in (x0, x1):
+                ax.plot([xx, xx], [y - 0.1, y + 0.1], color=dcol, lw=0.9, zorder=2)
+            t = delay_text(e)
             xm = 0.5 * (x0 + x1)
             ax.text(xm, y - 0.14 - 0.42 * delay_level.get(e.uid, 0), t[0], ha="center", va="top",
-                    fontsize=fontsize, color=c, zorder=5)
-    if has_delays:
-        ax.text(-0.35, delay_top, "Delays", ha="right", va="center", fontsize=fontsize, color="#222")
+                    fontsize=fontsize, color=dcol, zorder=5)
+        if has_delays:
+            ax.text(-0.35, delay_top, "Delays", ha="right", va="center", fontsize=fontsize,
+                    color="#222")
 
     # loops
+    loop_texts: list = []
     if show_loops:
         for lp, lx0, lx1 in lay.loops:
             y = top - 0.55 - 0.5 * lp.depth
             c = "#555"
             ax.plot([lx0, lx0, lx1, lx1], [y - 0.14, y, y, y - 0.14], color=c, lw=1.0, zorder=4)
             cnt = f"{lp.n}" if lp.n else (pulse_label(lp.count) if lp.count else "n")
-            ax.text(lx1 + 0.06, y, f"×{cnt}", ha="left", va="center", fontsize=fontsize * 0.9, color=c)
+            loop_texts.append(ax.text(lx1 + 0.06, y, f"×{cnt}", ha="left", va="center",
+                                      fontsize=fontsize * 0.9, color=c))
+        _fit_texts_inside_right_edge(ax, loop_texts)
 
     if legend:
         present = [k for k in ("hard", "shaped", "decoupling", "gradient", "acquire")
@@ -421,6 +462,27 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
     # The full view, for "reset" after scrolling / dragging (enable_zoom_pan).
     ax._opennmr_home_view = (ax.get_xlim(), ax.get_ylim())
     return fig, ax
+
+
+def _fit_texts_inside_right_edge(ax, texts, pad_px: float = 6.0) -> None:
+    """Widen the right of ``ax`` until every text in ``texts`` is fully
+    inside it -- measured, not estimated, so a long loop count ("×count")
+    is never cut off whatever the figure's size. No-op without a renderer."""
+    if not texts:
+        return
+    try:
+        renderer = ax.figure.canvas.get_renderer()
+    except Exception:  # noqa: BLE001 -- a backend without one: keep the estimate
+        return
+    for _ in range(4):
+        edge = ax.get_window_extent(renderer).x1
+        over = max(t.get_window_extent(renderer).x1 for t in texts) + pad_px - edge
+        if over <= 0:
+            return
+        x0, x1 = ax.get_xlim()
+        per_px = (x1 - x0) / max(ax.get_window_extent(renderer).width, 1.0)
+        ax.set_xlim(x0, x1 + over * per_px * 1.1)
+
 
 
 # ---------------------------------------------------------------------------
