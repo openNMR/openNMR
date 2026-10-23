@@ -171,7 +171,7 @@ def save_progress(spectrum, name: str = "", note: str = "", folder: str | None =
 
 def _raw_fid_behind(spectrum) -> bool:
     meta = spectrum.metadata
-    if meta.vendor in ("xpulse", "varian", "jeol", "spinsolve"):
+    if meta.vendor in ("xpulse", "varian", "jeol", "spinsolve", "simpson"):
         return True
     if meta.vendor == "bruker" and meta.source_path:
         return any(os.path.exists(os.path.join(meta.source_path, name)) for name in ("fid", "ser"))

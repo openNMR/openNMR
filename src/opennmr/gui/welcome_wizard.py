@@ -13,14 +13,20 @@ set in Settings. *Skip* closes the wizard and changes nothing.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
+    QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from .widgets.typed_spinbox import TypedSpinBox
+from .widgets.typed_spinbox import TypedDoubleSpinBox, TypedSpinBox
 
 WEBSITE_URL = "https://opennmr.github.io/"
+
+
+def matplotlib_to_hex(color) -> str:
+    import matplotlib.colors
+    return matplotlib.colors.to_hex(color)
 
 
 def _page(title: str, intro: str) -> tuple[QWidget, QVBoxLayout]:
@@ -138,9 +144,65 @@ class WelcomeWizard(QDialog):
         form.addRow("2D contours:", self.contour_scroll_check)
         self.export_unit_combo = _copy_combo(w.export_unit_combo)
         form.addRow("Export size in:", self.export_unit_combo)
+        # More of Settings ▸ Interface and Default plot styles (explicit
+        # user request, 2026-10-23): the same settings, set here once.
+        color, width = w._all_canvases()[0].crosshair_style()
+        self._crosshair_color = matplotlib_to_hex(color)
+        self.crosshair_colour_button = QPushButton()
+        self.crosshair_colour_button.setToolTip(w.crosshair_colour_button.toolTip())
+        self.crosshair_colour_button.clicked.connect(self._pick_crosshair_colour)
+        self.crosshair_width_spin = TypedDoubleSpinBox()
+        self.crosshair_width_spin.setRange(w.crosshair_width_spin.minimum(),
+                                           w.crosshair_width_spin.maximum())
+        self.crosshair_width_spin.setDecimals(2)
+        self.crosshair_width_spin.setSingleStep(0.1)
+        self.crosshair_width_spin.setSuffix(" pt")
+        self.crosshair_width_spin.setValue(width)
+        crosshair_row = QHBoxLayout()
+        crosshair_row.addWidget(self.crosshair_colour_button)
+        crosshair_row.addWidget(self.crosshair_width_spin)
+        form.addRow("Crosshair:", crosshair_row)
+        self._show_crosshair_colour()
+        self.zoom_box_width_spin = TypedDoubleSpinBox()
+        self.zoom_box_width_spin.setRange(w.zoom_box_width_spin.minimum(),
+                                          w.zoom_box_width_spin.maximum())
+        self.zoom_box_width_spin.setDecimals(1)
+        self.zoom_box_width_spin.setSingleStep(0.5)
+        self.zoom_box_width_spin.setSuffix(" px")
+        self.zoom_box_width_spin.setToolTip(w.zoom_box_width_spin.toolTip())
+        self.zoom_box_width_spin.setValue(w.zoom_box_width_spin.value())
+        form.addRow("Zoom box:", self.zoom_box_width_spin)
+        self.auto_styles_check = QCheckBox("Use saved default plot styles automatically")
+        self.auto_styles_check.setToolTip(w.auto_apply_type_styles_checkbox.toolTip())
+        self.auto_styles_check.setChecked(w.auto_apply_type_styles_checkbox.isChecked())
+        form.addRow("Plot styles:", self.auto_styles_check)
+        top = getattr(w, "settings_curve_top_spine_checkbox", None)
+        right = getattr(w, "settings_curve_right_spine_checkbox", None)
+        self.curve_top_check = QCheckBox("Top")
+        self.curve_right_check = QCheckBox("Right")
+        self.curve_top_check.setChecked(bool(top.isChecked()) if top is not None else False)
+        self.curve_right_check.setChecked(bool(right.isChecked()) if right is not None else False)
+        spine_row = QHBoxLayout()
+        spine_row.addWidget(self.curve_top_check)
+        spine_row.addWidget(self.curve_right_check)
+        spine_row.addStretch(1)
+        form.addRow("Curve plots, extra axis lines:", spine_row)
         layout.addLayout(form)
         layout.addStretch(1)
         return page
+
+    def _show_crosshair_colour(self) -> None:
+        swatch = QColor(self._crosshair_color)
+        self.crosshair_colour_button.setText(swatch.name())
+        text = "#000000" if swatch.lightness() > 128 else "#ffffff"
+        self.crosshair_colour_button.setStyleSheet(
+            f"background-color: {swatch.name()}; color: {text};")
+
+    def _pick_crosshair_colour(self) -> None:
+        picked = QColorDialog.getColor(QColor(self._crosshair_color), self, "Crosshair colour")
+        if picked.isValid():
+            self._crosshair_color = picked.name()
+            self._show_crosshair_colour()
 
     def _layout_page(self) -> QWidget:
         w = self.window_
@@ -197,6 +259,13 @@ class WelcomeWizard(QDialog):
         self.iterations_spin.setValue(w.max_iterations_spin.value())
         self.iterations_spin.setToolTip(w.max_iterations_spin.toolTip())
         form.addRow("Maximum fit iterations:", self.iterations_spin)
+        updates = getattr(w, "updates_panel", None)
+        self.update_check = QCheckBox("Check for a newer openNMR when it starts "
+                                      "(at most once a day)")
+        self.update_check.setChecked(bool(updates.startup_checkbox.isChecked())
+                                     if updates is not None else False)
+        self.update_check.setEnabled(updates is not None)
+        form.addRow("Updates:", self.update_check)
         layout.addLayout(form)
         layout.addStretch(1)
         return page
@@ -291,6 +360,21 @@ class WelcomeWizard(QDialog):
         w.double_click_reset_checkbox.setChecked(self.double_click_check.isChecked())
         w.contour_scroll_up_more_checkbox.setChecked(self.contour_scroll_check.isChecked())
         pick(w.export_unit_combo, self.export_unit_combo)
+        color, width = w._all_canvases()[0].crosshair_style()
+        if (matplotlib_to_hex(color) != self._crosshair_color
+                or abs(width - self.crosshair_width_spin.value()) > 1e-9):
+            w._set_crosshair_style(self._crosshair_color, self.crosshair_width_spin.value())
+        if abs(w.zoom_box_width_spin.value() - self.zoom_box_width_spin.value()) > 1e-9:
+            w.zoom_box_width_spin.setValue(self.zoom_box_width_spin.value())
+        w.auto_apply_type_styles_checkbox.setChecked(self.auto_styles_check.isChecked())
+        for mine, name in ((self.curve_top_check, "settings_curve_top_spine_checkbox"),
+                           (self.curve_right_check, "settings_curve_right_spine_checkbox")):
+            target = getattr(w, name, None)
+            if target is not None:
+                target.setChecked(mine.isChecked())
+        updates = getattr(w, "updates_panel", None)
+        if updates is not None:
+            updates.startup_checkbox.setChecked(self.update_check.isChecked())
         for key, box in self.section_checks.items():
             target = w.section_shown_checkboxes.get(key)
             if target is not None:

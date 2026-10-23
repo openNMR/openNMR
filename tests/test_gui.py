@@ -11291,7 +11291,7 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     # options to the fit's right-click menu.
     assert titles == ["Isotropic (Gauss/Lor)", "CSA, Quad & J-coupling",
                       "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)",
-                      "Multi-spectrum", "Kept fit models"]
+                      "SIMPSON spectrum", "Multi-spectrum", "Kept fit models"]
 
     # eNMR/Imaging moved off this tab entirely, to their own
     # "Applications" button (see
@@ -15513,7 +15513,7 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     assert [s.title() for s in sections] == ["CSA, Quad & J-coupling", "Czjzek distribution",
                                              "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
                                              "Diffusion (PFG)", "Shaped pulse (Bloch)",
-                                             "pNMR (CIF)"]
+                                             "pNMR (CIF)", "SIMPSON import"]
     assert _enclosing_collapsible_section(window.sim_csa_diso_spin) is None
     assert _enclosing_collapsible_section(window.sim_quad_cq_spin) is None
 
@@ -16140,7 +16140,7 @@ def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
     # CSA, Quad & J-coupling holds every interaction since 2026-10-06.
     assert titles == ["CSA, Quad & J-coupling", "Czjzek distribution",
                       "DFT tensors (CASTEP, VASP, ORCA, Gaussian)", "Diffusion (PFG)",
-                      "Shaped pulse (Bloch)", "pNMR (CIF)"]
+                      "Shaped pulse (Bloch)", "pNMR (CIF)", "SIMPSON import"]
 
 
 def test_simulation_plot_shows_on_run_and_hides_on_leaving_the_tile(qapp):

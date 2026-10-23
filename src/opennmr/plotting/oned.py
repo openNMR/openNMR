@@ -47,6 +47,21 @@ def safe_xlim(ax, xmin: float, xmax: float, pad: float | None = None) -> tuple[f
     return xmin, xmax
 
 
+def _axis_label_for(spectrum, field, x_unit: str) -> str:
+    """The x-axis label of a 1D spectrum: nucleus-based, as always. A
+    spectrum with no known nucleus (SIMPSON output read without one) is
+    labelled with what it has -- Hz, or the nucleus text as given -- rather
+    than failing to plot."""
+    if spectrum.metadata.raw.get("axis_is_hz"):
+        return "Frequency (Hz)"
+    try:
+        nuclide = find_gamma(spectrum.metadata.nucleus, field=field,
+                             SFO1=spectrum.metadata.sfo1)["Nuclide"]
+    except (TypeError, KeyError):
+        nuclide = spectrum.metadata.nucleus or "?"
+    return NUC_label(nuclide, x_unit=x_unit)
+
+
 def plot_1d(ax, spectrum: NMRSpectrum, x_unit: str = "ppm", normalize: bool = True,
             color: str = "black", y_offset: float = 0.0, linewidth: float = 1.5,
             field: str = "", full_resolution: bool = False) -> tuple[float, float, str]:
@@ -89,8 +104,7 @@ def plot_1d(ax, spectrum: NMRSpectrum, x_unit: str = "ppm", normalize: bool = Tr
     if xmin > xmax:
         xmin, xmax = xmax, xmin
 
-    nucgamma = find_gamma(spectrum.metadata.nucleus, field=field, SFO1=spectrum.metadata.sfo1)
-    labeltext = NUC_label(nucgamma["Nuclide"], x_unit=x_unit)
+    labeltext = _axis_label_for(spectrum, field, x_unit)
 
     x_plot, y_plot = (x, y) if full_resolution else downsample_1d(x, y)
     line, = ax.plot(x_plot, y_plot + y_offset, color=color, linewidth=linewidth)
@@ -230,8 +244,7 @@ def plot_1d_heatmap(spectra: list[NMRSpectrum], ax=None, fig=None, x_unit: str =
     x_common = combined.axis_values(0, x_unit)
     data_matrix = combined.metadata.raw["interpolated_spectra"]
 
-    nucgamma = find_gamma(spectra[0].metadata.nucleus, field=field, SFO1=spectra[0].metadata.sfo1)
-    labeltext = NUC_label(nucgamma["Nuclide"], x_unit=x_unit)
+    labeltext = _axis_label_for(spectra[0], field, x_unit)
 
     # The **full** colour map, not get_contour_cmap/readable_cmap's
     # trimmed one. That trim drops the light end so thin *lines* keep

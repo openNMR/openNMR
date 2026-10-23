@@ -6,11 +6,12 @@ from . import xpulse  # noqa: F401 -- import for its base.register() side effect
 from . import varian  # noqa: F401 -- import for its base.register() side effect
 from . import jeol  # noqa: F401 -- import for its base.register() side effect
 from . import spinsolve  # noqa: F401 -- import for its base.register() side effect
+from . import simpson  # noqa: F401 -- SIMPSON .spe/.fid text files
 from . import bruker_pfg  # noqa: F401 -- PFG gradient axis with or without diff.xml
 
 __all__ = ["load", "peek", "detect_vendor", "registered_vendors", "register",
            "find_value_lists", "read_value_list",
-           "bruker", "xpulse", "varian", "jeol", "spinsolve", "bruker_pfg", "lists"]
+           "bruker", "xpulse", "varian", "jeol", "spinsolve", "simpson", "bruker_pfg", "lists"]
 
 # openNMR's own dataset folders (a saved simulation or derived spectrum,
 # see io.history.save_spectrum_folder). Registered last: its marker file

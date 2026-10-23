@@ -43,11 +43,11 @@ def test_fit_and_simulate_offer_one_combined_entry_point(qapp):
     window = MainWindow()
     assert _titles(window, window._fitting_tab_index) == [
         "Isotropic (Gauss/Lor)", "CSA, Quad & J-coupling",
-        "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)", "Multi-spectrum",
-        "Kept fit models"]
+        "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)", "SIMPSON spectrum",
+            "Multi-spectrum", "Kept fit models"]
     assert _titles(window, window._simulations_tab_index) == [
         "CSA, Quad & J-coupling", "Czjzek distribution", "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
-        "Diffusion (PFG)", "Shaped pulse (Bloch)", "pNMR (CIF)"]
+        "Diffusion (PFG)", "Shaped pulse (Bloch)", "pNMR (CIF)", "SIMPSON import"]
     # The retired panels still exist (kept fits and saved states restore
     # through them), out of sight.
     assert window._retired_fit_host.isHidden() and window._retired_sim_host.isHidden()

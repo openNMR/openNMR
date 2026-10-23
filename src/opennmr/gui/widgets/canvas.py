@@ -4887,6 +4887,10 @@ class MplCanvas(QWidget):
         fails, e.g. an unrecognised or blank nucleus string -- a
         best-effort label beats no plot at all.
         """
+        if spectrum.metadata.raw.get("axis_is_hz"):
+            # e.g. SIMPSON output read without a nucleus and field: the
+            # axis is in Hz and says so.
+            return self._unit_label("Frequency", "Hz")
         try:
             nuclide = find_gamma(spectrum.metadata.nucleus, SFO1=spectrum.metadata.sfo1, quiet=True)["Nuclide"]
         except Exception:

@@ -130,6 +130,9 @@ from .widgets.sim_sites import SimSiteList
 from .widgets.reflow import make_reflowable
 from .pnmr_panel import PnmrSimulationPanel
 from .pnmr_fit_panel import PnmrFitPanel
+from .simpson_panel import SimpsonPanel
+from .simpson_fit_panel import SimpsonFitPanel
+from .export_dialog import ExportDialog
 from .dynamics_panels import ExchangeLineshapePanel, VTRelaxationPanel
 from .jcoupling_panels import (JCouplingFitPanel, JCouplingSimulationPanel, lock_to_spin_system,
                                seed_spins_from_peaks)
@@ -1305,6 +1308,15 @@ class MainWindow(QMainWindow):
         save_figure_action.setToolTip("Save the currently visible canvas tab as an image.")
         save_figure_action.triggered.connect(self._on_save_figure_clicked)
         file_menu.addAction(save_figure_action)
+
+        export_data_action = QAction("&Export Data…", self)
+        export_data_action.setShortcut(QKeySequence("Ctrl+Shift+X"))
+        export_data_action.setToolTip(
+            "Write the spectra in Open experiments, from any vendor, as .csv, .xy or "
+            "JCAMP-DX (.jdx). Ctrl/Cmd+Shift+X.")
+        export_data_action.triggered.connect(self._on_export_data_clicked)
+        file_menu.addAction(export_data_action)
+        self.export_data_action = export_data_action
 
         processing_report_action = QAction("&Processing Report…", self)
         processing_report_action.setToolTip(
@@ -3623,8 +3635,9 @@ class MainWindow(QMainWindow):
                 spectrum = self.session.spectra[index]
         saved_processing = io_persistence.load_processing_sidecar(
             spectrum.metadata.source_path, vendor=spectrum.metadata.vendor,
-        ) if self._sidecar_belongs(spectrum.metadata.source_path,
-                                   getattr(spectrum.metadata, "procno", None)) else None
+        ) if (self._sidecar_belongs(spectrum.metadata.source_path,
+                                    getattr(spectrum.metadata, "procno", None))
+              and not io_persistence.is_multi_element(spectrum)) else None
         if saved_processing:
             spectrum.metadata.raw.update(saved_processing)
 
@@ -7030,6 +7043,9 @@ class MainWindow(QMainWindow):
     OPTIONAL_SECTIONS = {
         "pnmr": ("pNMR (Fit ▸ pNMR bond pathways and Simulate ▸ pNMR (CIF))",
                  ("_pnmr_fit_section", "_pnmr_sim_section")),
+        # Explicit user request, 2026-10-23.
+        "simpson": ("SIMPSON import (Simulate ▸ SIMPSON, Fit ▸ SIMPSON spectrum)",
+                    ("_simpson_sim_section", "_simpson_fit_section")),
         "dnp": ("DNP (Integrate ▸ DNP)", ("_dnp_section",)),
         "drift": ("Field drift correction (Process)", ("drift_section",)),
         # Explicit user request, 2026-10-14 (second round).
@@ -8769,7 +8785,7 @@ class MainWindow(QMainWindow):
         # 2026-10-17). It is phased as the processed data it is.
         if spectrum.metadata.raw.get("procno_dimension") == 1:
             return False
-        if spectrum.metadata.vendor in ("xpulse", "varian", "jeol", "spinsolve"):
+        if spectrum.metadata.vendor in ("xpulse", "varian", "jeol", "spinsolve", "simpson"):
             return True
         if spectrum.metadata.vendor == "bruker" and spectrum.metadata.source_path:
             base = spectrum.metadata.source_path
@@ -10411,11 +10427,12 @@ class MainWindow(QMainWindow):
     _FIT_LABELS = {"csa": "CSA", "jcoupling": "J-coupling", "quadrupolar": "Quadrupolar",
                    "czjzek": "Czjzek",
                    "combined": "CSA, Quad & J-coupling", "multi": "Multi-spectrum",
-                   "pnmr": "pNMR (CIF)"}
+                   "pnmr": "pNMR (CIF)", "simpson": "SIMPSON spectrum"}
     _SIMULATION_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar", "jcoupling": "J-coupling",
                           "czjzek": "Czjzek distribution",
                           "combined": "CSA, Quad & J-coupling", "diffusion": "Diffusion (PFG)",
-                          "bloch": "Shaped pulse (Bloch)", "pnmr": "pNMR (CIF)"}
+                          "bloch": "Shaped pulse (Bloch)", "pnmr": "pNMR (CIF)",
+                          "simpson": "SIMPSON import"}
 
     def _fit_panels(self) -> dict:
         """Each fit, as an object with get_state/set_state/result_state/
@@ -10423,7 +10440,7 @@ class MainWindow(QMainWindow):
         panels = {"jcoupling": self.jcoupling_fit_panel, "quadrupolar": self.quad_fit_panel,
                   "czjzek": self.czjzek_fit_panel,
                   "combined": self.combined_fit_panel, "multi": self.multi_fit_panel,
-                  "pnmr": self.pnmr_fit_panel}
+                  "pnmr": self.pnmr_fit_panel, "simpson": self.simpson_fit_panel}
         panels["csa"] = _Section(
             get_state=lambda: {"widgets": panel_state.capture_widgets(self, prefixes=["csa_"])},
             set_state=self._csa_fit_set_state,
@@ -10541,6 +10558,10 @@ class MainWindow(QMainWindow):
             # Load settings leaves it one click away.
             "pnmr": _Section(get_state=self.pnmr_panel.get_state, set_state=self.pnmr_panel.set_state,
                              rerun=None, summary=lambda: "", anchor=lambda: self.pnmr_panel),
+            # Reading files is not a simulation run: nothing to re-run.
+            "simpson": _Section(get_state=self.simpson_panel.get_state,
+                                set_state=self.simpson_panel.set_state,
+                                rerun=None, summary=lambda: "", anchor=lambda: self.simpson_panel),
         }
 
     def _store_fit(self, key: str, index: int | None = None) -> None:
@@ -15504,6 +15525,18 @@ class MainWindow(QMainWindow):
         self._pnmr_fit_section = CollapsibleSection("pNMR (CIF bond pathways)",
                                                     content=self.pnmr_fit_panel)
         layout.addWidget(self._pnmr_fit_section)
+        # SIMPSON spectra as lineshape templates for an experimental
+        # spectrum (explicit user request, 2026-10-23).
+        self.simpson_fit_panel = SimpsonFitPanel(
+            get_target=self._jcoupling_fit_target,
+            get_regions=self._integration_regions,
+            selected_spectrum=self._simpson_selected_spectrum,
+            draw_fit=self._draw_simpson_fit,
+            show_view=self._raise_fit_canvas,
+            on_fitted=lambda: self._store_fit("simpson"))
+        self._simpson_fit_section = CollapsibleSection("SIMPSON spectrum",
+                                                       content=self.simpson_fit_panel)
+        layout.addWidget(self._simpson_fit_section)
         # One set of sites across several spectra: a series, isotopes,
         # fields (explicit user request); notebook.multi_fitting.
         self.multi_fit_panel = MultiFitPanel(
@@ -15863,6 +15896,17 @@ class MainWindow(QMainWindow):
             export_sites=self._export_pnmr_sites)
         self._pnmr_sim_section = CollapsibleSection("pNMR (CIF)", content=self.pnmr_panel)
         layout.addWidget(self._pnmr_sim_section)
+        # SIMPSON output: spectra, FIDs, and points from FIDs (explicit
+        # user request, 2026-10-23). Its own module; the reading is io.simpson.
+        self.simpson_panel = SimpsonPanel(
+            open_files=self._open_simpson_files,
+            plot_spectrum=lambda spectrum: self._show_simulated_spectrum(spectrum),
+            send_to_fit=self._send_simpson_to_fit,
+            selected_spectrum=self._simpson_selected_spectrum,
+            draw_plot=self._draw_simpson_points)
+        self._simpson_sim_section = CollapsibleSection("SIMPSON import",
+                                                       content=self.simpson_panel)
+        layout.addWidget(self._simpson_sim_section)
         layout.addStretch(1)
         return tab
 
@@ -15892,6 +15936,61 @@ class MainWindow(QMainWindow):
         if spectrum.ndim == 2:
             row = max(self.slice_spin.value() - 1, 0) if spectrum.is_pseudo_2d else 0
         return spectrum, row, index
+
+    # ---- SIMPSON import / export (explicit user request, 2026-10-23) ---
+
+    def _open_simpson_files(self, paths, kwargs: dict) -> None:
+        """Read SIMPSON spectra / FIDs into Open experiments."""
+        for path in paths:
+            self._load(path, "simpson", extra_kwargs=dict(kwargs))
+
+    def _simpson_selected_spectrum(self):
+        """(spectrum, label) selected in Open experiments, or None."""
+        index = self._selected_index()
+        if index is None:
+            return None
+        return self.session.spectra[index], self.session.label(index)
+
+    def _send_simpson_to_fit(self, spectrum, label: str) -> None:
+        self.simpson_fit_panel.add_template(spectrum, label)
+        self._show_side_tab("Fit")
+        self._simpson_fit_section.setExpanded(True)
+
+    def _draw_simpson_points(self, draw) -> None:
+        """The points-versus-quantity plot, styled like every other plot."""
+        self.fit_canvas.show_external_plot(draw, kind="curve")
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _draw_simpson_fit(self, result: dict) -> None:
+        x = np.asarray(result["x"])
+        components = [np.asarray(c) for c in result["components"]] + [np.asarray(result["baseline"])]
+        spectrum = result.get("spectrum")
+        regions = (result.get("settings") or {}).get("fit_regions") or None
+        self.fit_canvas.show_slice_fit(
+            x, result["y_data"], result["y_model"], components=components,
+            peak_labels=[p["name"] for p in result["params"]], title="SIMPSON fit",
+            spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None,
+            overlay=self._fit_gap_overlay([tuple(r) for r in regions]) if regions else None)
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _on_export_data_clicked(self) -> None:
+        """File ▸ Export Data… (Ctrl/Cmd+Shift+X)."""
+        if not len(self.session):
+            QMessageBox.information(self, "Export data", "Open a spectrum first.")
+            return
+        items = [(self.session.label(i), self.session.spectra[i])
+                 for i in range(len(self.session))]
+        checked = self._selected_rows() or ([self._selected_index()]
+                                            if self._selected_index() is not None else [0])
+        row = (max(self.slice_spin.value() - 1, 0) if hasattr(self, "slice_spin") else 0)
+        dialog = ExportDialog(items, checked=checked, row=row, parent=self)
+        self.export_dialog = dialog
+        if dialog.exec() and dialog.written:
+            names = ", ".join(os.path.basename(p) for p in dialog.written[:3])
+            more = f" and {len(dialog.written) - 3} more" if len(dialog.written) > 3 else ""
+            self.statusBar().showMessage(f"Exported {names}{more}", 8000)
 
     def _draw_jcoupling_fit(self, result: dict) -> None:
         """Data, total fit and one shaded curve per site, on the Fit view,

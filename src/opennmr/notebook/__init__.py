@@ -264,8 +264,14 @@ from .pnmr_fit import (
 from .simpson import (
     SIMPSONimport, CSDMimport, SIMPSONread_shape, SIMPSONapodization_window, SIMPSONread_fid,
     SIMPSONplot_fid, SIMPSONread_single_point_fid, SIMPSONread_fid_series, SIMPSONplot_1d_stack, SIMPSONplot_shape,
-    SIMPSONplot_fid_series,
+    SIMPSONplot_fid_series, SIMPSONload, SIMPSONread_table, SIMPSONread_script, SIMPSONplot_table,
 )
+from .simpson_series import (
+    SIMPSONread_points, SIMPSONpoint_series, SIMPSONcombine_points, SIMPSONpoint_table,
+    SIMPSONsave_point_table, SIMPSONplot_point_series, x_from_filenames,
+)
+from .simpson_fit import fit_simpson_templates, SIMPSONfit_spectrum, SIMPSONplot_fit
+from ..io.export import export_spectrum, read_jcamp_spectrum
 
 from .jcoupling_fitting import (
     jcoupling_site_lineshape, build_jcoupling_model, initialise_jcoupling_params, build_jcoupling_bounds,
@@ -458,7 +464,13 @@ __all__ = [
     # simpson
     "SIMPSONimport", "CSDMimport", "SIMPSONread_shape", "SIMPSONapodization_window", "SIMPSONread_fid",
     "SIMPSONplot_fid", "SIMPSONread_single_point_fid", "SIMPSONread_fid_series", "SIMPSONplot_1d_stack", "SIMPSONplot_shape",
-    "SIMPSONplot_fid_series",
+    "SIMPSONplot_fid_series", "SIMPSONload", "SIMPSONread_table", "SIMPSONread_script",
+    "SIMPSONplot_table",
+    "SIMPSONread_points", "SIMPSONpoint_series", "SIMPSONcombine_points", "SIMPSONpoint_table",
+    "SIMPSONsave_point_table", "SIMPSONplot_point_series", "x_from_filenames",
+    "fit_simpson_templates", "SIMPSONfit_spectrum", "SIMPSONplot_fit",
+    # export (any vendor -> .csv, .xy, JCAMP-DX)
+    "export_spectrum", "read_jcamp_spectrum",
     # jcoupling_fitting
     "jcoupling_site_lineshape", "build_jcoupling_model", "initialise_jcoupling_params", "build_jcoupling_bounds",
     "fit_jcoupling_spectrum", "evaluate_jcoupling_fit", "print_jcoupling_fit_report", "NMR1dplot_with_jcoupling_fit",

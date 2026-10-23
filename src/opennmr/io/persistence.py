@@ -52,6 +52,8 @@ _PROCESSING_VERSION = 2
 _PROCESSING_RAW_BLOCKLIST = frozenset({
     "acqus", "procs", "proc2s", "params", "exp_params",
     "fid", "fid_raw",
+    # SIMPSON reader's own record (which element of the file, ...): re-derived on load.
+    "simpson",
     "window_unsupported", "read_2d_shape_guess_failed", "loaded_from_processed",
     # How a 2D came to open as it did: re-derived on every load, and the
     # choice itself lives in the metadata sidecar (pseudo_2d_chosen).
@@ -121,13 +123,22 @@ def _read_json(path: str) -> dict | None:
         return None
 
 
+def is_multi_element(spectrum) -> bool:
+    """A spectrum that is one of several in one file (SIMPSON ``NELEM`` > 1).
+    They share a path, and sidecars are keyed by path, so they get none --
+    one element's saved processing would otherwise be restored onto the
+    others."""
+    record = (getattr(spectrum.metadata, "raw", None) or {}).get("simpson")
+    return isinstance(record, dict) and int(record.get("n_elements") or 1) > 1
+
+
 def save_metadata_sidecar(spectrum) -> None:
     """Write ``spectrum``'s own sample-level facts to its
     ``opennmr_metadata.json``. A no-op if ``metadata.source_path``
     isn't set or doesn't exist on disk (a synthetic/derived spectrum
     with nothing real to write next to)."""
     source_path = spectrum.metadata.source_path
-    if not source_path or not os.path.exists(source_path):
+    if not source_path or not os.path.exists(source_path) or is_multi_element(spectrum):
         return
     meta = spectrum.metadata
     payload = {
@@ -205,7 +216,7 @@ def save_processing_sidecar(spectrum) -> None:
     front) -- to ``opennmr_processing.json``. Same no-op guard as
     :func:`save_metadata_sidecar`."""
     source_path = spectrum.metadata.source_path
-    if not source_path or not os.path.exists(source_path):
+    if not source_path or not os.path.exists(source_path) or is_multi_element(spectrum):
         return
     payload = {"opennmr_processing_version": _PROCESSING_VERSION, "state": processing_state(spectrum)}
     _write_json(processing_sidecar_path(source_path), payload)
