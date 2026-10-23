@@ -75,7 +75,7 @@ from .relaxation import (
 from . import relaxometry
 from .relaxometry import find_integration_regions, correlation_matrix
 # The correlation matrix of any fit -- relaxation, isotropic peaks,
-# CSA, Quad & J-coupling, multi-spectrum (2026-10-06).
+# Solid-state NMR, multi-spectrum (2026-10-06).
 # DFT-calculated tensors (CASTEP .magres, VASP OUTCAR) -> sites (2026-10-06).
 from . import dft_nmr
 from .dft_nmr import read_calculation, dft_sites, simulate_dft, plot_dft_tensors
@@ -175,6 +175,11 @@ from .spin_system import (
 
 from .notes import experiment_notes, set_experiment_notes, notes_location, notes_first_line
 from .stored_integrals import StoredIntegrals, get_stored_integrals
+from . import field_drift
+from .plot_inset import add_inset, remove_insets, insets_of, INSET_DEFAULTS, INSET_CORNERS
+from .peak_integral_labels import (
+    integral_labels, add_integral_labels, remove_integral_labels, normalised_integrals,
+)
 from .multi_fitting import (
     make_experiment, fit_multi, default_scopes, multi_fit_table, multi_fit_to_csv,
     parameter_trend, print_multi_fit_report, plot_multi_fit, plot_parameter_trend,
@@ -213,7 +218,7 @@ from .cp_buildup import (
     contact_time_us, cp_series, fit_cp_buildup, cp_report, plot_cp_buildup,
     cp_series_regions, plot_cp_buildups,
 )
-# pNMR (CIF) isotropic peaks -> CSA, Quad & J-coupling sites (2026-10-12).
+# pNMR (CIF) isotropic peaks -> Solid-state NMR sites (2026-10-12).
 from . import pnmr_export
 from .pnmr_export import sites_from_pnmr_fit, sites_from_pnmr_table
 from .progress import (
@@ -227,7 +232,7 @@ from .csa_fitting import (
     print_csa_fit_report, NMR1dplot_with_csa_fit, NMRCSAFitWorkflow
 )
 
-# A CSA / quadrupolar / CSA, Quad & J-coupling fit of one slice, applied to
+# A CSA / quadrupolar / Solid-state NMR fit of one slice, applied to
 # every slice of a pseudo-2D series (T1, T2...) -- see series_fitting.
 from .series_fitting import (
     model_components, fit_series_with_lineshapes, series_fit_report,
@@ -350,6 +355,8 @@ acc = accessibility
 
 
 __all__ = [
+    "add_inset", "remove_insets", "insets_of", "INSET_DEFAULTS", "INSET_CORNERS",
+    "integral_labels", "add_integral_labels", "remove_integral_labels", "normalised_integrals",
     # utils
     "find_gamma", "NUC_label", "read_bruker_metadata", "read_bruker_fid",
     "read_vdlist", "compute_BF1_SFO1",
@@ -493,7 +500,7 @@ __all__ = [
     "print_enhancement_report", "field_sweep", "field_sweep_table", "field_sweep_to_csv",
     "field_sweep_report", "print_field_sweep_report", "plot_field_profile", "plot_sweep_spectra",
     "plot_enhancement_spectra",
-    # signal-to-noise; pNMR peaks -> CSA, Quad & J-coupling sites
+    # signal-to-noise; pNMR peaks -> Solid-state NMR sites
     "snr", "signal_to_noise", "signal_to_noise_many", "snr_report", "plot_snr",
     "pnmr_export", "sites_from_pnmr_fit", "sites_from_pnmr_table",
     # comparison scaling, peak widths, fit ranges, CP build-up (2026-10-16)

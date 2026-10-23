@@ -23,6 +23,7 @@ from matplotlib.ticker import MultipleLocator, MaxNLocator
 from mpl_toolkits.axes_grid1 import axes_size
 from mpl_toolkits.axes_grid1.axes_divider import AxesDivider
 
+from . import inset as _generic_inset
 from ..core.registry import find_gamma, NUC_label
 from ..core.spectrum import NMRSpectrum
 from ..processing.slicing import get_trace
@@ -563,7 +564,14 @@ def draw_insets(parent_ax, spectra, insets, *, colours=None, factor=0.07, clevel
     for i, spec in enumerate(insets or []):
         if "xlims" not in spec or "ylims" not in spec:
             raise ValueError(f"inset {i + 1} needs both xlims (F2) and ylims (F1).")
-        bounds = spec.get("bounds") or inset_bounds(spec.get("corner", "upper right"), spec.get("size", 0.4))
+        if spec.get("bounds"):
+            bounds = spec["bounds"]
+        elif "width" in spec or spec.get("corner", "upper right") not in INSET_CORNERS:
+            bounds = _generic_inset.inset_bounds(_generic_inset.normalise(
+                {k: v for k, v in spec.items() if k in _generic_inset.INSET_DEFAULTS
+                 and k not in ("xlim", "ylim")}))
+        else:
+            bounds = inset_bounds(spec.get("corner", "upper right"), spec.get("size", 0.4))
         inset_factor = spec.get("factor") or factor
         ax = parent_ax.inset_axes(bounds)
         ax.set_zorder(parent_ax.get_zorder() + 5)
@@ -604,8 +612,12 @@ def draw_insets(parent_ax, spectra, insets, *, colours=None, factor=0.07, clevel
         if bounds[1] + bounds[3] / 2 < 0.5:
             ax.xaxis.tick_top()
         ax.set_facecolor(parent_ax.get_facecolor())
+        _generic_inset.restyle(ax, spec)
         if spec.get("mark_inset", True):
-            parent_ax.indicate_inset_zoom(ax, edgecolor=spec.get("edgecolor", "0.35"), alpha=0.9)
+            parent_ax.indicate_inset_zoom(
+                ax, edgecolor=spec.get("connector_colour", spec.get("edgecolor", "0.35")),
+                alpha=0.9, linewidth=float(spec.get("connector_width", 0.8)),
+                linestyle=spec.get("connector_style", "-"))
         created.append(ax)
     return created
 

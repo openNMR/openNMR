@@ -1,4 +1,4 @@
-"""pNMR isotropic peaks -> CSA, Quad & J-coupling sites
+"""pNMR isotropic peaks -> Solid-state NMR sites
 (notebook/pnmr_export.py; explicit user request, 2026-10-12).
 
 The rock-salt Na(Cl0.5Br0.5) cell of test_pnmr_simulator.py gives seven
@@ -46,7 +46,7 @@ def test_table_groups_to_one_site_per_shift():
     joined = " ".join(notes)
     assert "left out" in joined and "0.1 % of the intensity" in joined
     assert "quadrupolar (I = 1.5)" in joined                      # 23Na
-    # They are valid CSA, Quad & J-coupling sites, interactions can be added.
+    # They are valid Solid-state NMR sites, interactions can be added.
     built = [ch.Site.from_dict(d) for d in sites]
     built[0].add_quadrupolar(C_Q=2.0, eta_Q=0.1).add_csa(aniso=50.0, asym=0.2)
     assert built[0].get("quadrupolar") and built[0].get("csa")

@@ -6,7 +6,7 @@
   (``gui/report_format.py``, ``widgets/report_label.py``); the plain report
   -- what is logged, copied and saved, and what ``text()`` returns -- is
   unchanged.
-* Fit ▸ CSA, Quad & J-coupling's Parameters as one row per site, a column
+* Fit ▸ Solid-state NMR's Parameters as one row per site, a column
   per parameter, with free/fixed and limits set by right-clicking.
 """
 
@@ -84,7 +84,7 @@ def test_long_site_lists_are_summarised():
 
 def test_combined_fit_html_puts_quality_first():
     out = rf.combined_fit_html(
-        ["CSA, Quad & J-coupling fit: MAS 50 kHz, nu0 = 200.482 MHz, window 1200 to -1200 ppm."],
+        ["Solid-state NMR fit: MAS 50 kHz, nu0 = 200.482 MHz, window 1200 to -1200 ppm."],
         {"r2": 0.99837, "rmse": 5.42e7, "reduced_chi2": 2.94e15}, 16.0,
         warnings=["Site 1 is at its limit."], has_quadrupolar=False)
     assert out.index("0.99837") < out.index("MAS")

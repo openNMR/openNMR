@@ -6995,7 +6995,7 @@ def test_spectral_fit_report_is_a_table_matching_the_peak_table(qapp):
                for c in range(table.columnCount())]
     # The peak table's own columns first, in its order, then the outputs.
     assert columns[:3] == list(window._PEAK_TABLE_COLUMNS[:3])
-    assert columns[3:] == ["Amplitude", "Area", "Area (%)"]
+    assert columns[3:] == ["Amplitude", "Area", "Area (%)", "J (Hz)"]
     assert table.rowCount() == 2
     # Numbered like the peak table, so row n here is row n there.
     assert [table.verticalHeaderItem(r).text() for r in range(2)] == ["1", "2"]
@@ -7022,7 +7022,7 @@ def test_spectral_fit_report_is_a_table_matching_the_peak_table(qapp):
 def test_spectral_fit_table_sits_in_the_isotropic_section(qapp):
     window = MainWindow()
     isotropic = next(s for s in window.findChildren(CollapsibleSection)
-                     if s.title() == "Isotropic (Gauss/Lor)")
+                     if s.title() == "Solution NMR")
     assert isotropic.isAncestorOf(window.spectral_fit_table)
     assert isotropic.isAncestorOf(window.spectral_fit_params_label)
 
@@ -7093,7 +7093,7 @@ def test_region_options_are_visible_in_the_isotropic_section_not_advanced(qapp):
     assert group.isAncestorOf(window.amplitude_bound_regions_checkbox)
     assert not window.peak_advanced_content.isAncestorOf(group)
     isotropic = next(s for s in window.findChildren(CollapsibleSection)
-                     if s.title() == "Isotropic (Gauss/Lor)")
+                     if s.title() == "Solution NMR")
     assert isotropic.isAncestorOf(group)
 
 
@@ -7406,7 +7406,7 @@ def test_main_window_isotropic_integration_csa_are_separate_sections(qapp):
     # Explicit user feedback: the combined "Spectral Fitting" sub-tab
     # held peak-picking, integration, and fit-bounds tuning all at
     # once -- "too much information at once for casual users". Peak
-    # Picking (renamed "Isotropic (Gauss/Lor)"), Integration and CSA
+    # Picking (renamed "Solution NMR"), Integration and CSA
     # (renamed "CSA/Dipolar") are now three independent collapsible
     # sections of the "Fitting" top-level tab -- see
     # test_main_window_fitting_tab_has_three_collapsible_sections for
@@ -7424,13 +7424,13 @@ def test_main_window_isotropic_integration_csa_are_separate_sections(qapp):
 
     peak_picking_section = _enclosing_collapsible_section(window.peak_table)
     integration_section = _enclosing_collapsible_section(window.region_table)
-    # CSA is an interaction of a CSA, Quad & J-coupling peak since
+    # CSA is an interaction of a Solid-state NMR peak since
     # 2026-10-06; the old CSA/Dipolar panel is kept, out of the menu.
     combined_section = _enclosing_collapsible_section(window.combined_fit_panel)
-    assert peak_picking_section.title() == "Isotropic (Gauss/Lor)"
+    assert peak_picking_section.title() == "Solution NMR"
     # On its own Integrate tile since 2026-10-16.
     assert integration_section.title() == "Integration Regions"
-    assert combined_section.title() == "CSA, Quad & J-coupling"
+    assert combined_section.title() == "Solid-state NMR"
     assert _enclosing_collapsible_section(window.csa_sites_table) is None
     # Three genuinely separate sections, not one shared container.
     assert len({id(peak_picking_section), id(integration_section), id(combined_section)}) == 3
@@ -8123,8 +8123,10 @@ def test_main_window_view_curve_fit_row_sits_below_fit_curve_settings(qapp):
     # strip corner) and the uncertainty band is on the plot's right-click
     # Curve Fit Plot… window -- neither precedes Fit Curve in the panel.
     window = MainWindow()
-    fit_curve_settings_box = window.fit_type_combo.parentWidget()
+    # The settings are a collapsible section of the panel.
+    fit_curve_settings_box = window._curve_settings_section
     tab = fit_curve_settings_box.parentWidget()
+    assert tab.isAncestorOf(window.fit_type_combo)
     assert not tab.isAncestorOf(window.view_relaxation_peak_spin)
     assert window.canvas_tabs.cornerWidget().isAncestorOf(window.view_relaxation_peak_spin)
     assert window._curve_fit_plot_dialog.isAncestorOf(window.relaxation_uncertainty_checkbox)
@@ -11284,12 +11286,12 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     # (test_gui_multi_fit.py). Quadrupolar (Czjzek distribution) right
     # after Quadrupolar, and Fit plot display options at the very end
     # (test_gui_czjzek_display.py).
-    # Since 2026-10-06, CSA, Quad & J-coupling holds every interaction (J,
+    # Since 2026-10-06, Solid-state NMR holds every interaction (J,
     # CSA, quadrupolar), right after Integration
     # (test_gui_combined_consolidation.py).
     # 2026-10-16: Integration to its own Integrate tile, and the Fit plot
     # options to the fit's right-click menu.
-    assert titles == ["Isotropic (Gauss/Lor)", "CSA, Quad & J-coupling",
+    assert titles == ["Solution NMR", "Solid-state NMR",
                       "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)",
                       "SIMPSON spectrum", "Multi-spectrum", "Kept fit models"]
 
@@ -15499,8 +15501,8 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     window = MainWindow()
     side = _side_tab_names(window)
     assert "Simulations" in side
-    # After Fit, before Dynamics (toolbar order, user request 2026-09-27).
-    assert side.index("Fitting") < side.index("Simulations") < side.index("Relaxation")
+    # After Dynamics (toolbar order, user request 2026-10-23).
+    assert side.index("Fitting") < side.index("Relaxation") < side.index("Simulations")
 
     simulations_tab = window.side_tabs.widget(side.index("Simulations"))
     sections = simulations_tab.findChildren(CollapsibleSection)
@@ -15508,9 +15510,9 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     # pNMR (CIF): the notebook's CIF shift simulation (test_gui_pnmr.py).
     # J-coupling first (test_gui_jcoupling.py); Czjzek distribution after
     # Quadrupolar (test_gui_czjzek_display.py).
-    # Since 2026-10-06 CSA, Quad & J-coupling is the one interaction
+    # Since 2026-10-06 Solid-state NMR is the one interaction
     # simulator; the CSA and Quadrupolar ones are kept out of the menu.
-    assert [s.title() for s in sections] == ["CSA, Quad & J-coupling", "Czjzek distribution",
+    assert [s.title() for s in sections] == ["Solid-state NMR", "Czjzek distribution",
                                              "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
                                              "Diffusion (PFG)", "Shaped pulse (Bloch)",
                                              "pNMR (CIF)", "SIMPSON import"]
@@ -15983,10 +15985,11 @@ def test_numbered_panel_shortcuts_are_unchanged_by_settings(qapp):
     window = MainWindow()
     window_menu = _menu_by_title(window, "Window")
     shortcuts = {a.text(): a.shortcut().toString() for a in window_menu.actions()}
-    # Ctrl+n is the n-th toolbar button (Integrate, fifth, since 2026-10-16).
-    assert [shortcuts[name] for name in ("Load/Save", "Processing", "Compare", "Integration",
-                                         "Simulations")] == \
-        ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+5", "Ctrl+6"]
+    # Ctrl+n is the n-th toolbar button (order since 2026-10-23: Open, Process,
+    # Integrate, Fit, Dynamics, Simulate, Compare, ...).
+    assert [shortcuts[name] for name in ("Load/Save", "Processing", "Integration", "Fitting",
+                                         "Simulations", "Compare")] == \
+        ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+6", "Ctrl+7"]
     assert "Ctrl+," not in [v for k, v in shortcuts.items() if k != "Settings…"]
 
 
@@ -16137,8 +16140,8 @@ def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
     window = MainWindow()
     page = window.side_tabs.widget(window._simulations_tab_index)
     titles = [s.title() for s in page.findChildren(CollapsibleSection)]
-    # CSA, Quad & J-coupling holds every interaction since 2026-10-06.
-    assert titles == ["CSA, Quad & J-coupling", "Czjzek distribution",
+    # Solid-state NMR holds every interaction since 2026-10-06.
+    assert titles == ["Solid-state NMR", "Czjzek distribution",
                       "DFT tensors (CASTEP, VASP, ORCA, Gaussian)", "Diffusion (PFG)",
                       "Shaped pulse (Bloch)", "pNMR (CIF)", "SIMPSON import"]
 
@@ -16242,8 +16245,8 @@ def test_compare_is_its_own_tile_with_its_icon(qapp):
     window = MainWindow()
     tiles = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
     assert tiles[window._compare_tab_index] == "Compare"
-    # Third, after Process (toolbar order, user request 2026-09-27).
-    assert tiles.index("Process") < tiles.index("Compare") < tiles.index("Fit")
+    # After Simulate, before Adv. Proc. (toolbar order, user request 2026-10-23).
+    assert tiles.index("Simulate") < tiles.index("Compare") < tiles.index("Adv. Proc.")
     assert not window.side_tabs._buttons[window._compare_tab_index].icon().isNull()
 
 

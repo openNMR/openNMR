@@ -248,7 +248,7 @@ class PnmrSimulationPanel(QWidget):
                  export_sites: Callable | None = None, parent=None) -> None:
         super().__init__(parent)
         #: ``export_sites(site_dicts, notes, nucleus, larmor_mhz, destination,
-        #: append, source)`` -- puts sites into CSA, Quad & J-coupling.
+        #: append, source)`` -- puts sites into Solid-state NMR.
         self._export_sites = export_sites
         self._canvas = simulation_canvas
         self._show_simulation_view = show_simulation_view
@@ -304,13 +304,13 @@ class PnmrSimulationPanel(QWidget):
         settings_row = QHBoxLayout()
         self.load_settings_button = QPushButton("Load settings…")
         self.load_settings_button.setToolTip(
-            "Fill every step from a saved *_simulation_parameters.json -- the file "
-            "Enumerate writes beside the shift table -- ready to Enumerate again.")
+            "Fill every step from a saved *_simulation_parameters.json – the file "
+            "Enumerate writes beside the shift table – ready to Enumerate again.")
         self.load_settings_button.clicked.connect(self._on_load_settings)
         settings_row.addWidget(self.load_settings_button)
         self.save_settings_button = QPushButton("Save settings…")
         self.save_settings_button.setToolTip(
-            "Save the current set-up as a parameters JSON without running it -- to "
+            "Save the current set-up as a parameters JSON without running it – to "
             "come back to, or to run from a notebook.")
         self.save_settings_button.clicked.connect(self._on_save_settings)
         settings_row.addWidget(self.save_settings_button)
@@ -352,7 +352,7 @@ class PnmrSimulationPanel(QWidget):
         self._structure, self._site_data = structure, site_data
         self.cif_path_edit.setText(path)
         self.cif_path_edit.setToolTip(path)
-        self.cif_drop.setText(f"Loaded {os.path.basename(path)} -- drop another CIF to replace it")
+        self.cif_drop.setText(f"Loaded {os.path.basename(path)} – drop another CIF to replace it")
 
         labels = pnmr.site_label_table(site_data)
         species = pnmr.structure_species(site_data)
@@ -386,7 +386,7 @@ class PnmrSimulationPanel(QWidget):
         self.species_combo = QComboBox()
         self.species_combo.setToolTip(
             "The species whose NMR spectrum is simulated (atom_of_interest), as the CIF "
-            "writes it -- e.g. 'Na+' in a CIF with oxidation states, 'Na' without.")
+            "writes it – e.g. 'Na+' in a CIF with oxidation states, 'Na' without.")
         self.species_combo.currentIndexChanged.connect(lambda _i: self._on_species_changed())
         form.addRow("Observe:", self.species_combo)
 
@@ -503,7 +503,7 @@ class PnmrSimulationPanel(QWidget):
             lines.append(f"Also left out, sharing a site with an ignored species or on an "
                          f"ignored site: {', '.join(dropped)}.")
         if self._distances.empty:
-            lines.append(f"No neighbours within {self.max_r_spin.value():g} Å -- widen the "
+            lines.append(f"No neighbours within {self.max_r_spin.value():g} Å – widen the "
                          f"search radius.")
         self._init_text = "\n".join(lines)
         self.init_label.setText(self._init_text)
@@ -542,7 +542,7 @@ class PnmrSimulationPanel(QWidget):
         self.add_shell_button = QPushButton("Add shell")
         self.add_shell_button.setToolTip(
             "Add the next shell out, its limits suggested from the gaps in the distance "
-            "histogram -- check them against the plot.")
+            "histogram – check them against the plot.")
         self.add_shell_button.clicked.connect(self.add_shell)
         row.addWidget(self.add_shell_button)
         self.remove_shell_button = QPushButton("Remove shell")
@@ -704,7 +704,7 @@ class PnmrSimulationPanel(QWidget):
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     item.setData(Qt.ItemDataRole.BackgroundRole, QColor(128, 128, 128, 60))
                     item.setToolTip(f"No {sp} between {lo:g} and {hi:g} Å of the chosen sites"
-                                    f" -- this value is not used.")
+                                    f" – this value is not used.")
             n = rows["Neighbours"].iloc[0] if len(rows) else 0.0
             parts = ", ".join(f"{sp} {c:.3g}" for sp, c in present.items() if sp != "Va")
             vac = present.get("Va")
@@ -792,7 +792,7 @@ class PnmrSimulationPanel(QWidget):
         self.field_spin.setDecimals(6)
         self.field_spin.setValue(11.7)
         self.field_spin.setSuffix(" T")
-        self.field_spin.setToolTip("Field of the simulated spectrometer (B0_tesla) -- or type "
+        self.field_spin.setToolTip("Field of the simulated spectrometer (B0_tesla) – or type "
                                    "its ¹H frequency beside it.")
         self.field_spin.valueChanged.connect(lambda _v: self._refresh_state())
         # Not saved separately: it is the field, in other units.
@@ -809,7 +809,7 @@ class PnmrSimulationPanel(QWidget):
         self.broadening_spin.setValue(1.0)
         self.broadening_spin.setSuffix(" ppm")
         self.broadening_spin.setToolTip(
-            "Gaussian broadening of each environment, as sigma (standard deviation) -- "
+            "Gaussian broadening of each environment, as sigma (standard deviation) – "
             "not FWHM. FWHM = 2.355 × sigma.")
         self.broadening_spin.valueChanged.connect(lambda _v: self._refresh_state())
         form.addRow("Broadening σ:", self.broadening_spin)
@@ -944,14 +944,14 @@ class PnmrSimulationPanel(QWidget):
         same CIF, sites, ignores, shells and shifts Enumerate would use.
         Raises ValueError saying what is still missing."""
         if self._site_data is None or not self.cif_path:
-            raise ValueError("no CIF loaded -- load one in Simulate ▸ pNMR (CIF), step 1.")
+            raise ValueError("no CIF loaded – load one in Simulate ▸ pNMR (CIF), step 1.")
         if self._init_signature is None or self._init_signature != self._sites_signature():
             raise ValueError("press Initialise structure in Simulate ▸ pNMR (CIF), step 2.")
         if self.shell_table.rowCount() == 0:
-            raise ValueError("no shells yet -- add them in Simulate ▸ pNMR (CIF), step 3.")
+            raise ValueError("no shells yet – add them in Simulate ▸ pNMR (CIF), step 3.")
         kwargs = self.generate_kwargs()
         if not any(v for shell in kwargs["shift_dict"].values() for v in shell.values()):
-            raise ValueError("every bond-pathway shift is 0 -- give the shells their shifts in "
+            raise ValueError("every bond-pathway shift is 0 – give the shells their shifts in "
                              "Simulate ▸ pNMR (CIF), step 3.")
         return {k: kwargs[k] for k in self.FIT_MODEL_KEYS}
 
@@ -1300,7 +1300,7 @@ class PnmrSimulationPanel(QWidget):
             values = kwargs["shift_dict"].get(name, {})
             dropped = [sp for sp, v in values.items() if sp not in contributors and v != 0]
             if dropped:
-                problems.append(f"Shell {name}: shifts for {', '.join(dropped)} dropped -- not a "
+                problems.append(f"Shell {name}: shifts for {', '.join(dropped)} dropped – not a "
                                 f"contributor once the ignores are applied.")
             self._append_shell_row(name, _fmt_distance(lo), _fmt_distance(hi),
                                    {sp: f"{v:g}" for sp, v in values.items()})
@@ -1381,13 +1381,13 @@ class PnmrSimulationPanel(QWidget):
     # Log, and keeping later steps tied to the inputs that made them
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
-    # 6. Isotropic peaks -> CSA, Quad & J-coupling (2026-10-12)
+    # 6. Isotropic peaks -> Solid-state NMR (2026-10-12)
     # ------------------------------------------------------------------
     def _build_export_box(self) -> QGroupBox:
         box = QGroupBox("6. Add CSA, quadrupolar or J")
         v = QVBoxLayout(box)
-        hint = QLabel("The peaks above are isotropic. Send them on as sites -- environments "
-                      "within the grouping tolerance become one site -- then add CSA, "
+        hint = QLabel("The peaks above are isotropic. Send them on as sites – environments "
+                      "within the grouping tolerance become one site – then add CSA, "
                       "quadrupolar or J-coupling to each.")
         hint.setWordWrap(True)
         v.addWidget(hint)
@@ -1461,7 +1461,7 @@ class PnmrSimulationPanel(QWidget):
             return None
         destination = self.send_sites_row.destination()
         self._log(f"Exported {len(sites)} site(s) to "
-                  f"{'Fit' if destination == 'fit' else 'Simulate'} ▸ CSA, Quad & J-coupling"
+                  f"{'Fit' if destination == 'fit' else 'Simulate'} ▸ Solid-state NMR"
                   + (" (added)" if self.send_sites_row.append() else "") + ": "
                   + ", ".join(s["label"] for s in sites) + ".\n  " + "\n  ".join(notes))
         if self._export_sites is not None:
@@ -1538,7 +1538,7 @@ class PnmrSimulationPanel(QWidget):
         initialised = loaded and self._init_signature is not None
         init_current = initialised and self._init_signature == self._sites_signature()
         if initialised and not init_current:
-            self.init_label.setText("Site choices changed -- press Initialise structure again.")
+            self.init_label.setText("Site choices changed – press Initialise structure again.")
         elif init_current:
             self.init_label.setText(self._init_text)
         for w in (self.shell_table, self.add_shell_button, self.remove_shell_button):
@@ -1553,7 +1553,7 @@ class PnmrSimulationPanel(QWidget):
         self.save_table_button.setEnabled(self._result is not None)
         self.send_sites_row.set_enabled(result_current, result_current)
         if self._result is not None and not result_current:
-            self.plot_button.setToolTip("Inputs changed since the last enumeration -- "
+            self.plot_button.setToolTip("Inputs changed since the last enumeration – "
                                         "press Enumerate sites again.")
         else:
             self.plot_button.setToolTip("Draw the simulated spectrum.")

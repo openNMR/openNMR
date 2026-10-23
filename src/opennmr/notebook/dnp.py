@@ -504,7 +504,7 @@ def enhancement(spectrum_1: NMRSpectrum, spectrum_2: NMRSpectrum, peak=None, reg
         notes.append(f"Receiver gains differ ({labels[0]}: {rg1:g}, {labels[1]}: {rg2:g}); "
                      f"{labels[0]} scaled by {scale_1:.6g} to {labels[1]}'s gain.")
     elif correct_rg and (rg1 is None or rg2 is None):
-        notes.append("Receiver gain not recorded for both spectra, so not corrected -- check "
+        notes.append("Receiver gain not recorded for both spectra, so not corrected – check "
                      "they were acquired with the same RG.")
     elif not correct_rg and rg1 and rg2 and rg1 != rg2:
         notes.append(f"Receiver gains differ ({rg1:g}, {rg2:g}) and were NOT corrected.")
@@ -514,7 +514,7 @@ def enhancement(spectrum_1: NMRSpectrum, spectrum_2: NMRSpectrum, peak=None, reg
     if abs(c1 - c2) / c2 * 1e6 > 1.0 and unit.lower() != "offset":
         notes.append(f"The carriers differ by {(c1 - c2) * 1e6:,.0f} Hz ({abs(c1 - c2) / c2 * 1e6:.1f} "
                      "ppm): if the field differs too, the peak is not at the same ppm in both "
-                     "-- compare on the carrier-offset axis (unit='offset').")
+                     "– compare on the carrier-offset axis (unit='offset').")
 
     result = {"labels": list(labels), "unit": unit, "intensity": None, "area": None,
               "rg": {"1": rg1, "2": rg2, "scale_1": scale_1, "corrected": bool(correct_rg)},
@@ -546,7 +546,7 @@ def enhancement(spectrum_1: NMRSpectrum, spectrum_2: NMRSpectrum, peak=None, reg
         for p, name in ((p1, labels[0]), (p2, labels[1])):
             if p["at_edge"]:
                 notes.append(f"In {name} the largest signal is at the edge of the snap window "
-                             f"({p['position']:g} {unit}): the peak may lie outside it -- widen "
+                             f"({p['position']:g} {unit}): the peak may lie outside it – widen "
                              "the snap or pick closer.")
         spread = abs(p1["position"] - p2["position"])
         if peak_2 is None and snap and spread > 0.5 * snap:
@@ -600,7 +600,7 @@ def enhancement(spectrum_1: NMRSpectrum, spectrum_2: NMRSpectrum, peak=None, reg
                 f"By height and by area the enhancement differs by {rel:.1f}% (more than twice "
                 "the combined noise and region/baseline uncertainty): the line shape differs between the spectra (e.g. "
                 "microwave-induced broadening or heating), the region misses part of the line, "
-                "or the baseline differs. Height and area answer different questions -- report "
+                "or the baseline differs. Height and area answer different questions – report "
                 "which one you used.")
     elif result["intensity"] and not result["area"]:
         notes.append("Measured by peak height only: integrate a region too, to check the line "

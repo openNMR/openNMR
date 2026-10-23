@@ -104,7 +104,7 @@ def isolate_reference(spectrum_row, freq_ppm, region: tuple[float, float]) -> np
     mask = (freq_ppm >= low) & (freq_ppm <= high)
     if not mask.any():
         raise ValueError(
-            f"No spectral points between {low:g} and {high:g} ppm -- check the "
+            f"No spectral points between {low:g} and {high:g} ppm – check the "
             f"reference region against the spectrum's own range "
             f"({freq_ppm.min():g} to {freq_ppm.max():g} ppm)."
         )
@@ -146,7 +146,7 @@ def ideal_reference(freq_ppm, shift: float, fwhm: float, amplitude: float = 1.0,
     n = freq_ppm.size
     sweep = float(np.abs(freq_ppm[-1] - freq_ppm[0])) * n / max(n - 1, 1)
     if sweep <= 0:
-        raise ValueError("The ppm axis has zero span -- cannot build a reference FID.")
+        raise ValueError("The ppm axis has zero span – cannot build a reference FID.")
     t = np.arange(n) / sweep
 
     lorentz = np.exp(-np.pi * fwhm * t)
@@ -200,7 +200,7 @@ def correction(fid_measured, fid_ideal, method: str = "wiener", eps: float = 1e-
     peak = float(magnitude.max()) if magnitude.size else 0.0
     if peak <= 0:
         raise ValueError(
-            "The isolated reference FID is entirely zero -- the reference region "
+            "The isolated reference FID is entirely zero – the reference region "
             "holds no signal."
         )
 

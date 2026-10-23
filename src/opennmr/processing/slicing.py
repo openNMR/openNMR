@@ -270,7 +270,7 @@ def build_pseudo2d(traces: list[NMRSpectrum]) -> NMRSpectrum:
     """
     if len(traces) < 2:
         raise ValueError(
-            "build_pseudo2d needs at least two traces -- a single slice "
+            "build_pseudo2d needs at least two traces – a single slice "
             "is not a series."
         )
 
@@ -281,7 +281,7 @@ def build_pseudo2d(traces: list[NMRSpectrum]) -> NMRSpectrum:
     ref_ppm = ref_axis.ppm
     if ref_ppm is None:
         raise ValueError(
-            "Trace 1 has no chemical-shift (ppm) axis -- build_pseudo2d "
+            "Trace 1 has no chemical-shift (ppm) axis – build_pseudo2d "
             "only stacks frequency-domain traces."
         )
 
@@ -293,7 +293,7 @@ def build_pseudo2d(traces: list[NMRSpectrum]) -> NMRSpectrum:
         if (axis.ppm is None or len(axis.ppm) != len(ref_ppm)
                 or not np.allclose(axis.ppm, ref_ppm)):
             raise ValueError(
-                f"Trace {i} does not share trace 1's ppm axis -- every "
+                f"Trace {i} does not share trace 1's ppm axis – every "
                 "trace must be measured/fitted on the same axis to be "
                 "stacked into one pseudo-2D dataset."
             )

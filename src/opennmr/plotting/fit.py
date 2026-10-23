@@ -283,7 +283,7 @@ def _broadcast(value, n: int, name: str):
     if isinstance(value, list):
         if len(value) != n:
             raise ValueError(
-                f"{name} has {len(value)} entries but {n} series are being plotted -- "
+                f"{name} has {len(value)} entries but {n} series are being plotted – "
                 f"give one entry per series, or a single value to apply to all."
             )
         return value

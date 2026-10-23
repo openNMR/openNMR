@@ -406,7 +406,7 @@ def align_spectra(spectra, reference: int = 0, peak_ppm: float | None = None,
             if snr < min_snr:
                 why.append(f"S/N {snr:.1f} < {min_snr:g}")
             entry["note"] = ("no line matched (" + ", ".join(why) + "): left at the reference "
-                             "line's carrier offset -- check it by eye")
+                             "line's carrier offset – check it by eye")
         entries.append(entry)
     alignment = {"reference": int(reference), "peak_ppm": peak, "ref_offset_hz": o_r,
                  "ref_fwhm_hz": fwhm_ref, "match_halfwidth_hz": h, "window_hz": w,
@@ -533,7 +533,7 @@ def measure(aligned, peak_ppm: float | None = None, region=None, baseline: str =
                 notes.append("Receiver gains differ: every value is scaled to the reference "
                              f"spectrum's RG ({rg_ref:g}).")
         elif len(set(rgs)) > 1:
-            notes.append("Receiver gain not recorded for every spectrum, so not corrected -- "
+            notes.append("Receiver gain not recorded for every spectrum, so not corrected – "
                          "check they were acquired with the same RG.")
     elif len({g for g in rgs if g}) > 1:
         notes.append("Receiver gains differ and were NOT corrected.")
@@ -561,7 +561,7 @@ def measure(aligned, peak_ppm: float | None = None, region=None, baseline: str =
                 sys_[i] = 0.0
             if p["at_edge"]:
                 notes.append(f"{labels[i]}: the largest signal is at the edge of the snap "
-                             "window -- check the alignment there.")
+                             "window – check the alignment there.")
         out["height"] = {"value": value, "error": error, "systematic": sys_, "position": pos,
                          "snr": snr}
     if region is not None:

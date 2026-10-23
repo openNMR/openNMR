@@ -142,7 +142,7 @@ def save_progress(spectrum, name: str = "", note: str = "", folder: str | None =
     history = _history_for(spectrum)
     if not _on_disk(spectrum):
         if not folder:
-            raise ValueError("This spectrum has no folder of its own -- pass folder=.")
+            raise ValueError("This spectrum has no folder of its own – pass folder=.")
         folder = os.path.expanduser(folder)
         if os.path.exists(folder) and (not os.path.isdir(folder) or os.listdir(folder)):
             folder = io_history.unique_folder(folder)

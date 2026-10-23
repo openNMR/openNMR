@@ -135,7 +135,7 @@ def test_own_regions_are_marked_logged_and_reported(window):
     p.noise_edit.setText("-40, -80")
     p._on_noise_typed()
     log = p.log_view.toPlainText()
-    assert f"Noise region for {second['label']}: -40 to -80 ppm -- DIFFERS" in log
+    assert f"Noise region for {second['label']}: -40 to -80 ppm – DIFFERS" in log
     assert "†" in p.spectra_table.item(1, 2).text() and "†" not in p.spectra_table.item(0, 2).text()
     result = p.calculate()
     assert result["regions_differ"] and result["differing"] == [second["label"]]

@@ -9,7 +9,7 @@ exactly as a notebook calls it. This panel collects:
 * **Experiments**, in the order to fit them (any order: 5, 302, 12, 2,
   49), each with its own nucleus, field, MAS rate, transitions, fit
   window and x value (temperature from ``TE``, or time from ``DATE``).
-* **Sites per nucleus** -- the CSA, Quad & J-coupling site editor, one site
+* **Sites per nucleus** -- the Solid-state NMR site editor, one site
   list per observed isotope; the same label is the same chemical site.
 * **Parameters**: each (site, parameter) with its scope (per experiment,
   per nucleus, global), free/fixed and bounds; the site amounts' scope;
@@ -88,7 +88,7 @@ def parse_expnos(text: str) -> list[str]:
 
 
 class _SiteEditor(CombinedHamiltonianPanel):
-    """The CSA, Quad & J-coupling site editor without its setup rows or
+    """The Solid-state NMR site editor without its setup rows or
     Simulate buttons -- the nucleus is set by the panel."""
 
     BLURB = ("Sites observed as the nucleus chosen above. Use the same label for the same "
@@ -283,7 +283,7 @@ class MultiFitPanel(QWidget):
             "Fill the x value column from each experiment's own parameters: temperature (TE), "
             "time from the acquisition dates, any acquisition parameter (d1, p1, cnst2, l4, "
             "…; those that differ between these experiments are listed first), the "
-            "experiment number, or the fitting order. Or type any values -- a field, a "
+            "experiment number, or the fitting order. Or type any values – a field, a "
             "concentration, a pressure. Typed values are kept until you choose again.")
         self.x_source_combo.activated.connect(lambda _i: self.fill_x_values())
         xrow.addWidget(self.x_source_combo)
@@ -367,7 +367,7 @@ class MultiFitPanel(QWidget):
         self.copy_sites_button.setMenu(self._copy_menu)
         self.copy_sites_button.setToolTip(
             "Add another site list's sites to this nucleus's: another nucleus of these "
-            "experiments, or Fit / Simulate ▸ CSA, Quad & J-coupling. Labels, δiso, amounts, "
+            "experiments, or Fit / Simulate ▸ Solid-state NMR. Labels, δiso, amounts, "
             "widths and CSA are copied (C_Q scaled by the quadrupole moments, when both are "
             "quadrupolar); a site whose label is already here is left as it is.")
         srow.addWidget(self.copy_sites_button)
@@ -406,7 +406,7 @@ class MultiFitPanel(QWidget):
         self.keep_fits_button = QPushButton("Keep Fits in Open Experiments…")
         self.keep_fits_button.setToolTip(
             "Keep each spectrum's fit with its spectrum (Fit ▸ Kept fit models) and list it in "
-            "Open experiments -- its data with the fit drawn over it -- then show them all "
+            "Open experiments – its data with the fit drawn over it – then show them all "
             "together in Compare.")
         self.keep_fits_button.clicked.connect(lambda: self.keep_fits())
         self.keep_fits_button.setVisible(keep_fits is not None)
@@ -470,7 +470,7 @@ class MultiFitPanel(QWidget):
                 continue
             spectrum, label = got
             if spectrum.ndim != 1:
-                skipped.append(f"{label} (2D -- keep a slice first)")
+                skipped.append(f"{label} (2D – keep a slice first)")
                 continue
             self.experiments.append(self._experiment_row(key, spectrum, label))
             present.add(key)
@@ -710,8 +710,8 @@ class MultiFitPanel(QWidget):
                 lambda _c=False, src=nucleus, d=dicts, t=text: self._copy_and_say(src, d, t))
         if not sources:
             action = self._copy_menu.addAction(
-                "Nothing to copy yet -- add sites to another nucleus here, or to "
-                "Fit / Simulate ▸ CSA, Quad && J-coupling")
+                "Nothing to copy yet – add sites to another nucleus here, or to "
+                "Fit / Simulate ▸ Solid-state NMR")
             action.setEnabled(False)
 
     def _copy_and_say(self, source, dicts, text) -> None:
@@ -957,7 +957,7 @@ class MultiFitPanel(QWidget):
             for e in args["experiments"]:
                 got = self._resolve(e["key"])
                 if got is None:
-                    raise ValueError(f"{e['label']} is not open any more -- add it again.")
+                    raise ValueError(f"{e['label']} is not open any more – add it again.")
                 results = bridge.results_from_spectrum(got[0])
                 experiments.append(mf.make_experiment(
                     results, e["label"], nucleus=e["nucleus"], larmor_Hz=e["larmor_Hz"],
@@ -1027,7 +1027,7 @@ class MultiFitPanel(QWidget):
         """Keep every experiment's fit (``keep_fits`` callback); asks for
         a name unless given. Returns the Open experiment rows made."""
         if self._keep_fits is None or not self.keepable_count():
-            QMessageBox.information(self, "Keep fits", "Run Fit All first -- there are no fits "
+            QMessageBox.information(self, "Keep fits", "Run Fit All first – there are no fits "
                                     "to keep.")
             return []
         if name is None:
@@ -1193,8 +1193,8 @@ class MultiFitPanel(QWidget):
     def _build_quantity_box(self) -> QGroupBox:
         box = QGroupBox("Plot a fitted quantity against x")
         box.setToolTip("Any fitted or derived quantity of any peak, along the experiments, "
-                       "against the x value column -- a temperature, a time, an acquisition "
-                       "parameter or values you type -- on the Fit view.")
+                       "against the x value column – a temperature, a time, an acquisition "
+                       "parameter or values you type – on the Fit view.")
         form = QFormLayout(box)
         self.quantity_combo = QComboBox()
         self.quantity_combo.setToolTip(
@@ -1349,7 +1349,7 @@ class MultiFitPanel(QWidget):
             f"{mf.quantity_title(key)} against "
             + ("the experiments, in fitting order (fill the x value column to plot against x)"
                if in_order else xlabel)
-            + (f" -- {definition}." if definition else "."))
+            + (f" – {definition}." if definition else "."))
         return True
 
     def quantity_csv(self) -> str:

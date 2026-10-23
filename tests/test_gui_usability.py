@@ -1,8 +1,8 @@
 """Usability round, 2026-09-27 (explicit user requests):
 
 * every collapsible box starts collapsed;
-* the toolbar reads Open, Process, Compare, Fit, Simulate, Dynamics,
-  Adv. Proc., Apply, Settings (and Ctrl+1..8 follow it);
+* the toolbar reads Open, Process, Integrate, Fit, Dynamics, Simulate, Compare,
+  Adv. Proc., Apply, Settings (and Ctrl+1..9 follow it);
 * the default plot style reaches relaxation/diffusion curves, parameter
   trends and the DNP profiles ("Curves & profiles", falling back to the
   1D default).
@@ -27,7 +27,8 @@ def qapp():
 
 # "Periodic Table" just before Settings: explicit user request, 2026-09-28.
 # Integrate after Fit: explicit user request, 2026-10-16.
-TOOLBAR = ["Open", "Process", "Compare", "Fit", "Integrate", "Simulate", "Dynamics", "Adv. Proc.",
+# Reordered: explicit user request, 2026-10-23.
+TOOLBAR = ["Open", "Process", "Integrate", "Fit", "Dynamics", "Simulate", "Compare", "Adv. Proc.",
            "Apply", "Periodic Table", "Settings"]
 
 

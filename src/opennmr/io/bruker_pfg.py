@@ -197,7 +197,7 @@ def describe_diffusion_pulseprogram(text: str, name: str | None = None) -> Pulse
     if not result.resolved:
         result.notes.append(
             "this pulse programme does not document a 'little DELTA'/'big DELTA' "
-            "parameter -- timings must be supplied by the caller"
+            "parameter – timings must be supplied by the caller"
         )
     return result
 
@@ -473,7 +473,7 @@ def read_pfg_params(path: str, nucleus: str | None = None,
     if shape != "rect":
         warnings.append(
             f"shape={shape!r} applied on top of difflist, whose numbers already include "
-            f"the gradient shape's integral factor -- this double-counts it"
+            f"the gradient shape's integral factor – this double-counts it"
         )
 
     gradient = None
@@ -545,7 +545,7 @@ def _cross_check_difflist(path: str, g_per_cm: np.ndarray, acqus: dict,
         f"difflist does not match gradient_calib x SHAPE_INTEGFAC x GPZ{channel} x "
         f"Difframp (max {error:.1%} off). Either the shape factor is not folded into "
         f"difflist on this spectrometer, or the probe calibration changed after "
-        f"acquisition -- check before trusting D."
+        f"acquisition – check before trusting D."
     ]
 
 

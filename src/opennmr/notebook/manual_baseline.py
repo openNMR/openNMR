@@ -142,7 +142,7 @@ def _fit_polynomial(xs, ys, fixed):
         return result, np.zeros((0, 0))
     if len(xs) < len(free):
         raise ValueError(f"{len(xs)} baseline point(s) cannot determine {len(free)} "
-                         f"free coefficient(s) -- widen the baseline regions or fix more")
+                         f"free coefficient(s) – widen the baseline regions or fix more")
     # Column scaling only (no centring, which would mix fixed and free
     # coefficients): each column divided by its own max |value|.
     columns = np.column_stack([xs ** powers[n] for n in free])
@@ -152,7 +152,7 @@ def _fit_polynomial(xs, ys, fixed):
     solution, _res, rank, _sv = np.linalg.lstsq(design, target, rcond=None)
     if rank < len(free):
         raise ValueError("the baseline points do not determine every free coefficient "
-                         "(too few distinct x values) -- widen the regions or fix more")
+                         "(too few distinct x values) – widen the regions or fix more")
     coeffs = solution / scale
     dof = max(len(xs) - len(free), 1)
     residual = target - design @ solution
@@ -219,7 +219,7 @@ def _fit_sine(xs, ys, fixed, initial):
     free = [n for n in names if n not in fixed]
     if len(xs) < len(free):
         raise ValueError(f"{len(xs)} baseline point(s) cannot determine {len(free)} "
-                         f"free parameter(s) -- widen the baseline regions or fix more")
+                         f"free parameter(s) – widen the baseline regions or fix more")
     start = dict(initial) if initial else _sine_initial_guess(xs, ys, fixed)
     start.update(fixed)
     if not free:

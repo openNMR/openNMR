@@ -765,7 +765,7 @@ class LarmorCalculatorPanel(QWidget):
         self.all_table.setMinimumHeight(260)
         self.all_table.cellClicked.connect(self._on_all_table_clicked)
         self.all_table.setToolTip("Every tabulated nucleus at this field, highest frequency "
-                                  "first -- the nucleus above is selected, so its neighbours "
+                                  "first – the nucleus above is selected, so its neighbours "
                                   "(what else a probe tuned here might see) are beside it.")
         self.all_section = CollapsibleSection("All nuclei at this field", content=self.all_table,
                                               expanded=False)

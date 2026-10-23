@@ -512,11 +512,11 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
                 ax.plot_wireframe(wx, wy, wz, rstride=6, cstride=6, color="0.3",
                                   linewidth=0.3, alpha=float(0.25 + 0.5 * w / weights.max()))
             notes.append(f"J: the surface is copied at each multiplet offset (spread "
-                         f"{spread:.3g} ppm), drawn as wireframes -- same shape, J does not depend "
+                         f"{spread:.3g} ppm), drawn as wireframes – same shape, J does not depend "
                          "on direction.")
         else:
             notes.append(f"J splits every line into {len(offsets)} copies of this surface, "
-                         f"{spread:.2g} ppm apart at most ({spread * larmor * 1e-6:.3g} Hz) -- the "
+                         f"{spread:.2g} ppm apart at most ({spread * larmor * 1e-6:.3g} Hz) – the "
                          "same shape, far too close to see here. J does not depend on direction, "
                          "so it changes no shape.")
     elif comps["j"] and relative_to == "iso":

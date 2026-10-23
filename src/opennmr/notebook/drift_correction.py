@@ -391,7 +391,7 @@ class BrukerDriftSetup:
         parts = [f"{self.ndim}D, {mode}, {self.n_points} acquired points x {self.fids_per_point} FID(s)"]
         for dim in self.dims:
             if dim.kind == "none":
-                parts.append(f"{dim.name}: pseudo (no evolution) -- direct correction only")
+                parts.append(f"{dim.name}: pseudo (no evolution) – direct correction only")
             else:
                 parts.append(f"{dim.name}: {dim.kind}, {dim.n} increments of {dim.dwell_s * 1e6:.3f} µs, "
                              f"shift x {dim.freq_ratio:.6f}")
@@ -679,7 +679,7 @@ NOT_SUPPORTED_MESSAGE = (
     "Drift correction needs a Bruker 2D/pseudo-2D read from its raw ser, or a pseudo-2D series "
     "(one spectrum per row, acquired in order) from X-Pulse, Varian or Spinsolve. A genuine 2D "
     "from another vendor also has an indirect dimension to correct, which needs that vendor's "
-    "acquisition order -- not available yet. For Bruker data, use Write Corrected Bruker Dataset…"
+    "acquisition order – not available yet. For Bruker data, use Write Corrected Bruker Dataset…"
 )
 
 
@@ -724,7 +724,7 @@ def pseudo_2d_record(n_rows: int, request: dict, vendor: str = "") -> dict:
     shifts = request.get("shifts_hz")
     return {"start_hz": start, "end_hz": end, "endpoint": bool(request.get("endpoint", True)),
             "n_points": int(n_rows), "custom_shifts": shifts is not None,
-            "description": (f"pseudo-2D{f' ({vendor})' if vendor else ''}, {n_rows} rows -- "
+            "description": (f"pseudo-2D{f' ({vendor})' if vendor else ''}, {n_rows} rows – "
                             "direct-dimension correction only (no evolution dimension)"),
             "notes": [], "citation": CITATION}
 

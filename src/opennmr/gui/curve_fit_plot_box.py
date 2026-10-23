@@ -89,8 +89,8 @@ class CurveFitPlotBox(QGroupBox):
 
         self.keep_button = QPushButton("Keep This Curve Fit…")
         self.keep_button.setToolTip(
-            "Keep the fit on the plot with this spectrum, under a name -- its points, the fitted "
-            "curve and its report -- as CSA or quadrupolar fits are kept. With all peaks shown, "
+            "Keep the fit on the plot with this spectrum, under a name – its points, the fitted "
+            "curve and its report – as CSA or quadrupolar fits are kept. With all peaks shown, "
             "each peak's fit is kept. Listed under Kept curve fits below (and in Fit ▸ Kept fit "
             "models).")
         self.keep_button.setEnabled(False)

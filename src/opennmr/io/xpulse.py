@@ -1060,7 +1060,7 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
                           raw_rows.shape[0])
     if sw1 <= 0:
         raise ValueError(
-            "Spectral width (F1) must be > 0 to compute dt -- the sequence records no "
+            "Spectral width (F1) must be > 0 to compute dt – the sequence records no "
             "SW1 and the file's ##FIRST=/##LAST= T1 axis gives no usable F1 increment"
         )
     dt1 = 1.0 / sw1
@@ -1103,9 +1103,9 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
 
     autophased = bool(autophase)
     if autophase:
-        mean_spectrum = spectrum.mean(axis=0)
+        reference_spectrum = spectrum[processing_ft.reference_row(spectrum)]
         if phase_mode == "apc0":
-            phase0 = processing_ft.apc0(mean_spectrum, freq_ppm, phase0_inc)
+            phase0 = processing_ft.apc0(reference_spectrum, freq_ppm, phase0_inc)
         else:
             raise ValueError("phase_mode must be 'apc0'")
     if phase0 or phase1:
@@ -1374,7 +1374,7 @@ def read_array(path: str, **kwargs) -> NMRSpectrum:
     if any(len(s.data) != n_points for s in slices):
         raise ValueError(
             "All array steps must produce the same number of points after "
-            "processing -- got mismatched sizes across steps (check that "
+            "processing – got mismatched sizes across steps (check that "
             "zero_fill/truncate settings are consistent)."
         )
 

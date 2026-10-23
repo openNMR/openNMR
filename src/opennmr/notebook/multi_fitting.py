@@ -91,7 +91,7 @@ def make_experiment(results, label=None, nucleus=None, larmor_Hz=None, mas_Hz=0.
     refinement then holds it at that fitted value."""
     nucleus = nucleus or results.get("nuclide")
     if not nucleus:
-        raise ValueError(f"{label or 'An experiment'} has no nucleus -- pass nucleus=.")
+        raise ValueError(f"{label or 'An experiment'} has no nucleus – pass nucleus=.")
     larmor = float(larmor_Hz) if larmor_Hz else float(results["SFO1"]) * 1e6
     return {"results": results, "label": str(label or f"#{id(results) % 10000}"),
             "nucleus": str(nucleus), "larmor_Hz": larmor, "mas_Hz": float(mas_Hz or 0.0),
@@ -491,7 +491,7 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
               bounds=None, seed="previous", joint=None, preset=None, max_nfev=None,
               progress=None):
     """
-    Fit CSA, Quad & J-coupling sites to several spectra, consistently.
+    Fit Solid-state NMR sites to several spectra, consistently.
 
     Parameters
     ----------
@@ -596,7 +596,7 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
     for i in range(1, len(r2)):
         if np.isfinite(r2[i]) and np.isfinite(r2[i - 1]) and r2[i] < r2[i - 1] - 0.02:
             warnings.append(f"{experiments[i]['label']}: R² fell to {r2[i]:.4f} from "
-                            f"{r2[i - 1]:.4f} -- if the spectra did not change that much, the "
+                            f"{r2[i - 1]:.4f} – if the spectra did not change that much, the "
                             "seeded start may have drifted; refit with seed='start' to check")
     for i, v in enumerate(r2):
         if np.isfinite(v) and v < 0.9:

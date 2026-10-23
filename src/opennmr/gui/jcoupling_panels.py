@@ -175,7 +175,7 @@ class JCouplingSitesEditor(QWidget):
                 "Abundance: blank = the natural abundance of that isotope, so a 13C partner "
                 "gives 1.07% satellites; enter 100 for an enriched sample.\n"
                 "All isotopes: include every magnetic isotope of the partner's element at its "
-                "natural abundance -- J is to the named isotope, the others' Js follow from "
+                "natural abundance – J is to the named isotope, the others' Js follow from "
                 "their gyromagnetic ratios (e.g. 11B ticked also gives the 10B septet).\n"
                 "Label: optional, e.g. 3J(H-H), used in the reported notation.")
         if mode == "fit":
@@ -393,7 +393,7 @@ class JCouplingSitesEditor(QWidget):
         if c.get("all_isotopes"):
             if c.get("abundance") not in (None, ""):
                 raise ValueError(f"{site_label}, {nuclide}: 'All isotopes' uses natural "
-                                 f"abundances -- clear the abundance, or untick it.")
+                                 f"abundances – clear the abundance, or untick it.")
             out["all_isotopes"] = True
         ab = c.get("abundance")
         if ab not in (None, ""):
@@ -908,9 +908,9 @@ class SpinSystemEditor(QWidget):
             biggest = max(nss.block_sizes(spins, couplings).values())
             n_spins = sum(s["n"] for s in spins)
             lines.append(f"{n_spins} spins; largest Hamiltonian block {biggest} × {biggest}"
-                         + (" -- too large (limit %d)" % nss.MAX_BLOCK_DIM
+                         + (" – too large (limit %d)" % nss.MAX_BLOCK_DIM
                             if biggest > nss.MAX_BLOCK_DIM else
-                            (" -- expect a few seconds per simulation" if biggest > 250 else "")))
+                            (" – expect a few seconds per simulation" if biggest > 250 else "")))
             if B0:
                 strong = []
                 for c in nss.coupling_strengths(spins, couplings, B0):
@@ -985,7 +985,7 @@ def _model_combo() -> QComboBox:
     combo.addItem("First order: sites and coupling groups", "first_order")
     combo.addItem("Spin system: exact, with strong coupling", "spin_system")
     combo.setToolTip(
-        "First order builds each site's multiplet from its coupling groups -- fast, handles "
+        "First order builds each site's multiplet from its coupling groups – fast, handles "
         "natural-abundance satellites and isotopes, but assumes every shift difference is much "
         "larger than J.\n\nSpin system diagonalises the full Hamiltonian of explicit spins: "
         "exact for any shifts and Js (roofing, AB, ABX, AA'BB', virtual coupling), up to about "
@@ -993,7 +993,7 @@ def _model_combo() -> QComboBox:
     return combo
 
 
-#: The blurb of a J panel hosted in CSA, Quad & J-coupling's strong-coupling
+#: The blurb of a J panel hosted in Solid-state NMR's strong-coupling
 #: mode, where first-order J is an interaction of a peak instead.
 STRONG_COUPLING_BLURB = (
     "Strongly coupled peaks: every spin's shift and the J values between them, solved exactly "
@@ -1004,7 +1004,7 @@ STRONG_COUPLING_BLURB = (
 
 def lock_to_spin_system(panel) -> None:
     """Show a J panel as the exact spin-system model only: its first-order
-    mode is CSA, Quad & J-coupling's J interaction now (explicit user request,
+    mode is Solid-state NMR's J interaction now (explicit user request,
     2026-10-06: one Combined entry point for every interaction)."""
     panel.model_combo.setCurrentIndex(panel.model_combo.findData("spin_system"))
     panel.model_combo.setVisible(False)
@@ -1101,7 +1101,7 @@ class JCouplingSimulationPanel(QWidget):
         self.nucleus_combo = QComboBox()
         self.nucleus_combo.setEditable(True)
         self.nucleus_combo.addItems(COMMON_NUCLIDES)
-        self.nucleus_combo.setToolTip("The observed nucleus -- sets the observe frequency that "
+        self.nucleus_combo.setToolTip("The observed nucleus – sets the observe frequency that "
                                       "converts J (Hz) to ppm, and the axis label.")
         form.addRow("Observe:", self.nucleus_combo)
         self.field_spin = FieldSpinBox()
@@ -1109,7 +1109,7 @@ class JCouplingSimulationPanel(QWidget):
         self.field_spin.setDecimals(6)
         self.field_spin.setValue(9.3950)
         self.field_spin.setSuffix(" T")
-        self.field_spin.setToolTip("Magnet field -- or type its ¹H frequency beside it. "
+        self.field_spin.setToolTip("Magnet field – or type its ¹H frequency beside it. "
                                    "9.395 T is a '400 MHz' spectrometer.")
         # Not saved separately: it is the field, in other units.
         self._field_proton_spin = proton_frequency_box(self.field_spin, parent=self)
@@ -1253,7 +1253,7 @@ class JCouplingSimulationPanel(QWidget):
         self.export_button.setEnabled(False)
         if self.spectrum is not None:
             self.results_label.setText(self.results_label.text().split("\n(inputs changed")[0]
-                                       + "\n(inputs changed since this simulation -- "
+                                       + "\n(inputs changed since this simulation – "
                                          "Simulate again to update it)")
         self.spectrum = None
 
@@ -1279,7 +1279,7 @@ class JCouplingSimulationPanel(QWidget):
         larmor = self.larmor_Hz()
         spins, couplings = self.spin_editor.spins(), self.spin_editor.couplings()
         if not any(s["nuclide"] == nucleus for s in spins):
-            raise ValueError(f"The spin system has no {nucleus} spin to observe -- change "
+            raise ValueError(f"The spin system has no {nucleus} spin to observe – change "
                              f"Observe, or a spin's nucleus.")
         t = nss.spin_system_transitions(spins, couplings, self.field_spin.value(), observe=nucleus)
         fwhm_ppm = self.spin_fwhm_spin.value() / larmor * 1e6
@@ -1379,7 +1379,7 @@ class JCouplingSimulationPanel(QWidget):
         strong = [f"{c['a']}–{c['b']} ({c['ratio']:.2g})" for c in pairs if c["ratio"] < 10]
         if strong:
             lines.append("Strongly coupled, |Δν/J| < 10: " + ", ".join(strong)
-                         + " -- a first-order simulation would be visibly wrong here.")
+                         + " – a first-order simulation would be visibly wrong here.")
         elif pairs:
             lines.append("Every like-nucleus pair has |Δν/J| ≥ 10: first order would be close.")
         raw = {"kind": "jcoupling_spin_system", "B0_tesla": a["B0_tesla"],
@@ -1584,7 +1584,7 @@ class JCouplingFitPanel(QWidget):
         self.window_combo.addItem("Several ppm ranges", "ranges")
         self.window_combo.setToolTip(
             "Which part of the spectrum the fit sees. Around the sites: each site's starting "
-            "multiplet plus a margin -- the usual choice, as other peaks in the window would "
+            "multiplet plus a margin – the usual choice, as other peaks in the window would "
             "otherwise be fitted as part of it.")
         form.addRow("Fit window:", self.window_combo)
         window_box = QWidget()
@@ -1766,7 +1766,7 @@ class JCouplingFitPanel(QWidget):
         if mode == "regions":
             regions = self._get_regions()
             if not regions:
-                raise ValueError("No Integration regions are defined -- add some on the "
+                raise ValueError("No Integration regions are defined – add some on the "
                                  "Integration section, or choose another fit window.")
             return ("regions", regions)
         return None
@@ -1783,7 +1783,7 @@ class JCouplingFitPanel(QWidget):
         if mode == "regions":
             regions = self._get_regions()
             if not regions:
-                raise ValueError("No Integration regions are defined -- add some on the "
+                raise ValueError("No Integration regions are defined – add some on the "
                                  "Integration section, or choose another fit window.")
             return regions
         # auto: each site's starting multiplet +/- a margin, merged
@@ -1829,8 +1829,8 @@ class JCouplingFitPanel(QWidget):
         try:
             sites = self.editor.sites(larmor)
             if any(not s["couplings"] for s in sites):
-                raise ValueError("Every site needs at least one coupling -- fit a singlet with "
-                                 "Isotropic (Gauss/Lor) instead.")
+                raise ValueError("Every site needs at least one coupling – fit a singlet with "
+                                 "Solution NMR instead.")
             window = self.shift_window_spin.value()
             for s in sites:
                 if window > 0 and "center_ppm" not in s["bounds"]:
@@ -1916,7 +1916,7 @@ class JCouplingFitPanel(QWidget):
         try:
             spins, couplings = self.spin_editor.spins(), self.spin_editor.couplings()
             if not any(s["nuclide"] == observe for s in spins):
-                raise ValueError(f"The spin system has no {observe} spin -- the spectrum is "
+                raise ValueError(f"The spin system has no {observe} spin – the spectrum is "
                                  f"{observe}.")
             fixed, bounds = self.spin_editor.constraints()
             window = self.shift_window_spin.value()
@@ -2042,7 +2042,7 @@ class JCouplingFitPanel(QWidget):
         if len(r["solutions"]) > 1:
             warnings.append(
                 f"{len(r['solutions'])} solutions fit equally well (choose one below). They "
-                f"cannot be told apart from this spectrum -- the classic ABX ambiguity; the "
+                f"cannot be told apart from this spectrum – the classic ABX ambiguity; the "
                 f"spectrum of the other nucleus, or a heteronuclear correlation, can decide.")
         if any(info["names"][k].startswith("J ") and "-" in info["names"][k]
                for k in range(len(popt))) and len(r["solutions"]) == 1 \
@@ -2052,7 +2052,7 @@ class JCouplingFitPanel(QWidget):
                             "are measured.")
         if np.isfinite(r2) and r2 < 0.98:
             warnings.append("The fit is poor (R² < 0.98): the starting values may be too far "
-                            "off -- start the shifts and Js closer to what the spectrum shows.")
+                            "off – start the shifts and Js closer to what the spectrum shows.")
         lines += [f"⚠ {w}" for w in warnings]
         self.results_label.setText("\n".join(lines))
 
@@ -2163,7 +2163,7 @@ class JCouplingFitPanel(QWidget):
                 name = g.get("bond_label") or f"{g['n']}×{g['nuclide']}"
                 js.append(f"{name}: {self._fmt(float(popt[j]), float(errors[j]), not is_free[j])}")
                 if is_free[j] and popt[j] < 1e-3:
-                    warnings.append(f"{label}, {name}: J went to 0 Hz -- this coupling is not "
+                    warnings.append(f"{label}, {name}: J went to 0 Hz – this coupling is not "
                                     f"resolved, or the starting J was far off.")
             f = start + 1 + k
             cells = [self._fmt(float(popt[start]), float(errors[start]), not is_free[start]),
@@ -2184,7 +2184,7 @@ class JCouplingFitPanel(QWidget):
             if is_free[start] and np.isfinite(lo) and (
                     min(popt[start] - lo, hi - popt[start]) < 1e-3 * (hi - lo)):
                 warnings.append(f"{label}: the shift stopped at the edge of its allowed range "
-                                f"({lo:.4f} to {hi:.4f} ppm) -- check the starting shift and Js.")
+                                f"({lo:.4f} to {hi:.4f} ppm) – check the starting shift and Js.")
         t.resizeRowsToContents()
         t.setVisible(True)
 

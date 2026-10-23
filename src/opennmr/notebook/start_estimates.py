@@ -180,7 +180,7 @@ def _estimate_jcoupling(x, y, mask, larmor_Hz, partner, lineshape):
     if not binomial:
         notes.append("The line heights are not in the binomial ratio n partners give "
                      f"({', '.join(f'{v:.2f}' for v in expected)}): it may be several "
-                     "couplings, or overlapping multiplets -- check the J groups.")
+                     "couplings, or overlapping multiplets – check the J groups.")
     if uneven > 0.1:
         notes.append(f"The spacings vary by {uneven:.0%}: more than one J, or strong "
                      "coupling (then use the strongly coupled peaks model).")
@@ -386,7 +386,7 @@ def estimate_start(results, kind, nucleus=None, larmor_Hz=None, mas_Hz=0.0, orde
 
     Returns a dict:
         ``sites`` -- site dicts, ready for :func:`fit_combined` (or
-        Fit ▸ CSA, Quad & J-coupling);
+        Fit ▸ Solid-state NMR);
         ``notes`` -- how each value was arrived at, in plain words;
         ``start_r2`` -- R² of the starting model (amounts by least
         squares), a check that the start is near the data;

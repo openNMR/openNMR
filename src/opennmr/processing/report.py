@@ -351,5 +351,5 @@ def compare_processing(spectra, labels=None) -> str:
         row = f"{name:<{label_width}}  " + "  ".join(
             f"{value:<{w}}" for value, w in zip(values, column_widths))
         # A marker, not colour: this gets pasted into plain text.
-        lines.append(row.rstrip() + ("" if agree else "   <-- differs"))
+        lines.append(row.rstrip() + ("" if agree else "   <- differs"))
     return "\n".join(lines)

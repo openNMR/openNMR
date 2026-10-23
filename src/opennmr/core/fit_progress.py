@@ -333,7 +333,7 @@ def not_converged_suggestions(limit: int, *, n_free: int | None = None,
     out.append(f"Free fewer parameters{many}: fix or link the ones the data cannot pin down "
                "(e.g. η with weak sidebands, Euler angles, a minor site's width), fit, then "
                "free them one at a time.")
-    out.append("Check the limits: a parameter pushing against a bound can stall a fit -- "
+    out.append("Check the limits: a parameter pushing against a bound can stall a fit – "
                "widen that bound, or fix the parameter if the bound is physical.")
     out.append("Check the data: phase and baseline errors, or a fit window that cuts off part "
                "of the signal (sidebands included), leave no clean minimum to converge to.")

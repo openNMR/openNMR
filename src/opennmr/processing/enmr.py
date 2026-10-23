@@ -122,7 +122,7 @@ def pfg_params(spectrum, nucleus: str | None = None) -> dict:
     except FileNotFoundError as exc:
         raise ValueError(
             f"No diff.xml in {path!r}. The gradient strength in T/m is not "
-            f"recoverable without it -- acqus records only a percentage of the "
+            f"recoverable without it – acqus records only a percentage of the "
             f"probe's maximum, and the calibration that turns that into T/m is "
             f"not in the parameter list. Supply gradient, delta and big_delta "
             f"explicitly."
@@ -208,7 +208,7 @@ def phase_series(rows, freq_ppm, region: tuple[float, float], unwrap: bool = Tru
         raise ValueError(f"Expected one row per slice, got shape {rows.shape}.")
     if not np.iscomplexobj(rows):
         raise ValueError(
-            "eNMR phase needs the complex spectrum -- this one has no imaginary "
+            "eNMR phase needs the complex spectrum – this one has no imaginary "
             "part, so there is no phase to measure."
         )
     freq_ppm = np.asarray(freq_ppm, dtype=float)
@@ -539,7 +539,7 @@ def branch_slopes(voltages, phases, *, positive_first: bool = True,
     if not unfolded["paired"]:
         raise ValueError(
             "This series is not in +V/-V pairs, so there are no two arms to "
-            "compare -- consecutive points must share a voltage magnitude. Fit "
+            "compare – consecutive points must share a voltage magnitude. Fit "
             "it with fit_enmr directly."
         )
 
@@ -742,7 +742,7 @@ def format_branch_report(branches: dict, label: str | None = None,
     else:
         message = (
             "The two arms DISAGREE by more than their errors allow. Something "
-            "in this measurement did not reverse with the field -- convection "
+            "in this measurement did not reverse with the field – convection "
             "from bubble formation runs one direction only and does exactly "
             "this. Look at the arms before trusting their average: a clean "
             "line on one side and a poor one on the other is one direction "
@@ -1174,7 +1174,7 @@ def mobility_from_slope(slope: float, electrode_gap: float, gamma: float,
     denominator = gamma * gradient * delta * big_delta
     if denominator == 0:
         raise ValueError(
-            "gamma * gradient * delta * DELTA is zero -- check the gradient "
+            "gamma * gradient * delta * DELTA is zero – check the gradient "
             "strength and the diffusion timings."
         )
     if int(cell_polarity) not in (1, -1):
@@ -1365,7 +1365,7 @@ def format_enmr_report(result: dict, label: str | None = None, width: int = 66) 
     if result.get("broken_pairs"):
         for chunk in _wrap(
             f"{result['broken_pairs']} pair(s) lost one point and so could not "
-            f"be differenced -- a half-difference needs both polarities. The "
+            f"be differenced – a half-difference needs both polarities. The "
             f"arm fit below still uses the survivors; prefer it when points "
             f"were removed singly.", width - 6):
             lines.append(f"    {chunk}")

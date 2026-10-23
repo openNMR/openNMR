@@ -589,7 +589,7 @@ def make_shear_plan(experiment: str = "mqmas", *, spin: float | None = None,
                      f"kappa = {_frac(k_t2)}), so no shear is applied; F1 is only scaled and "
                      "referenced. This assumes the F1 dwell (IN0) is the whole t1 increment; "
                      "if it is only the MQ part, use a custom F1 factor.")
-        label += " -- split-t1 acquisition"
+        label += " – split-t1 acquisition"
         a_c, k_t2 = None, 0.0
     if convention is None:
         convention = "cs"
@@ -890,8 +890,8 @@ def shear_2d(spectrum, plan: ShearPlan, *, t1_0: float = 0.0, t2_0: float = 0.0,
     if view["raw"].get("align_echo") and plan.kappa_t2:
         warn_list.append(
             "Each row was rolled to its own echo top (Align Echo) when this 2D was processed. "
-            "That moves every t1 increment -- and, with echo-antiecho data, the p- and "
-            "n-type rows differently -- by its own amount, which is a row-dependent shear of "
+            "That moves every t1 increment – and, with echo-antiecho data, the p- and "
+            "n-type rows differently – by its own amount, which is a row-dependent shear of "
             "its own; the shear here assumes every row shares one t2 origin. Reprocess "
             "without Align Echo (use one F2 first-order phase for the echo delay) and shear "
             "that.")
@@ -1093,7 +1093,7 @@ def estimate_shear(spectrum, direction: str = "t2", *, kappa_range=(-4.0, 4.0),
                     "anisotropy, or noise); rely on the experiment's own value.")
     if abs(k_best) < 2 * step:
         text.append("The best ratio is close to zero: the data look already sheared, as a "
-                    "split-t1 acquisition is -- choose split-t1 (make_shear_plan(..., "
+                    "split-t1 acquisition is – choose split-t1 (make_shear_plan(..., "
                     "split_t1=True)) so that F1 is only scaled and referenced, not sheared "
                     "again. (The F1 direction cannot be read from a ridge that is already "
                     "flat; if the sites come out in the wrong F1 order, use f1_sign = -1.)")
@@ -1111,7 +1111,7 @@ def estimate_shear(spectrum, direction: str = "t2", *, kappa_range=(-4.0, 4.0),
         close = m["relative"] < 0.05
         text.append(f"Closest standard value: {m['label']}, kappa = {m['kappa']:+.4f} "
                     f"({_frac(abs(m['kappa']))}), {m['relative']:.1%} away"
-                    + ("." if close else " -- not a close match; check the experiment and spin."))
+                    + ("." if close else " – not a close match; check the experiment and spin."))
         if close:
             text.append("F1 is displayed with the same sense as the coherence frequency "
                         "(f1_sign = +1)." if m["f1_sign"] > 0 else

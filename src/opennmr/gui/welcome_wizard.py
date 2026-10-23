@@ -238,7 +238,7 @@ class WelcomeWizard(QDialog):
                              "your work, and how hard a fit may try before it stops.")
         form = QFormLayout()
         self.data_folder_edit = QLineEdit(w.data_folder_edit.text())
-        self.data_folder_edit.setPlaceholderText("None -- dialogs start where they always did")
+        self.data_folder_edit.setPlaceholderText("None – dialogs start where they always did")
         form.addRow("Default data folder:", self._with_browse(self.data_folder_edit,
                                                               "Default data folder"))
         self.browse_at_start_check = QCheckBox("List its experiments in Open's browser at start-up")

@@ -309,7 +309,7 @@ def b_value(gradient, delta, DELTA, gamma=None, nucleus=None, shape="rect",
         raise ValueError(f"ramp must be >= 0, got {ramp:g} s.")
     if shape in SHAPES_WITH_RAMP and ramp > delta:
         raise ValueError(
-            f"ramp ({ramp:g} s) cannot exceed delta ({delta:g} s) -- delta is the flat "
+            f"ramp ({ramp:g} s) cannot exceed delta ({delta:g} s) – delta is the flat "
             f"top plus one ramp, so a longer ramp describes no real pulse."
         )
     timing = _timing_term(shape, delta, DELTA, tau, ramp, correction)
@@ -420,7 +420,7 @@ def calibrate_max_gradient(relative, intensities, known_D, delta, DELTA, gamma=N
     intensities = np.asarray(intensities, dtype=float)
     if relative.size != intensities.size:
         raise ValueError(
-            f"Got {relative.size} gradient values and {intensities.size} intensities -- "
+            f"Got {relative.size} gradient values and {intensities.size} intensities – "
             f"a calibration needs one intensity per gradient step."
         )
     if relative.size < 3:
@@ -515,7 +515,7 @@ def _stretch_flags(n_components: int, stretched) -> list[bool]:
     flags = [bool(s) for s in stretched]
     if len(flags) != n_components:
         raise ValueError(
-            f"stretched has {len(flags)} entries for {n_components} component(s) -- "
+            f"stretched has {len(flags)} entries for {n_components} component(s) – "
             f"give one flag per component, or a single bool for all of them."
         )
     return flags
@@ -660,7 +660,7 @@ def _component_d_guesses(b, expected_D, n_components: int) -> list[float]:
         if values.size == 1:
             return spread(float(values[0]))
         raise ValueError(
-            f"expected_D has {values.size} entries for {n_components} component(s) -- "
+            f"expected_D has {values.size} entries for {n_components} component(s) – "
             f"give one per component, or a single value to spread around."
         )
     b = np.asarray(b, dtype=float)

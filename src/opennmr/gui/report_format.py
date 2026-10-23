@@ -112,7 +112,7 @@ def report_html(text: str, muted: str = MUTED, warn: str = WARN) -> str:
     return "".join(blocks)
 
 
-# ---- CSA, Quad & J-coupling sites ---------------------------------------------------------------
+# ---- Solid-state NMR sites ---------------------------------------------------------------
 
 def _g(value, digits=6) -> str:
     try:
@@ -252,7 +252,7 @@ def conditions(settings: dict, powder: dict | None = None) -> list[str]:
 
 def combined_simulation_html(result: dict, elapsed: float, warning: str = "",
                              muted: str = MUTED, warn: str = WARN) -> str:
-    """Simulate ▸ CSA, Quad & J-coupling's read-out."""
+    """Simulate ▸ Solid-state NMR's read-out."""
     sites = result.get("site_dicts") or []
     n = len(sites)
     head = (f"{n} site{'s' if n != 1 else ''} simulated in {elapsed:.2f} s" if n
@@ -273,9 +273,9 @@ def combined_simulation_html(result: dict, elapsed: float, warning: str = "",
 
 def combined_fit_html(lines: list[str], quality: dict, elapsed: float, warnings=(),
                       has_quadrupolar: bool = True, muted: str = MUTED, warn: str = WARN) -> str:
-    """Fit ▸ CSA, Quad & J-coupling's read-out above its table.
+    """Fit ▸ Solid-state NMR's read-out above its table.
 
-    ``lines``: the fit log's first line ("CSA, Quad & J-coupling fit: <
+    ``lines``: the fit log's first line ("Solid-state NMR fit: <
     conditions>.") and any multi-start lines."""
     metrics = [("R²", f"{quality['r2']:.5f}"), ("RMSE", f"{quality['rmse']:.3g}"),
                ("reduced χ²", f"{quality['reduced_chi2']:.3g}"), ("time", f"{elapsed:.1f} s")]
@@ -304,7 +304,7 @@ def combined_fit_html(lines: list[str], quality: dict, elapsed: float, warnings=
 
 def combined_preview_html(n_orientations: int, fit_orientations: int, amounts: dict,
                           estimated: bool, muted: str = MUTED) -> str:
-    """The live preview's line under Fit ▸ CSA, Quad & J-coupling."""
+    """The live preview's line under Fit ▸ Solid-state NMR."""
     how = "estimated from the data" if estimated else "as typed"
     amount_text = ", ".join(f"{k} {v:.3g}" for k, v in amounts.items())
     items = [f"{n_orientations:,} orientations (the fit uses {fit_orientations:,})",

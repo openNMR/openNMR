@@ -933,7 +933,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             "recorded_phase0": recorded_f2[0], "recorded_phase1": recorded_f2[1],
             **({"tdeff_f2_points": tdeff_points} if tdeff_points else {}),
             **({"recorded_phase_dropped":
-                "Echo alignment replaces TopSpin's recorded PHC0/PHC1 -- that phase "
+                "Echo alignment replaces TopSpin's recorded PHC0/PHC1 – that phase "
                 "compensates for transforming from t=0 of an echo, which aligning "
                 "already does, so a zero-order phase was re-derived instead."}
                if recorded_phase_dropped else {}),
@@ -1370,7 +1370,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # This matters most for the T2 echo series, which are
             # exactly the 2D experiments that need Align Echo, and
             # which record PHC1 values of 800-2000 degrees.
-            phase0 = processing_ft.apc0(spectrum.mean(axis=0), x_ppm, phase0_inc)
+            phase0 = processing_ft.apc0(spectrum[processing_ft.reference_row(spectrum)], x_ppm, phase0_inc)
             recorded_phase_dropped_f2 = True
         elif phase_mode == "recorded":
             # F2's recorded phase, kept separate from the user's own --
@@ -1380,7 +1380,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # first-order term.
             recorded_f2 = (float(procs.get("PHC0", 0.0)), float(procs.get("PHC1", 0.0)))
         elif phase_mode == "apc0":
-            phase0 = processing_ft.apc0(spectrum.mean(axis=0), x_ppm, phase0_inc)
+            phase0 = processing_ft.apc0(spectrum[processing_ft.reference_row(spectrum)], x_ppm, phase0_inc)
         else:
             raise ValueError("phase_mode must be 'apc0' or 'recorded'")
     spectrum = apply_dimension_phase(spectrum, x_ppm, recorded_f2, (phase0, phase1), pivot_frac=pivot_frac)
@@ -1508,7 +1508,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             _SR_RECORDED_KEY_F1: (None if pseudo_2d else _recorded_sr_hz(sf_1, obs_1)),
             "recorded_phase0": recorded_f2[0], "recorded_phase1": recorded_f2[1],
             **({"recorded_phase_dropped":
-                "Echo alignment replaces TopSpin's recorded PHC0/PHC1 for F2 -- that "
+                "Echo alignment replaces TopSpin's recorded PHC0/PHC1 for F2 – that "
                 "phase compensates for transforming from t=0 of an echo, which aligning "
                 "already does, so a zero-order phase was re-derived instead."}
                if recorded_phase_dropped_f2 else {}),
@@ -1591,7 +1591,7 @@ def read_1d_processed(path: str, procno: int = 1, mass: float = 1.0, f1p: float 
         # directory but no fid, no ser and no 1r -- an aborted or
         # never-processed acquisition.
         raise FileNotFoundError(
-            f"No processed 1r data at {real_path}, and no raw fid/ser either -- this "
+            f"No processed 1r data at {real_path}, and no raw fid/ser either – this "
             f"experiment has parameter files but no acquired or processed spectrum "
             f"(an aborted or never-processed acquisition)."
         )
@@ -2155,7 +2155,7 @@ def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
         # `Bruker Example Data/Cyclosporine/206/pdata/1` has procs,
         # proc2s, clevels and a thumbnail but no 2rr at all.
         raise FileNotFoundError(
-            f"No processed 2rr data at {real_path} -- this experiment's pdata/{procno} "
+            f"No processed 2rr data at {real_path} – this experiment's pdata/{procno} "
             f"directory has parameter files but no processed spectrum. Process it in "
             f"TopSpin first, pick a different procno, or load the raw ser instead."
         )

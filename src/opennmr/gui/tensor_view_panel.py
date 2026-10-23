@@ -1,6 +1,6 @@
 """
 "Tensor picture" controls for the Simulate panels (CSA, Quadrupolar,
-CSA, Quad & J-coupling): draw the simulated site's tensors in 3D on the
+Solid-state NMR): draw the simulated site's tensors in 3D on the
 Simulation plot, as its frequency surface or as tensor glyphs.
 
 The pictures are :mod:`opennmr.notebook.tensor_views`' own figures,
@@ -40,7 +40,7 @@ class TensorViewControls(QGroupBox):
         self.style_combo.addItem("Ellipsoid and axes", "ellipsoid")
         self.style_combo.setToolTip(
             "Frequency surface: for each direction of B0 in the site frame, the line's "
-            "frequency drawn as the distance from the centre -- what the powder pattern is "
+            "frequency drawn as the distance from the centre – what the powder pattern is "
             "made of (an isotropic shift is a sphere of radius |δiso|).\n"
             "Ellipsoid and axes: the CSA ellipsoid (semi-axes |δii|) and the EFG's principal "
             "axes in one frame, showing their relative orientation.")

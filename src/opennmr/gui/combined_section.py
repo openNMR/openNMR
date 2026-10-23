@@ -1,6 +1,6 @@
-"""Fit ▸ CSA, Quad & J-coupling and Simulate ▸ CSA, Quad & J-coupling: the one
+"""Fit ▸ Solid-state NMR and Simulate ▸ Solid-state NMR: the one
 entry point for every spectral interaction (explicit user request,
-2026-10-06: "condense the models into CSA, Quad & J-coupling, so that people
+2026-10-06: "condense the models into Solid-state NMR, so that people
 can just add peaks and then, to each peak, add an interaction").
 
 Two models, one section:

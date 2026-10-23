@@ -236,7 +236,7 @@ class SnrPanel(QWidget):
         intro = QLabel(
             "Signal-to-noise of one or more spectra: a signal region (the line) and a noise "
             "region (no signal), typed or dragged on the plot. S/N = height above the noise "
-            "level / the noise standard deviation, with its uncertainty -- and the same "
+            "level / the noise standard deviation, with its uncertainty – and the same "
             "measurement by the other conventions (TopSpin's ×½, ×⅓, Pharmacopoeia, integral "
             "or volume), side by side. 2D spectra: give the boxes' F1 sides too.")
         intro.setWordWrap(True)
@@ -290,7 +290,7 @@ class SnrPanel(QWidget):
         v = QVBoxLayout(box)
         self.different_check = QCheckBox("Different regions for some spectra")
         self.different_check.setToolTip(
-            "Off: every spectrum uses the same regions (recommended -- S/N over different "
+            "Off: every spectrum uses the same regions (recommended – S/N over different "
             "regions are not strictly comparable). On: choose a spectrum below and set its own; "
             "it is marked † and logged.")
         self.different_check.toggled.connect(self._on_different_toggled)
@@ -317,7 +317,7 @@ class SnrPanel(QWidget):
         self.noise_edit.setPlaceholderText("e.g. 60, 40  (several: 60, 40; -40, -60)")
         self.noise_edit.setToolTip(
             "Somewhere with no signal, no sidebands and no spikes: two limits in ppm; several "
-            "windows separated by ';'. Wider is better -- σ is known to ±1/√(2·independent "
+            "windows separated by ';'. Wider is better – σ is known to ±1/√(2·independent "
             "points).")
         self.noise_edit.editingFinished.connect(self._on_noise_typed)
         self.noise_drag_button = QPushButton("Drag…")
@@ -333,14 +333,14 @@ class SnrPanel(QWidget):
         # 2D spectra: the boxes' F1 sides (explicit user request,
         # 2026-10-14). Shared by every 2D; blank = all of F1.
         self.signal_f1_edit = QLineEdit()
-        self.signal_f1_edit.setPlaceholderText("2D only -- blank: all of F1")
+        self.signal_f1_edit.setPlaceholderText("2D only – blank: all of F1")
         self.signal_f1_edit.setToolTip(
             "For a 2D spectrum, the signal box is the F2 range above by this F1 range (ppm). "
             "Blank: the whole of F1. Used by every 2D ticked.")
         self.signal_f1_edit.editingFinished.connect(lambda: self._on_f1_typed("signal"))
         form.addRow("Signal F1 (ppm):", self.signal_f1_edit)
         self.noise_f1_edit = QLineEdit()
-        self.noise_f1_edit.setPlaceholderText("2D only -- blank: all of F1")
+        self.noise_f1_edit.setPlaceholderText("2D only – blank: all of F1")
         self.noise_f1_edit.setToolTip(
             "For a 2D spectrum, the noise box(es) are the F2 windows above by this F1 range "
             "(several: separate with ';'). Blank: the whole of F1. Pick a part with no peaks "
@@ -595,7 +595,7 @@ class SnrPanel(QWidget):
             else:
                 shared_text = format_window(shared) if kind == "signal" else format_windows(shared)
             if shared is None or value != shared:
-                tail = f" -- DIFFERS from the shared region ({shared_text})."
+                tail = f" – DIFFERS from the shared region ({shared_text})."
             else:
                 tail = " (the same as the shared region)."
             self._log(f"{kind.capitalize()} region for {self._label_of(target)}: {text} ppm"

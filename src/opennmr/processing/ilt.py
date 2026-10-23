@@ -298,7 +298,7 @@ def dosy_map(b, intensities, ppm, d_grid=None, alpha: float = 1e-2, n_grid: int 
         raise ValueError(f"intensities must be 2-D (gradient steps x points), got shape {intensities.shape}.")
     if intensities.shape[0] != b.size:
         raise ValueError(
-            f"{intensities.shape[0]} gradient rows against {b.size} b-values -- "
+            f"{intensities.shape[0]} gradient rows against {b.size} b-values – "
             f"one b per row is required."
         )
     if intensities.shape[1] != ppm.size:
@@ -312,7 +312,7 @@ def dosy_map(b, intensities, ppm, d_grid=None, alpha: float = 1e-2, n_grid: int 
     reference = intensities[0]
     peak = float(np.nanmax(np.abs(reference)))
     if not peak:
-        raise ValueError("The first gradient row is entirely zero -- nothing to invert.")
+        raise ValueError("The first gradient row is entirely zero – nothing to invert.")
     selected = np.flatnonzero(np.abs(reference) >= threshold * peak)
 
     if auto_alpha and selected.size:

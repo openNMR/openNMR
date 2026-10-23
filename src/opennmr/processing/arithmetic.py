@@ -95,7 +95,7 @@ def combine_spectra(spectra: list[NMRSpectrum], ops: list[str] | None = None,
         hi = min(x[-1] for x in sorted_axes)
         if lo >= hi:
             raise ValueError(
-                "Input spectra's x-ranges do not overlap -- no common region "
+                "Input spectra's x-ranges do not overlap – no common region "
                 "to combine. Use common_range='union' if a zero-filled "
                 "combination is genuinely what you want."
             )

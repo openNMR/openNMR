@@ -1,5 +1,5 @@
 """
-CSA, Quad & J-coupling: one site, any combination of interactions.
+Solid-state NMR: one site, any combination of interactions.
 
 A :class:`Site` is an observed nucleus with an isotropic shift, to which
 interactions are *added* -- no function per combination::
@@ -12,7 +12,7 @@ interactions are *added* -- no function per combination::
                              transitions="ct", order="second")
 
 The same site can be written as a dict (``Site.to_dict`` /
-``Site.from_dict``) -- what the GUI's Simulate > CSA, Quad & J-coupling
+``Site.from_dict``) -- what the GUI's Simulate > Solid-state NMR
 section stores, and what the simulation's log records -- and
 :func:`combined_to_python` writes the Python that reproduces a GUI
 simulation in a notebook.
@@ -250,7 +250,7 @@ class Site:
         if nucleus is None:
             others = isotope_partners(self.nucleus)
             if len(others) != 1:
-                raise ValueError(f"{self.nucleus}: name the partner isotope -- the element has "
+                raise ValueError(f"{self.nucleus}: name the partner isotope – the element has "
                                  f"{len(others)} other NMR-active isotopes ({others}).")
             nucleus = others[0]
         partner = Site(nucleus, label=label or f"{self.label} ({nucleus})")
@@ -422,7 +422,7 @@ def resolve_link_dicts(dicts):
             raise ValueError(f"{who} is linked to {parent['label']}, which is itself linked: "
                              "link both isotopes to the same parent site.")
         if parent["nucleus"] == d["nucleus"]:
-            raise ValueError(f"{who} is linked to a site of the same nucleus -- a link ties "
+            raise ValueError(f"{who} is linked to a site of the same nucleus – a link ties "
                              "two isotopes; for a copy of a site, duplicate it instead.")
         if element_of(parent["nucleus"]) != element_of(d["nucleus"]):
             raise ValueError(f"{who} cannot share {parent['label']}'s chemistry: only isotopes of "
@@ -447,7 +447,7 @@ def resolve_link_dicts(dicts):
         free = list(link.get("free") or [])
         if f["amount"] is None and "amount" not in free:
             raise ValueError(f"{who}: {d['nucleus']} has no natural abundance to scale the "
-                             "amount by -- give the partner its own amount (free 'amount').")
+                             "amount by – give the partner its own amount (free 'amount').")
         if f["amount"] is not None:
             new["amount"] = float(parent.get("amount", 1.0)) * f["amount"]
         names = site_parameter_names(new)

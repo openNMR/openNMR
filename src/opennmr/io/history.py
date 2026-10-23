@@ -922,7 +922,7 @@ def render_log(history: dict, title: str | None = None) -> str:
     lines += [
         "",
         "Written by openNMR from opennmr_history.json after every change. Edits",
-        "made to this text file are not read back -- use Load Progress in",
+        "made to this text file are not read back – use Load Progress in",
         "openNMR (or opennmr.notebook.load_progress) to return to a save point.",
         "Times are local; each day's heading gives the offset from UTC. Phase",
         "values are openNMR's own correction, applied on top of any phase the",
@@ -1238,7 +1238,7 @@ def write_simulation_journal(journal: dict, folder: str | None = None) -> tuple[
 def render_simulation_log(journal: dict) -> str:
     lines = ["openNMR simulation log", "=" * 22, "",
              "Every simulation run in openNMR, with its inputs. Written from",
-             f"{SIMULATION_JOURNAL_FILE} after every run; edits here are not read back --",
+             f"{SIMULATION_JOURNAL_FILE} after every run; edits here are not read back.",
              "use File ▸ Simulation History in openNMR to restore a run's inputs.", ""]
     current_day = None
     for entry in journal.get("entries", []):

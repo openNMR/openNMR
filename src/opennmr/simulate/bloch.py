@@ -335,7 +335,7 @@ def generate_shape(shape_name, n_steps, burp_coeffs_A=None, burp_coeffs_B=None):
                 "shape '{0}' requested but no Fourier A-coefficients were "
                 "supplied. EBURP1 is defined in Geen, H. & Freeman, R., "
                 "J. Magn. Reson. 93, 93-141 (1991) as a truncated Fourier "
-                "series -- enter coefficients, or use 'GAUSSIAN' / 'SINC' "
+                "series – enter coefficients, or use 'GAUSSIAN' / 'SINC' "
                 "/ 'EBURP2' / 'REBURP' instead, which need no coefficients."
                 .format(shape_name))
         tau = np.linspace(0.0, 1.0, n_steps, endpoint=False)
@@ -514,7 +514,7 @@ def n_steps_for(duration_us, time_step_us):
         raise ValueError("The time step must be positive.")
     n = int(round(float(duration_us) / float(time_step_us)))
     if n > MAX_STEPS:
-        raise ValueError(f"{duration_us:g} us at {time_step_us:g} us per step is {n:,} steps -- "
+        raise ValueError(f"{duration_us:g} us at {time_step_us:g} us per step is {n:,} steps – "
                          f"more than {MAX_STEPS:,}. Shorten the pulse or lengthen the step.")
     return max(1, n)
 

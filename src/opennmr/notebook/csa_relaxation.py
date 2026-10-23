@@ -328,7 +328,7 @@ def NMR2D_fit_csa_slices(slices, p0, mode="rows", convention="Haeberlen", static
                 raise ValueError(
                     "A pseudo-2D column trace runs along the bare "
                     "experiment/delay index, not a chemical-shift axis "
-                    "-- a CSA lineshape cannot be fitted to it. Use "
+                    "– a CSA lineshape cannot be fitted to it. Use "
                     "mode='rows' (fitting each full spectrum at each "
                     "delay) instead."
                 )

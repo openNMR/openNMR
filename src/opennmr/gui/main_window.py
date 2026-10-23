@@ -48,6 +48,7 @@ from .cpmg_panel import CpmgProcessingPanel
 from .shear_panel import ShearPanel
 from .compare_2d import Compare2DControls
 from .compare_panels_controls import ComparePanelsControls
+from ..notebook import peak_integral_labels as integral_labels_module
 from ..notebook import notes as nb_notes
 from ..notebook import referencing as nb_referencing
 from .drift_panel import DriftCorrectionPanel
@@ -59,6 +60,7 @@ from ..notebook import fit_correlation as nb_fit_correlation
 from ..notebook import intensity_scaling
 from ..notebook import slice_phase
 from ..notebook import drift_correction as nb_drift_correction
+from ..notebook import field_drift as nb_field_drift
 from ..notebook import fit_ranges as nb_fit_ranges
 from PySide6.QtGui import QColor
 
@@ -105,6 +107,7 @@ from .pulse_sequence_dialog import ClickableLabel, PulseSequenceDialog
 from .procno_dialog import ProcnoDialog
 from ..processing import diffusion as processing_diffusion
 from ..processing import fitting as processing_fitting
+from ..processing import multiplets as peak_multiplets
 from ..processing import ilt as processing_ilt
 from ..processing import ft as processing_ft
 from ..processing import enmr as processing_enmr
@@ -866,6 +869,15 @@ class MainWindow(QMainWindow):
             _canvas.peakWidthMeasured.connect(self._on_peak_width_measured)
             _canvas.widthModeChanged.connect(self._on_canvas_width_mode_changed)
             _canvas.crosshairEnabledChanged.connect(self._on_canvas_crosshair_changed)
+            _canvas.insetAdded.connect(self._on_inset_added)
+            _canvas.insetFailed.connect(
+                lambda reason: self.statusBar().showMessage(f"Inset not drawn: {reason}", 8000))
+            _canvas.insetOptionsRequested.connect(
+                lambda c=_canvas: self._on_open_inset_dialog(c))
+            _canvas.register_plot_options(
+                "inset", "Inset…", lambda c=_canvas: self._on_open_inset_dialog(c),
+                "The zoomed insets on this plot: their region, position, axes, typeface and "
+                "the lines joining them to the region they magnify.")
         self.canvas.pickModeChanged.connect(self._on_canvas_pick_mode_changed)
         self.canvas.regionSelectModeChanged.connect(self._on_canvas_region_select_mode_changed)
 
@@ -931,7 +943,8 @@ class MainWindow(QMainWindow):
         # in the toolbar order below. The toolbar order is the user's
         # (explicit request, 2026-09-27): "Open, Process, Compare, Fit,
         # Simulate, Dynamics, Adv. Proc., Apply, Settings" -- with
-        # Integrate after Fit since 2026-10-16. Every
+        # Integrate after Fit since 2026-10-16; since 2026-10-23: Open, Process,
+        # Integrate, Fit, Dynamics, Simulate, Compare, Adv. Proc., Apply, Settings. Every
         # ``_*_tab_index`` is taken from addTab, so it follows the order.
         open_panel = self._scrollable(self._build_load_save_compare_panel())
         processing_panel = self._scrollable(self._build_processing_tab())
@@ -958,15 +971,15 @@ class MainWindow(QMainWindow):
         tabs.addTab(open_panel, "Open", icon=_launcher_icon("launcher_load_save_compare.png"))
         self._processing_tab_index = tabs.addTab(
             processing_panel, "Process", icon=_launcher_icon("launcher_processing.png"))
-        self._compare_tab_index = tabs.addTab(
-            compare_panel, "Compare", icon=_launcher_icon("launcher_comparison.png"))
-        self._fitting_tab_index = tabs.addTab(
-            fitting_panel, "Fit", icon=_launcher_icon("launcher_fitting.png"))
         self._integrate_tab_index = tabs.addTab(
             integrate_panel, "Integrate", icon=_launcher_icon("launcher_integrate.png"))
+        self._fitting_tab_index = tabs.addTab(
+            fitting_panel, "Fit", icon=_launcher_icon("launcher_fitting.png"))
+        tabs.addTab(dynamics_panel, "Dynamics", icon=_launcher_icon("launcher_relaxation.png"))
         self._simulations_tab_index = tabs.addTab(
             simulations_panel, "Simulate", icon=_launcher_icon("launcher_simulations.png"))
-        tabs.addTab(dynamics_panel, "Dynamics", icon=_launcher_icon("launcher_relaxation.png"))
+        self._compare_tab_index = tabs.addTab(
+            compare_panel, "Compare", icon=_launcher_icon("launcher_comparison.png"))
         tabs.addTab(advanced_panel, "Adv. Proc.",
                     icon=_launcher_icon("launcher_advanced_processing.png"))
         tabs.addTab(applications_panel, "Apply", icon=_launcher_icon("launcher_applications.png"))
@@ -1297,7 +1310,7 @@ class MainWindow(QMainWindow):
         open_files_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
         open_files_action.setToolTip(
             "For vendors whose data is a single file rather than a "
-            "folder (e.g. X-Pulse, JEOL) -- pick one or more files "
+            "folder (e.g. X-Pulse, JEOL) – pick one or more files "
             "directly."
         )
         open_files_action.triggered.connect(self._on_open_files_clicked)
@@ -1321,7 +1334,7 @@ class MainWindow(QMainWindow):
         processing_report_action = QAction("&Processing Report…", self)
         processing_report_action.setToolTip(
             "Write out what was actually done to the selected spectrum, as the "
-            "sentences an experimental section uses -- window function and its "
+            "sentences an experimental section uses – window function and its "
             "line broadening, linear prediction, zero-fill, phase, baseline.\n\n"
             "Select several spectra first to compare their processing side by "
             "side instead, with any setting they disagree on marked."
@@ -1365,7 +1378,7 @@ class MainWindow(QMainWindow):
         self.show_log_action = QAction("Processing &Log…", self)
         self.show_log_action.setToolTip(
             "What has been done to the selected spectrum, when, and every save "
-            "point -- the contents of its opennmr_log.txt.")
+            "point – the contents of its opennmr_log.txt.")
         self.show_log_action.triggered.connect(self._on_show_log_clicked)
         file_menu.addAction(self.show_log_action)
         # Explicit user request (2026-10-15): start an experiment over --
@@ -1381,7 +1394,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.clear_history_action)
         self.simulation_history_action = QAction("Simulation &History…", self)
         self.simulation_history_action.setToolTip(
-            "Every simulation run, with its inputs -- restore any of them into its "
+            "Every simulation run, with its inputs – restore any of them into its "
             "Simulate panel and run it again.")
         self.simulation_history_action.triggered.connect(self._on_simulation_history_clicked)
         file_menu.addAction(self.simulation_history_action)
@@ -1663,7 +1676,7 @@ class MainWindow(QMainWindow):
         analysis_menu.addSeparator()
         dosy_menu_action = QAction("&DOSY Map (ILT)…", self)
         dosy_menu_action.setToolTip(
-            "Build a DOSY plot -- chemical shift against diffusion coefficient -- "
+            "Build a DOSY plot – chemical shift against diffusion coefficient – "
             "from the selected PFG series, by inverse Laplace transform of each "
             "shift's own gradient decay."
         )
@@ -2074,20 +2087,29 @@ class MainWindow(QMainWindow):
         elif hasattr(current, "toolbar"):
             current.toolbar.home()
 
-    def _on_open_inset_dialog(self):
-        """Plot Style ▸ 2-D ▸ Inset…: insets of the single 2D contour on
-        the plot being styled (its own window)."""
+    def _on_open_inset_dialog(self, canvas=None):
+        """Insets of the plot being styled (its own window): the plot the
+        right-click or the Inset button belongs to, else the tab on show."""
         from .inset_dialog import InsetDialog
-        current = self.canvas_tabs.currentWidget()
-        canvas = current if isinstance(current, MplCanvas) else self.canvas
-        dialog = getattr(self, "_inset_dialog", None)
-        if dialog is None or dialog.canvas is not canvas:
-            dialog = self._inset_dialog = InsetDialog(canvas, self)
+        if canvas is None:
+            current = self.canvas_tabs.currentWidget()
+            canvas = current if isinstance(current, MplCanvas) else self.canvas
+        dialogs = self.__dict__.setdefault("_inset_dialogs", {})
+        dialog = dialogs.get(id(canvas))
+        if dialog is None:
+            dialog = dialogs[id(canvas)] = InsetDialog(canvas, self)
+        self._inset_dialog = dialog
         dialog.refresh()
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
         return dialog
+
+    def _on_inset_added(self, index: int) -> None:
+        self.statusBar().showMessage(
+            f"Inset {index + 1} added. Right-click the plot ▸ Inset… (or right-click the Inset "
+            "button) to move it, change its axes and typeface, or turn its connecting lines "
+            "on or off.", 10000)
 
     def _on_plot_style_clicked(self) -> None:
         """View ▸ Plot Style… (and the right-click menu's own entry) --
@@ -2389,12 +2411,12 @@ class MainWindow(QMainWindow):
         self.process_indirect_button = QPushButton("Process Indirect Dimension")
         self.process_indirect_button.setCheckable(True)
         self.process_indirect_button.setToolTip(
-            "Pseudo-2D (F1 is an index/slice dimension -- a relaxation "
+            "Pseudo-2D (F1 is an index/slice dimension – a relaxation "
             "delay or diffusion gradient series, no FFT along F1) is the "
             "default for every 2D spectrum. Click this only for a "
             "genuine 2D-correlation experiment (COSY/HSQC-style) where "
             "F1 really is a second chemical-shift dimension that needs "
-            "its own FFT -- reprocesses from the original file "
+            "its own FFT – reprocesses from the original file "
             "immediately, like Align Echo does for FID processing."
         )
         self.process_indirect_button.toggled.connect(self._on_process_indirect_toggled)
@@ -2402,7 +2424,7 @@ class MainWindow(QMainWindow):
         self.magnitude_button.setCheckable(True)
         self.magnitude_button.setToolTip(
             "Display the magnitude (absolute value) of the spectrum "
-            "instead of its phase-sensitive real part -- |real + i*imag|, "
+            "instead of its phase-sensitive real part – |real + i*imag|, "
             "so every peak is positive and no phasing is needed (or "
             "possible: the phase controls switch off while this is on).\n\n"
             "Switched on automatically for any dataset whose own "
@@ -2500,7 +2522,7 @@ class MainWindow(QMainWindow):
         self.compare_list = _ExperimentDropList()
         self.compare_list.experimentsDropped.connect(self._on_experiments_dropped_on_compare)
         self.compare_list.setToolTip(
-            "The spectra currently in this comparison -- either "
+            "The spectra currently in this comparison – either "
             "manually multi-selected 1D spectra, or every slice of a "
             "single selected pseudo-2D spectrum. Uncheck one to drop "
             "it from the plot; select a row and use Move Up/Down to "
@@ -2574,7 +2596,7 @@ class MainWindow(QMainWindow):
                                          "Panels: row", "Panels: column", "Panels: grid"])
         self.layout_mode_combo.setToolTip(
             "Stacked: one panel per spectrum. Superimposed: all on one axis.\n"
-            "Panels: separate plots in a row, a column or a grid -- put one or several "
+            "Panels: separate plots in a row, a column or a grid – put one or several "
             "spectra (fits included) in each, and link or unlink their zoom.\n"
             "Heatmap: one row per spectrum, colour = intensity, rows in the "
             "list's order (top first). Every row is interpolated onto the ppm "
@@ -2595,7 +2617,7 @@ class MainWindow(QMainWindow):
             "their recorded number of scans here. Max intensity: each spectrum scaled "
             "to its own peak height, for shape comparison. Per scan and sample mass: "
             "per scan, then divided by the mass set via the spectrum list's "
-            "right-click \"Set sample mass…\" -- spectra with no mass are skipped."
+            "right-click \"Set sample mass…\" – spectra with no mass are skipped."
         )
         self.compare_normalize_combo.currentIndexChanged.connect(lambda _i: self._on_compare_controls_changed())
         compare_form.addRow("Normalize:", self.compare_normalize_combo)
@@ -2634,7 +2656,7 @@ class MainWindow(QMainWindow):
         compare_plot_button = QPushButton("Plot")
         compare_plot_button.setToolTip(
             "(Re-)draw the comparison from whatever's checked above and "
-            "jump to the Compare canvas tab -- also happens automatically "
+            "jump to the Compare canvas tab – also happens automatically "
             "on every checkbox/control change; this is just an explicit, "
             "always-available way to do the same thing on demand."
         )
@@ -2647,7 +2669,7 @@ class MainWindow(QMainWindow):
         compare_fit_curve_button = QPushButton("Fit Curve…")
         compare_fit_curve_button.setToolTip(
             "Fit a relaxation/diffusion model across whatever's checked "
-            "above (needs at least two 1D spectra) -- fits each checked "
+            "above (needs at least two 1D spectra) – fits each checked "
             "entry's peaks first if they haven't been already."
         )
         compare_fit_curve_button.clicked.connect(self._on_fit_curve_compare_stack_action)
@@ -2893,7 +2915,7 @@ class MainWindow(QMainWindow):
         apply here either -- a plain directory picker has no name
         filter to restrict in the first place."""
         directory = QFileDialog.getExistingDirectory(
-            self, "Open a data folder -- an experiment folder itself, or a "
+            self, "Open a data folder – an experiment folder itself, or a "
                   "parent folder containing several",
             data_directory.start_directory(),
             options=QFileDialog.Option.DontUseNativeDialog,
@@ -2914,7 +2936,7 @@ class MainWindow(QMainWindow):
         fixed regardless of dialog style."""
         paths, _selected_filter = QFileDialog.getOpenFileNames(
             self, "Open one or more spectrum files", data_directory.start_directory(),
-            filter="All files (*);;NMR spectrum files (*.jdx *.dx *.jdf)",
+            filter="All files (*);;NMR spectrum files (*.jdx *.dx *.jdf *.csv *.xy);;Text tables (*.csv *.xy *.txt *.dat)",
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not paths:
@@ -2973,7 +2995,7 @@ class MainWindow(QMainWindow):
         if self._scan_was_truncated(matches):
             QMessageBox.information(
                 self, "Folder scan stopped early",
-                f"Only the first {len(matches):,} experiments under {directory} are listed -- "
+                f"Only the first {len(matches):,} experiments under {directory} are listed – "
                 f"the scan stops there. Open a subfolder to see the rest.")
         for path, vendor in self._prompt_select_spectra(matches, directory):
             self._open_one(path, vendor)
@@ -3686,7 +3708,7 @@ class MainWindow(QMainWindow):
                 self, "Loaded from processed data",
                 f"{self.session.label(index)}:\n\n{shape_note}\n\nCouldn't determine a "
                 f"trustworthy shape for the raw ser file, so this loaded from TopSpin's own "
-                f"already-processed data instead -- raw-FID reprocessing (window, zero-fill, "
+                f"already-processed data instead – raw-FID reprocessing (window, zero-fill, "
                 f"phase, ...) isn't available for it.",
             )
 
@@ -3695,7 +3717,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "Window function not applied",
                 f"{self.session.label(index)}:\n\n{window_note}\n\nThe FID was left "
-                f"unwindowed rather than guessing at this window's parameters -- pick "
+                f"unwindowed rather than guessing at this window's parameters – pick "
                 f"a different one from the Processing tab and click Apply Processing, "
                 f"or leave it unwindowed.",
             )
@@ -3848,6 +3870,7 @@ class MainWindow(QMainWindow):
         recompute will actually finish."""
         if not self._fid_reprocessable(spectrum):
             self._apply_saved_phase_to_processed(spectrum, index)
+            nb_field_drift.reapply_record(spectrum)
             return
         if spectrum.ndim == 1:
             self._commit_processing_preview_as_spectrum(spectrum)
@@ -3866,6 +3889,9 @@ class MainWindow(QMainWindow):
             self._apply_baseline_to_loaded_spectrum(spectrum)
         else:
             self._recompute_multi_row_data(spectrum)
+        # A drift curve the sidecar recorded, where the branch above did
+        # not already put it back (the reader's own fast path does not).
+        nb_field_drift.reapply_record(spectrum)
         # Re-anchor the phase controls to what the spectrum *is* now.
         # Selecting the row (which happens before this) already
         # captured a reference, and every branch above has just
@@ -4093,7 +4119,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         rename_action = menu.addAction("Rename…")
         rename_action.setToolTip(
-            "The name this spectrum goes by everywhere -- this list, the Compare "
+            "The name this spectrum goes by everywhere – this list, the Compare "
             "legend, a DOSY overlay's legend, the processing report.")
         menu.addSeparator()
         override_action = menu.addAction("Override nucleus…")
@@ -4272,7 +4298,7 @@ class MainWindow(QMainWindow):
         # session.set_mass) needs to know mg was ever involved.
         current_mg = (self.session.spectra[index].metadata.mass or 0.0) * 1000.0
         value_mg, ok = QInputDialog.getDouble(
-            self, "Set sample mass", "Mass (mg) -- used for mass-normalized comparison:",
+            self, "Set sample mass", "Mass (mg) – used for mass-normalized comparison:",
             current_mg, 0.0, 1.0e6, 4,
         )
         if ok and value_mg > 0:
@@ -4344,7 +4370,7 @@ class MainWindow(QMainWindow):
         value, ok = QInputDialog.getInt(
             self, "Change proc number",
             "pdata/<n> to use for TopSpin's own recorded processing "
-            "parameters (window/phase/zero-fill) -- the raw ser/fid "
+            "parameters (window/phase/zero-fill) – the raw ser/fid "
             "data is still read by default regardless of proc number:",
             # Any positive integer: TopSpin's own PROCNO has no 999 cap
             # (explicit user request). 2**31 - 1 is the dialog's maximum.
@@ -4520,7 +4546,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "Magnitude mode not available",
                 f"{self.session.label(index)} was loaded by a reader that doesn't support "
-                f"magnitude mode yet -- it's currently Bruker-only.",
+                f"magnitude mode yet – it's currently Bruker-only.",
             )
             self.magnitude_button.blockSignals(True)
             self.magnitude_button.setChecked(not checked)
@@ -4754,9 +4780,9 @@ class MainWindow(QMainWindow):
             "Blank = automatic, e.g. {element}-{mass} shift ({unit})")
         self.output_axis_label_template_edit.setToolTip(
             "A fully custom chemical-shift axis label, overriding the "
-            "choice above -- leave blank to use it instead.\n\n"
+            "choice above – leave blank to use it instead.\n\n"
             "Placeholders: {nuc} (\"1H\"), {mass} (\"1\"), {element} "
-            "(\"H\"), {unit} (\"ppm\"). Plain text otherwise -- include "
+            "(\"H\"), {unit} (\"ppm\"). Plain text otherwise – include "
             "your own $...$ for mathtext if you want it."
         )
         self.output_axis_label_template_edit.editingFinished.connect(self._on_output_style_changed)
@@ -4886,7 +4912,7 @@ class MainWindow(QMainWindow):
         self.output_contour_fraction_spin.setSuffix("%")
         self.output_contour_fraction_spin.setToolTip(
             "How much of a 2D contour's own resolution renders by "
-            "default (lower = faster, coarser) -- doesn't affect "
+            "default (lower = faster, coarser) – doesn't affect "
             "a canvas currently set to Full Resolution (right-click "
             "the contour), or Save Figure As..., which always exports "
             "at true resolution regardless of this."
@@ -4896,11 +4922,11 @@ class MainWindow(QMainWindow):
 
         self.output_nq_line_checkbox = QCheckBox("Show diagonal (nQ) line")
         self.output_nq_line_checkbox.setToolTip(
-            "Overlay a dashed y = n*x line on a 2D contour -- n = 1 for "
+            "Overlay a dashed y = n*x line on a 2D contour – n = 1 for "
             "the main diagonal (e.g. an EXSY/NOESY/COSY-style homonuclear "
             "correlation), or a higher n for a multiple-quantum "
             "correlation. plotting.plot_2d_contour's own show_nQ_line/nQ "
-            "parameters -- this is the GUI wiring for it."
+            "parameters – this is the GUI wiring for it."
         )
         self.output_nq_line_checkbox.toggled.connect(self._on_nq_line_changed)
         style_form.addRow(self.output_nq_line_checkbox, section="2-D")
@@ -4946,7 +4972,7 @@ class MainWindow(QMainWindow):
 
         self.output_legend_checkbox = QCheckBox("Show legend / trace names")
         self.output_legend_checkbox.setToolTip(
-            "Same on/off state as the plot's own right-click \"Show Legend\" -- "
+            "Same on/off state as the plot's own right-click \"Show Legend\" – "
             "a second, always-visible control for it, not a separate setting. "
             "Whether the names appear as a legend or written on the traces is "
             "\"Name traces with\" below."
@@ -5036,7 +5062,7 @@ class MainWindow(QMainWindow):
         self.output_legend_style_combo.addItem("Labels on the traces", "labels")
         self.output_legend_style_combo.setToolTip(
             "Legend: the usual key.\nLabels on the traces: each spectrum's name written "
-            "just above its own noise, in its colour, at the position below -- no "
+            "just above its own noise, in its colour, at the position below – no "
             "key to cross-reference, which suits stacked spectra.")
         self._narrow_combo(self.output_legend_style_combo)
         self.output_legend_style_combo.currentIndexChanged.connect(
@@ -5241,12 +5267,13 @@ class MainWindow(QMainWindow):
 
         # An inset of a zoomed region of the 2D on show, without Compare;
         # its controls are in a pop-up so this panel stays as short as it is.
-        self.output_inset_button = QPushButton("Inset of a zoomed region…")
+        self.output_inset_button = QPushButton("Insets (zoomed regions)…")
         self.output_inset_button.setToolTip(
-            "Add a zoomed inset of part of the 2D spectrum on show (zoom in, then add it), "
-            "with its region, corner, size and lowest contour. Opens its own window.")
+            "Magnified insets of the plot on show – a spectrum, a 2D contour, a curve or a "
+            "profile: their region, position, axes, typeface and the lines joining them to the "
+            "region. Draw one with the Inset button on the plot toolbar. Opens its own window.")
         self.output_inset_button.clicked.connect(lambda: self._on_open_inset_dialog())
-        style_form.addRow(self.output_inset_button, section="2-D")
+        style_form.addRow(self.output_inset_button)
 
         # --- Extracted slices, one row each ------------------------
         # Explicit user request: extracted slices beside a 2D "should
@@ -5322,7 +5349,7 @@ class MainWindow(QMainWindow):
 
         export_box = QWidget()
         export_intro = QLabel(
-            "Applies only to File > Save Figure As... -- never to the "
+            "Applies only to File > Save Figure As... – never to the "
             "live view here, which Qt's own window layout already "
             "controls (changing a live figure's size out from under "
             "Qt fights it visibly)."
@@ -5623,7 +5650,7 @@ class MainWindow(QMainWindow):
                 "experiment this renames the experiment itself, so the list and "
                 "every legend agree."
                 if entry.can_rename else
-                "Named by its spectrum -- use the Open experiments list's "
+                "Named by its spectrum – use the Open experiments list's "
                 "right-click Rename… to change it everywhere at once.")
             name.editingFinished.connect(
                 lambda key=entry.key, box=name: self._on_series_renamed(key, box.text()))
@@ -6549,8 +6576,8 @@ class MainWindow(QMainWindow):
         self.contour_scroll_up_more_checkbox = QCheckBox("Scroll up shows more contours")
         self.contour_scroll_up_more_checkbox.setToolTip(
             "Scrolling over the body of a 2D or DOSY contour moves its lowest level.\n"
-            "Off (default): scroll up raises it -- fewer contours, strongest peaks only.\n"
-            "On: scroll up lowers it -- more contours, weaker signals appear.\n\n"
+            "Off (default): scroll up raises it – fewer contours, strongest peaks only.\n"
+            "On: scroll up lowers it – more contours, weaker signals appear.\n\n"
             "Also in a contour's right-click menu.")
         _up_more = bool(self._ui_settings.get("contour_scroll_up_shows_more", False))
         self.contour_scroll_up_more_checkbox.setChecked(_up_more)
@@ -6729,7 +6756,7 @@ class MainWindow(QMainWindow):
         data_form = QFormLayout(data)
         data_directory.set_default_data_directory(self._ui_settings.get("data_folder") or "")
         self.data_folder_edit = QLineEdit(data_directory.stored_default_data_directory())
-        self.data_folder_edit.setPlaceholderText("None -- dialogs start where they always did")
+        self.data_folder_edit.setPlaceholderText("None – dialogs start where they always did")
         self.data_folder_edit.setToolTip(
             "Where Open…, Open Files…, Browse Folder… and Multi-spectrum's Add by number… start "
             "looking. You can still go anywhere from there. Type a folder or press Browse….")
@@ -6762,10 +6789,10 @@ class MainWindow(QMainWindow):
         self.topspin_processing_checkbox = QCheckBox(
             "Open Bruker data with TopSpin's processing (phase, window, TDeff)")
         self.topspin_processing_checkbox.setToolTip(
-            "On (default): a Bruker experiment opens as TopSpin processed it -- its recorded "
+            "On (default): a Bruker experiment opens as TopSpin processed it – its recorded "
             "PHC0/PHC1 in both dimensions, its window functions (WDW, SSB, LB, GB) and the "
-            "points it used (TDeff). Off: it opens unprocessed -- no phase, no window, every "
-            "acquired point -- to process from scratch.\n\nAn experiment you have already "
+            "points it used (TDeff). Off: it opens unprocessed – no phase, no window, every "
+            "acquired point – to process from scratch.\n\nAn experiment you have already "
             "processed in openNMR always opens as you left it.")
         self.topspin_processing_checkbox.setChecked(self._topspin_processing_on_open())
         self.topspin_processing_checkbox.toggled.connect(self._on_topspin_processing_toggled)
@@ -7159,7 +7186,7 @@ class MainWindow(QMainWindow):
         text = (f"TopSpin: TDeff {tdeff} point{'s' if tdeff != 1 else ''}"
                 + (f" = {incr} increments" if per == 2 else "")
                 + ("  (every increment)" if incr >= n1_native else "")
-                + (" -- used by default." if incr < n1_native else "."))
+                + (" – used by default." if incr < n1_native else "."))
         self.tdeff_f1_recorded_label.setText(text)
         self.tdeff_f1_recorded_label.setVisible(True)
 
@@ -7220,7 +7247,7 @@ class MainWindow(QMainWindow):
         self._save_ui_settings()
         self.statusBar().showMessage(
             "Bruker data will open with TopSpin's processing." if checked else
-            "Bruker data will open unprocessed (no phase, no window, every point) -- "
+            "Bruker data will open unprocessed (no phase, no window, every point) – "
             "experiments with saved openNMR processing still open as saved.", 8000)
 
     def _on_data_folder_browse_at_start_toggled(self, checked: bool) -> None:
@@ -7616,10 +7643,10 @@ class MainWindow(QMainWindow):
         if report["nucleus_match"] is False and not contour.is_pseudo_2d:
             other_report = notebook_two_d.check_external_projection(contour, spectrum, other)
             if other_report["nucleus_match"]:
-                advice = (f"\n\nIt does match the {self._PROJECTION_NAMES[other]} axis -- "
+                advice = (f"\n\nIt does match the {self._PROJECTION_NAMES[other]} axis – "
                           f"drop it on that strip instead.")
         reply = QMessageBox.question(
-            self, "External projection -- check the nucleus",
+            self, "External projection – check the nucleus",
             "\n\n".join(report["problems"]) + advice
             + f"\n\nUse {label} as the {name} projection anyway?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -8275,12 +8302,12 @@ class MainWindow(QMainWindow):
         self.fid_display_combo.addItem("Magnitude", "magnitude")
         self.fid_display_combo.addItem("Real + Imaginary", "real_imag")
         self.fid_display_combo.setToolTip(
-            "How the FID preview plots the (complex) time-domain data -- "
+            "How the FID preview plots the (complex) time-domain data – "
             "Magnitude (|FID|, a single clean decay/echo envelope, easiest "
             "for judging alignment/decay shape), Real (one oscillating "
             "component, closer to what phase-sensitive detection actually "
             "recorded), or Real + Imaginary (both components together, in "
-            "separate colours). A view setting only -- doesn't affect "
+            "separate colours). A view setting only – doesn't affect "
             "processing."
         )
         self.fid_display_combo.currentIndexChanged.connect(lambda _i: self._refresh_fid_display_preview())
@@ -8290,7 +8317,7 @@ class MainWindow(QMainWindow):
         self.fid_x_unit_combo.addItem("Time (s)", "time")
         self.fid_x_unit_combo.addItem("Points", "points")
         self.fid_x_unit_combo.setToolTip(
-            "FID plot's x-axis -- Time (s, the default) or raw sample "
+            "FID plot's x-axis – Time (s, the default) or raw sample "
             "index (Points)."
         )
         self._narrow_combo(self.fid_x_unit_combo)
@@ -8302,7 +8329,7 @@ class MainWindow(QMainWindow):
         # how to process only the direct or indirect dimensions" -- each
         # has its own window, truncation and zero-fill: e.g. no window on
         # 1H, QSINE 3 on 15N).
-        self.fid_f2_header = QLabel("<b>Direct dimension (F2)</b> -- window, truncation, "
+        self.fid_f2_header = QLabel("<b>Direct dimension (F2)</b> – window, truncation, "
                                     "zero-fill, shift and linear prediction of each FID")
         self.fid_f2_header.setWordWrap(True)
         self.fid_f2_header.setVisible(False)
@@ -8336,7 +8363,7 @@ class MainWindow(QMainWindow):
         self.gb_spin.setSuffix(" Hz")
         self.gb_spin.setToolTip(
             "Gaussian broadening width, for the Gaussian window only "
-            "(see processing.ft._window_gaussian's own docstring -- "
+            "(see processing.ft._window_gaussian's own docstring – "
             "not verified against real Bruker GM output). 0 disables "
             "the Gaussian term, leaving a plain exponential."
         )
@@ -8366,11 +8393,11 @@ class MainWindow(QMainWindow):
             self.zero_fill_combo.addItem(f"{size // 1024}k ({size} pts)", size)
         self.zero_fill_combo.addItem("Custom…", None)
         self.zero_fill_combo.setToolTip(
-            "FFT size -- zero-fills (or truncates) the FID to this many "
+            "FFT size – zero-fills (or truncates) the FID to this many "
             "points. Defaults to the nearest standard size at or above "
             "2x the acquired points.\n\n"
             "None (do not zero-fill): the FFT is exactly as long as the FID "
-            "going into it -- the points acquired, or Truncate to's, plus "
+            "going into it – the points acquired, or Truncate to's, plus "
             "any linear-prediction points. In Custom, type 2k, 8k, 16k… for "
             "2048, 8192, 16384…"
         )
@@ -8389,7 +8416,7 @@ class MainWindow(QMainWindow):
         self.tdeff_spin.setSuffix(" pts")
         self.tdeff_spin.setToolTip(
             "Truncate the raw FID to this many points before any other "
-            "processing -- e.g. to cut off a noisy tail, or a recorded "
+            "processing – e.g. to cut off a noisy tail, or a recorded "
             "tail past the point the acquisition itself flagged as "
             "effective (TDEFF). Defaults to the full acquired FID "
             "(no truncation); step down from there to trim points off "
@@ -8421,11 +8448,11 @@ class MainWindow(QMainWindow):
         self.align_echo_button.setCheckable(True)
         self.align_echo_button.setToolTip(
             "For full-echo acquisitions (rising then falling, e.g. "
-            "imaging profiles) rather than a one-sided decaying FID -- "
+            "imaging profiles) rather than a one-sided decaying FID – "
             "rolls the FID so its peak sits at t=0, before windowing. "
             "Clicking immediately reprocesses and switches to the FID "
             "tab so you can see whether it actually worked (dashed "
-            "green marker at the found echo top -- should land right "
+            "green marker at the found echo top – should land right "
             "at t=0 once aligned) rather than silently changing a "
             "setting for later. Toggle off to revert."
         )
@@ -8461,7 +8488,7 @@ class MainWindow(QMainWindow):
         self.fid_shift_spin.setSuffix(" pts")
         self.fid_shift_spin.setToolTip(
             "Manual circular shift of the FID (samples, fractional "
-            "allowed), applied before windowing -- independent of "
+            "allowed), applied before windowing – independent of "
             "(and on top of) echo alignment."
         )
         self.fid_shift_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
@@ -8472,7 +8499,7 @@ class MainWindow(QMainWindow):
         self.linear_predict_points_spin.setToolTip(
             "Extend (Forward) or reconstruct (Backward, see the "
             "Direction combo below) the FID by this many linear-"
-            "prediction points before windowing -- reduces truncation "
+            "prediction points before windowing – reduces truncation "
             "artefacts from a short acquisition, or recovers points "
             "lost to a dead-time window before acquisition began. "
             "0 = off."
@@ -8493,7 +8520,7 @@ class MainWindow(QMainWindow):
         self._narrow_combo(self.linear_predict_direction_combo)
         self.linear_predict_direction_combo.setToolTip(
             "Forward: predicts points continuing past the FID's "
-            "measured end -- the usual case, for a short acquisition. "
+            "measured end – the usual case, for a short acquisition. "
             "Backward: predicts points *before* the measured start "
             "instead, reconstructing ones lost to a fixed dead-time "
             "delay before acquisition began (only used when Linear-"
@@ -8525,7 +8552,7 @@ class MainWindow(QMainWindow):
         self.tdeff_f1_spin.setSuffix(" increments")
         self.tdeff_f1_spin.setToolTip(
             "Truncate F1 (the indirect dimension) to this many "
-            "increments before its own hypercomplex decode/FFT -- for "
+            "increments before its own hypercomplex decode/FFT – for "
             "States/States-TPPI/Echo-Antiecho data, a row *pair* per "
             "increment, so this never separates a real row from its "
             "matching imaginary one.\n\n"
@@ -8535,7 +8562,7 @@ class MainWindow(QMainWindow):
             "increment actually present."
         )
         self.tdeff_f1_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
-        self.fid_f1_header = QLabel("<b>Indirect dimension (F1)</b> -- set separately from F2; "
+        self.fid_f1_header = QLabel("<b>Indirect dimension (F1)</b> – set separately from F2; "
                                     "used once F1 is transformed (Process Indirect Dimension)")
         self.fid_f1_header.setWordWrap(True)
         self.fid_f1_header.setVisible(False)
@@ -8551,9 +8578,9 @@ class MainWindow(QMainWindow):
         self.zero_fill_f1_spin.setRange(1, 1 << 20)
         self.zero_fill_f1_spin.setSuffix(" pts")
         self.zero_fill_f1_spin.setToolTip(
-            "F1 (the indirect dimension)'s own FFT size -- zero-fills "
+            "F1 (the indirect dimension)'s own FFT size – zero-fills "
             "(or truncates) F1 to this many points. Defaults to F1's "
-            "own current length (no-op) -- unlike F2's own Zero-fill "
+            "own current length (no-op) – unlike F2's own Zero-fill "
             "to above, there's no '2x acquired' convention for F1 "
             "here; opt in explicitly to a larger value.\n\n"
             "This is the length of the interferogram going *into* F1's "
@@ -8621,7 +8648,7 @@ class MainWindow(QMainWindow):
             "truncate/zero-fill, phase, baseline) and revert to "
             "exactly how this spectrum "
             "looked right when it was first loaded. Everything above "
-            "is already live -- there's no separate 'Apply' step to "
+            "is already live – there's no separate 'Apply' step to "
             "commit it, so this is the opposite: throwing it away, "
             "not applying it."
         )
@@ -9157,6 +9184,11 @@ class MainWindow(QMainWindow):
             data, ppm, io_bruker.recorded_phase(spectrum.metadata.raw, "f2"),
             (phase0, phase1), pivot_frac=pivot_frac,
         )
+        drift_shifts = nb_field_drift.record_shifts(spectrum) if (
+            spectrum.is_pseudo_2d and raw_fid_was_2d) else None
+        if drift_shifts is not None and 0 <= row < drift_shifts.size:
+            data = nb_field_drift.shift_rows(
+                data, drift_shifts[row], nb_field_drift.hz_per_point(ppm, spectrum.metadata.sfo1))
         data = self._baseline_correct_if_enabled(data, ppm, spectrum)
 
         axis = NMRAxis(kind="frequency", ppm=ppm, hz=hz)
@@ -9545,6 +9577,11 @@ class MainWindow(QMainWindow):
                     data[row_index] = processing_ft.apply_phase(
                         data[row_index], ppm2, slice0, slice1, pivot_frac=pivot_frac2,
                     )
+        # Field drift measured along the slices (Process ▸ Field Drift
+        # Correction): a rebuild from the raw FIDs starts from the
+        # uncorrected rows, so the recorded shifts go back on here.
+        if spectrum.is_pseudo_2d:
+            data = nb_field_drift.shift_rebuilt_rows(spectrum, data, ppm2)
 
         dt_f1 = spectrum.metadata.raw.get("fid_dt_f1")
         f1_axis = spectrum.axes[0]
@@ -10426,11 +10463,11 @@ class MainWindow(QMainWindow):
     #: Readable names, for the log and the dialogs.
     _FIT_LABELS = {"csa": "CSA", "jcoupling": "J-coupling", "quadrupolar": "Quadrupolar",
                    "czjzek": "Czjzek",
-                   "combined": "CSA, Quad & J-coupling", "multi": "Multi-spectrum",
+                   "combined": "Solid-state NMR", "multi": "Multi-spectrum",
                    "pnmr": "pNMR (CIF)", "simpson": "SIMPSON spectrum"}
     _SIMULATION_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar", "jcoupling": "J-coupling",
                           "czjzek": "Czjzek distribution",
-                          "combined": "CSA, Quad & J-coupling", "diffusion": "Diffusion (PFG)",
+                          "combined": "Solid-state NMR", "diffusion": "Diffusion (PFG)",
                           "bloch": "Shaped pulse (Bloch)", "pnmr": "pNMR (CIF)",
                           "simpson": "SIMPSON import"}
 
@@ -10813,7 +10850,7 @@ class MainWindow(QMainWindow):
             if lines:
                 io_history.add_event(
                     history,
-                    "On opening, the saved state differed from this log's last record -- changed "
+                    "On opening, the saved state differed from this log's last record – changed "
                     "outside it (another openNMR version, or copied sidecar files). As found:\n"
                     + "\n".join(lines), kind="external")
             history["state"] = io_history._normalise(current)
@@ -10838,7 +10875,7 @@ class MainWindow(QMainWindow):
                     text += ("\nProcessing restored from an earlier session (saved before this log "
                              "was kept):\n" + "\n".join("  " + line for line in summary))
                 else:
-                    text += " -- no earlier openNMR processing"
+                    text += " – no earlier openNMR processing"
                 io_history.add_event(history, text, kind="opened")
         history["_defaults"] = defaults
         info["history"] = history
@@ -11099,7 +11136,7 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         if not self._history_on_disk(spectrum):
             if not folder:
-                raise ValueError("This spectrum has no folder of its own -- choose where to save it.")
+                raise ValueError("This spectrum has no folder of its own – choose where to save it.")
             self._save_as_dataset(index, folder)
         entry = self._add_savepoint(index, name=name, note=note)
         self._write_history(index, raise_errors=True)
@@ -11234,7 +11271,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Saved openNMR state “{name}” ({len(indices)} spectra"
             + (f", {sum(len(r) for r in slices.values())} slices" if slices else "")
-            + f") in {folder} -- contents: {io_state.STATE_LOG_FILE}"
+            + f") in {folder} – contents: {io_state.STATE_LOG_FILE}"
             + (f"; fitted values: {FIT_VALUES_FILE}"
                if os.path.isfile(os.path.join(folder, FIT_VALUES_FILE)) else ""), 10000)
 
@@ -11274,7 +11311,7 @@ class MainWindow(QMainWindow):
             if index is None:
                 spectrum = entry["spectrum"]
                 if spectrum is None:
-                    messages.append(f"{label}: NOT opened -- its data are no longer at "
+                    messages.append(f"{label}: NOT opened – its data are no longer at "
                                     f"{source.get('path')} and the state holds no copy.")
                     continue
                 index = self._add_derived_spectrum(spectrum, label)
@@ -11357,7 +11394,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Couldn't save progress", str(exc))
             return
         where = io_history.log_path(self.session.spectra[index].metadata.source_path)
-        self.statusBar().showMessage(f"Saved “{entry['name']}” -- log: {where}", 8000)
+        self.statusBar().showMessage(f"Saved “{entry['name']}” – log: {where}", 8000)
 
     def _original_available(self, spectrum) -> bool:
         """Whether "as first loaded" can be rebuilt by re-reading the
@@ -11629,7 +11666,7 @@ class MainWindow(QMainWindow):
         if self._history_on_disk(spectrum):
             path = io_history.log_path(spectrum.metadata.source_path)
             status = (f"Written to {path}" if os.path.exists(path) else
-                      "Not written yet -- the log file is created at the first change or save point.")
+                      "Not written yet – the log file is created at the first change or save point.")
             if info.get("history_error"):
                 status = f"Couldn't be written: {info['history_error']}"
         else:
@@ -12167,7 +12204,7 @@ class MainWindow(QMainWindow):
         self.slice_spin.setMinimum(1)
         self.slice_spin.setToolTip(
             "Which pseudo-2D slice (1-based, matching TopSpin's own "
-            "numbering) the phase controls below act on -- also which "
+            "numbering) the phase controls below act on – also which "
             "slice the Processing tab's own live preview shows."
         )
         self.slice_spin.valueChanged.connect(self._on_slice_spin_changed)
@@ -12183,7 +12220,7 @@ class MainWindow(QMainWindow):
         self.apply_all_slices_checkbox.setToolTip(
             "Off: Autophase/phase drag/Baseline Correct above only act "
             "on the slice selected above. On: they act on every slice "
-            "at once -- a phase drag broadcasts the same phase0/phase1 "
+            "at once – a phase drag broadcasts the same phase0/phase1 "
             "to all of them, while Autophase and Baseline Correct fit "
             "each slice on its own, since a phase or baseline found "
             "automatically is worth finding per slice."
@@ -12226,7 +12263,7 @@ class MainWindow(QMainWindow):
             label = f"{delta:+.0f}°" if delta != 180.0 else "180°"
             quick_button = QPushButton(label)
             quick_button.setToolTip(
-                f"Nudge Phase 0 by {delta:.0f} degrees from its current value -- "
+                f"Nudge Phase 0 by {delta:.0f} degrees from its current value – "
                 "a quick fix for a spectrum that's fully inverted (180) or "
                 "rotated a quarter-turn (90). Composes with whatever's already "
                 "there (two +90 clicks equal one +180), same as typing/dragging "
@@ -12272,7 +12309,7 @@ class MainWindow(QMainWindow):
         self.pivot_spin.setDecimals(3)
         self.pivot_spin.setSuffix(" ppm")
         self.pivot_spin.setToolTip(
-            "Phase 1 pivot -- the point held fixed (phase = Phase 0 exactly) "
+            "Phase 1 pivot – the point held fixed (phase = Phase 0 exactly) "
             "while Phase 1 varies linearly away from it. Defaults to the "
             "centre of the spectrum on selection."
         )
@@ -12300,12 +12337,12 @@ class MainWindow(QMainWindow):
         autophase_button.setToolTip(
             "Autophase (grid-search maximizing the real part's "
             "integral) for whatever the controls above currently "
-            "target -- a plain 1D spectrum, the pseudo-2D slice "
+            "target – a plain 1D spectrum, the pseudo-2D slice "
             "selected below, or the whole 2D dataset along the chosen "
             "dimension. Zero-order only (Phase 1 reset to 0) unless "
             "'1st-order' is checked.\n\n"
             "On a pseudo-2D, tick 'Apply to every slice' below to "
-            "autophase every slice independently -- each one gets its "
+            "autophase every slice independently – each one gets its "
             "own phase0, applied in place."
         )
         autophase_button.clicked.connect(self._on_autophase_clicked)
@@ -12314,7 +12351,7 @@ class MainWindow(QMainWindow):
         self.autophase_joint_checkbox = QCheckBox("1st-order")
         self.autophase_joint_checkbox.setToolTip(
             "Also fit Phase 1 (processing.ft.autophase01's joint "
-            "search), not just Phase 0 -- only kept if it "
+            "search), not just Phase 0 – only kept if it "
             "demonstrably improves the lineshape over Phase 0 alone, "
             "same significance test used everywhere else in this app "
             "that offers joint phasing."
@@ -12329,25 +12366,32 @@ class MainWindow(QMainWindow):
         self.autophase_each_slice_checkbox = QCheckBox("Each slice independently")
         self.autophase_each_slice_checkbox.setToolTip(
             "Pseudo-2D only. Autophase finds a phase for every slice on its "
-            "own and applies it to that slice alone -- no slice's phase is "
+            "own and applies it to that slice alone – no slice's phase is "
             "taken from, or applied to, another. Works whatever “Apply to "
             "every slice” says (that box only decides whether dragging the "
             "phase moves every slice together). With “1st-order” ticked, each "
             "slice also gets its own Phase 1 where it helps.\n\n"
             "Unticked, Autophase phases the selected slice alone.\n\n"
-            "Not for an inversion-recovery series: its slices change sign on "
-            "purpose, and phasing each independently would flip the negative "
-            "ones positive. Phase one slice and apply it to all instead.\n\n"
+            "Slices too noisy to phase on their own take the phase of their "
+            "nearest good slices instead of one fitted to noise.\n\n"
             "Notebook: opennmr.notebook.autophase_slices(spectrum)."
         )
         self.autophase_each_slice_checkbox.setVisible(False)    # shown for a pseudo-2D
         autophase_row.addWidget(self.autophase_each_slice_checkbox)
+        self.autophase_keep_sign_checkbox = QCheckBox("Keep slice signs")
+        self.autophase_keep_sign_checkbox.setToolTip(
+            "For a series whose slices are negative on purpose (inversion recovery): "
+            "each slice is phased within 90° of the strongest slice's phase, so "
+            "negative slices stay negative. Unticked, every slice is made positive.\n\n"
+            "Notebook: opennmr.notebook.autophase_slices(spectrum, window=90).")
+        self.autophase_keep_sign_checkbox.setVisible(False)
+        autophase_row.addWidget(self.autophase_keep_sign_checkbox)
         form.addRow(autophase_row)
 
         self.revert_autophase_button = QPushButton("Revert Autophase")
         self.revert_autophase_button.setToolTip(
             "Undo the last Autophase click, restoring Phase 0/Phase 1 "
-            "to what they were immediately before it -- in case the "
+            "to what they were immediately before it – in case the "
             "automatic result was worse than what you already had."
         )
         self.revert_autophase_button.setEnabled(False)
@@ -12371,12 +12415,12 @@ class MainWindow(QMainWindow):
         self.baseline_correct_button.setCheckable(True)
         self.baseline_correct_button.setToolTip(
             "Subtract a robust baseline fit to the real part "
-            "(processing.ft.baseline_correct -- sigma-clipped against "
+            "(processing.ft.baseline_correct – sigma-clipped against "
             "the spectrum's own edges so real peaks don't bias it) "
-            "from whatever the controls above currently target -- "
+            "from whatever the controls above currently target – "
             "same targeting rules as Autophase, including 'Apply to "
             "every slice' for a pseudo-2D series. A toggle, not a "
-            "one-shot action -- uncheck to remove the correction again."
+            "one-shot action – uncheck to remove the correction again."
         )
         self.baseline_correct_button.toggled.connect(self._on_baseline_correct_toggled)
         baseline_form.addRow(self.baseline_correct_button)
@@ -12400,29 +12444,29 @@ class MainWindow(QMainWindow):
             "Like Whittaker it does not assume the edges are peak-free; "
             "unlike Whittaker it passes exactly through points you can "
             "see. The nodes are drawn on the preview. A broad peak with no "
-            "baseline either side cannot be told from a roll -- check the "
+            "baseline either side cannot be told from a roll – check the "
             "nodes sit under, not on, your signal.\n\n"
-            "Manual: your own model -- a quartic polynomial or a sine -- fitted "
+            "Manual: your own model – a quartic polynomial or a sine – fitted "
             "to baseline regions you choose, with every coefficient shown, "
             "fixable and editable by hand (the controls appear below).\n\n"
             "Whittaker: a penalised smooth curve fitted to the whole "
             "spectrum, with everything above it iteratively pushed "
             "down until the curve settles onto the baseline. Unlike "
             "every option below it, it does not assume the spectrum's "
-            "own edges are peak-free -- so it is the one to use on a "
+            "own edges are peak-free – so it is the one to use on a "
             "crowded spectrum, one with signal at an edge, or one "
             "whose baseline rolls in the middle. Stiffness is set by "
             "the λ box.\n\n"
-            "Linear: a single straight-line fit -- fast, but can't "
+            "Linear: a single straight-line fit – fast, but can't "
             "follow a curved/rolling baseline (common on wideline/"
             "solid-state spectra, and whenever a large recorded first-"
             "order phase leaves curvature concentrated at the edges), "
             "which it will under-correct no matter which points it's "
             "fit to. Polynomial: linear generalized to a higher degree "
-            "(set below) -- follows real curvature directly. "
+            "(set below) – follows real curvature directly. "
             "Sinusoidal: a slowly rolling, wave-like baseline. Spline: "
             "the most flexible of the edge-based options (a smooth "
-            "cubic spline), for a shape none of the above capture -- "
+            "cubic spline), for a shape none of the above capture – "
             "but also the easiest to overfit to noise between sparse "
             "baseline points."
         )
@@ -12443,13 +12487,13 @@ class MainWindow(QMainWindow):
         self.baseline_family_combo.setToolTip(
             "Linear, Polynomial, Sinusoidal: fitted automatically to the spectrum's "
             "edges (or to baseline regions you choose below). The fit's coefficients "
-            "are shown underneath -- step any of them with ▲/▼ (or type) to adjust "
+            "are shown underneath – step any of them with ▲/▼ (or type) to adjust "
             "the baseline by hand from where the fit left it; \"Fit automatically\" "
             "goes back.\n\n"
-            "Spline: a cubic spline through baseline points -- placed automatically "
+            "Spline: a cubic spline through baseline points – placed automatically "
             "wherever the spectrum is baseline, or chosen by clicking on the plot.\n\n"
             "Whittaker: a penalised smooth curve fitted to the whole spectrum, pushed "
-            "down under the peaks -- no edge assumption, so the one to use on a "
+            "down under the peaks – no edge assumption, so the one to use on a "
             "crowded spectrum or one with signal at an edge.")
         self._narrow_combo(self.baseline_family_combo)
         self.baseline_family_combo.currentIndexChanged.connect(self._on_baseline_family_changed)
@@ -12482,7 +12526,7 @@ class MainWindow(QMainWindow):
         # QLabel per box would be four hidden labels to keep in step.
         self.baseline_degree_spin.setPrefix("degree ")
         self.baseline_degree_spin.setToolTip(
-            "Polynomial degree (1 = linear, 2 = quadratic, ...) -- "
+            "Polynomial degree (1 = linear, 2 = quadratic, ...) – "
             "higher follows more curvature, but can start fitting "
             "noise between baseline points past what the spectrum's "
             "own baseline shape actually needs. Only used when "
@@ -12498,7 +12542,7 @@ class MainWindow(QMainWindow):
         self.baseline_smoothing_spin.setSpecialValueText("Auto")  # 0.0 displays as "Auto" -- see below
         self.baseline_smoothing_spin.setValue(0.0)
         self.baseline_smoothing_spin.setToolTip(
-            "Spline smoothness (UnivariateSpline's own s parameter) -- "
+            "Spline smoothness (UnivariateSpline's own s parameter) – "
             "higher follows the baseline's own point-to-point noise "
             "less, lower follows it more closely (0/\"Auto\" picks a "
             "data-driven default from the baseline points' own noise "
@@ -12690,7 +12734,13 @@ class MainWindow(QMainWindow):
         # Process, after Najbauer & Andreas (J. Magn. Reson. 2019).
         self.drift_panel = DriftCorrectionPanel(
             spectra=self._drift_spectra, selected=self._selected_index,
-            apply=self._apply_drift_correction_to_selected, log=self._drift_log)
+            apply=self._apply_drift_correction_to_selected, log=self._drift_log,
+            draw=self._drift_draw, arm=self._drift_arm,
+            spectrum_changed=self._drift_spectrum_changed)
+        self.fit_canvas.peakPicked.connect(
+            lambda x: self.drift_panel.armed and self.drift_panel.on_canvas_pick(x))
+        self.fit_canvas.pickModeChanged.connect(
+            lambda on: None if on else self.drift_panel.canvas_mode_released())
         self.drift_section = CollapsibleSection("Field Drift Correction", content=self.drift_panel)
         self.drift_section.toggled.connect(lambda expanded: expanded and self.drift_panel.refresh())
         model = self.spectrum_list.model()
@@ -12723,10 +12773,10 @@ class MainWindow(QMainWindow):
         box.setToolTip(
             "Spectral reference: an absolute Hz offset from this "
             "spectrum's own SFO1 base frequency, applied to the "
-            "direct-dimension ppm/Hz axis -- e.g. the recorded SR "
+            "direct-dimension ppm/Hz axis – e.g. the recorded SR "
             "correction from a calibration standard. Positive moves "
             "peaks to higher frequency/ppm. Persists as a value (not "
-            "a one-shot delta) -- editing it recomputes the axis from "
+            "a one-shot delta) – editing it recomputes the axis from "
             "scratch, so re-entering the same number twice is a no-op."
         )
         outer = QVBoxLayout(box)
@@ -12972,7 +13022,7 @@ class MainWindow(QMainWindow):
         current_display.setMinimumWidth(80)
         current_display.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         current_display.setToolTip(
-            "The total phase actually applied right now -- drag the "
+            "The total phase actually applied right now – drag the "
             "handle to adjust it. Always the real value, never a delta "
             "that resets to 0 on reselection."
         )
@@ -13746,7 +13796,7 @@ class MainWindow(QMainWindow):
         source = self._manual_baseline_source(spectrum)
         if source is None:
             self.baseline_points_label.setText(
-                "Could not find the uncorrected trace -- untick Baseline Correct first.")
+                "Could not find the uncorrected trace – untick Baseline Correct first.")
             return
         x, y = source
         try:
@@ -13962,7 +14012,7 @@ class MainWindow(QMainWindow):
         source = self._manual_baseline_source(spectrum)
         if source is None:
             box.status_label.setText(
-                "Could not find the uncorrected trace to fit -- untick Baseline Correct, "
+                "Could not find the uncorrected trace to fit – untick Baseline Correct, "
                 "fit, then tick it again.")
             return
         x, y = source
@@ -14524,9 +14574,15 @@ class MainWindow(QMainWindow):
         # Processing tab's preview, a reprocess and the next session all
         # reproduce this result instead of quietly reverting to the
         # shared phase.
-        slice_phase.autophase_slices(
+        found = slice_phase.autophase_slices(
             spectrum, joint=self.autophase_joint_checkbox.isChecked(),
-            pivot_ppm=self.pivot_spin.value())
+            pivot_ppm=self.pivot_spin.value(),
+            window=90.0 if self.autophase_keep_sign_checkbox.isChecked() else None)
+        weak = sum(found["inherited"])
+        self.statusBar().showMessage(
+            f"Autophased {len(found['phase0'])} slices from slice {found['reference'] + 1}'s phase"
+            + (f"; {weak} too noisy to phase on their own took their neighbours' phase." if weak
+               else "."), 8000)
         self._schedule_sidecar_save(index)
         # The underlying data has genuinely changed -- re-anchor the
         # Phase controls to it (same as a fresh selection), rather than
@@ -15303,11 +15359,11 @@ class MainWindow(QMainWindow):
     _WINDOW_MENU_PANELS = (
         ("Load/Save", "Open"),
         ("Processing", "Process"),
-        ("Compare", "Compare"),
-        ("Fitting", "Fit"),
         ("Integration", "Integrate"),
-        ("Simulations", "Simulate"),
+        ("Fitting", "Fit"),
         ("Relaxation", "Dynamics"),
+        ("Simulations", "Simulate"),
+        ("Compare", "Compare"),
         ("Advanced Processing", "Adv. Proc."),
         ("Applications", "Apply"),
         ("NMR Periodic Table", "Periodic Table"),
@@ -15372,7 +15428,7 @@ class MainWindow(QMainWindow):
             self.phase0_handle, self.phase0_spin, self.phase0_current_display,
             self.phase1_handle, self.phase1_spin, self.phase1_current_display,
             self.pivot_spin, self.pivot_slider, self.autophase_joint_checkbox,
-            self.autophase_each_slice_checkbox,
+            self.autophase_each_slice_checkbox, self.autophase_keep_sign_checkbox,
             self.baseline_correct_button, self.baseline_method_combo, self.baseline_smoothing_spin,
             self.baseline_points_spin, self.baseline_manual_box,
         ):
@@ -15392,11 +15448,12 @@ class MainWindow(QMainWindow):
     # defined in each one, then fit a relaxation curve to each peak's
     # per-slice amplitude series.
 
-    _PEAK_TABLE_COLUMNS = ("Shift (ppm)", "FWHM (ppm)", "Eta", "Fixed")
+    _PEAK_TABLE_COLUMNS = ("Shift (ppm)", "FWHM (ppm)", "Eta", "Fixed", "Multiplet", "J (Hz)")
     _REGION_TABLE_COLUMNS = ("Low (ppm)", "High (ppm)")
     #: Spectral-fit results table (ported from upstream, Leo 14a6fd3):
     #: the peak table's own Shift/FWHM/Eta columns, then the outputs.
-    _SPECTRAL_FIT_TABLE_COLUMNS = ("Shift\n(ppm)", "FWHM\n(ppm)", "Eta", "Amplitude", "Area", "Area\n(%)")
+    _SPECTRAL_FIT_TABLE_COLUMNS = ("Shift\n(ppm)", "FWHM\n(ppm)", "Eta", "Amplitude", "Area", "Area\n(%)",
+                                   "J\n(Hz)")
 
     def _build_fitting_panel(self) -> QWidget:
         """The "Fitting" launcher button -- collects every *spectral*
@@ -15422,8 +15479,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._fit_guide_host)
 
         self.fitting_status_label = QLabel(
-            "Fit peak shapes (Isotropic), or build a model "
-            "in CSA, Quad & J-coupling: add peaks, then add interactions to each -- chemical-shift "
+            "Fit peak shapes and multiplets in Solution NMR, or build a model "
+            "in Solid-state NMR: add peaks, then add interactions to each – chemical-shift "
             "anisotropy, quadrupolar (first order, second order or exact) or J-coupling (first "
             "order, or strongly coupled peaks solved exactly). "
             "To retain a fit for later use, click 'Keep This Fit'. You can see all "
@@ -15433,13 +15490,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.fitting_status_label)
 
         layout.addWidget(CollapsibleSection(
-            "Isotropic (Gauss/Lor)", content=self._build_peak_picking_subtab()))
+            "Solution NMR", content=self._build_peak_picking_subtab()))
         # Region integration is built here, with the rest of the Fit
         # tile's widgets (builders after this one read them), but shown
         # on its own Integrate tile (explicit user request, 2026-10-16).
         self._integration_content = self._build_integration_subtab()
         # One entry point for every interaction (explicit user request,
-        # 2026-10-06): CSA, Quad & J-coupling, where peaks are added and
+        # 2026-10-06): Solid-state NMR, where peaks are added and
         # interactions added to each. The single-interaction panels below
         # (J-coupling's first-order mode, CSA/Dipolar, Quadrupolar) are no
         # longer in the menu -- Combined does each of them, at every level
@@ -15486,7 +15543,7 @@ class MainWindow(QMainWindow):
             "Quadrupolar (Czjzek distribution)", content=self.czjzek_fit_panel)
         # Any mix of CSA, quadrupolar and J per site (explicit user
         # request); the fitter is notebook.combined_fitting, the model
-        # Simulate > CSA, Quad & J-coupling's.
+        # Simulate > Solid-state NMR's.
         self.combined_fit_panel = CombinedFitPanel(
             get_target=self._jcoupling_fit_target,
             get_regions=self._integration_regions,
@@ -15503,7 +15560,7 @@ class MainWindow(QMainWindow):
             self._with_model_series_box(self.combined_fit_panel, "combined"),
             self.jcoupling_fit_panel)
         self._combined_fit_section = CollapsibleSection(
-            "CSA, Quad & J-coupling", content=self.combined_fit_model)
+            "Solid-state NMR", content=self.combined_fit_model)
         layout.addWidget(self._combined_fit_section)
         layout.addWidget(self._czjzek_fit_section)
         # A spectrum against the environments a CIF and its bond-pathway
@@ -15807,7 +15864,7 @@ class MainWindow(QMainWindow):
         both -- ``quadrupolar_spectrum``)."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        # CSA, Quad & J-coupling is the one entry point for every interaction
+        # Solid-state NMR is the one entry point for every interaction
         # (explicit user request, 2026-10-06; see _build_fitting_panel). The
         # CSA and Quadrupolar simulators are kept, hidden, for saved states
         # and the simulation history; J-coupling's spin-system mode is
@@ -15856,7 +15913,7 @@ class MainWindow(QMainWindow):
         self.combined_sim_model = CombinedModelSection(self.combined_sim_panel,
                                                        self.jcoupling_sim_panel)
         self._combined_sim_section = CollapsibleSection(
-            "CSA, Quad & J-coupling", content=self.combined_sim_model)
+            "Solid-state NMR", content=self.combined_sim_model)
         layout.addWidget(self._combined_sim_section)
         # DFT-calculated tensors (CASTEP / VASP) -> sites -> the Combined
         # Hamiltonian simulation (explicit user request, 2026-10-06);
@@ -15875,7 +15932,7 @@ class MainWindow(QMainWindow):
         self._dft_sim_section = CollapsibleSection("DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
                                                    content=self.dft_sim_panel)
         layout.addWidget(self._czjzek_sim_section)
-        # After Czjzek: CSA, Quad & J-coupling and Czjzek stay together
+        # After Czjzek: Solid-state NMR and Czjzek stay together
         # (test_gui_czjzek_display pins that order).
         layout.addWidget(self._dft_sim_section)
         # Code that used to open these sections opens Combined's instead.
@@ -16053,7 +16110,7 @@ class MainWindow(QMainWindow):
             x[keep], np.asarray(result["y"])[keep], np.asarray(result["y_fit"])[keep],
             components=components, auto_hide_single=True,
             peak_labels=list(result["site_spectra"]),
-            title=result.get("title", "CSA, Quad & J-coupling fit"),
+            title=result.get("title", "Solid-state NMR fit"),
             fit_label=result.get("fit_label", "Fit (total)"),
             spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None,
             keep_zoom=keep_zoom, overlay=self._fit_gap_overlay(regions))
@@ -16164,11 +16221,11 @@ class MainWindow(QMainWindow):
 
     def _multi_site_sources(self) -> list:
         """Site lists Fit ▸ Multi-spectrum's "Copy sites from" offers
-        besides its own nuclei: Fit and Simulate ▸ CSA, Quad & J-coupling's
+        besides its own nuclei: Fit and Simulate ▸ Solid-state NMR's
         peaks, as (menu text, nucleus, site dicts)."""
         out = []
-        for text, name in (("Fit ▸ CSA, Quad && J-coupling", "combined_fit_panel"),
-                           ("Simulate ▸ CSA, Quad && J-coupling", "combined_sim_panel")):
+        for text, name in (("Fit ▸ Solid-state NMR", "combined_fit_panel"),
+                           ("Simulate ▸ Solid-state NMR", "combined_sim_panel")):
             panel = getattr(self, name, None)
             dicts = [d for d in (getattr(panel, "site_dicts", None) or []) if not d.get("isotope")]
             nucleus = panel.nucleus_combo.currentText().strip() if panel is not None else ""
@@ -16210,7 +16267,7 @@ class MainWindow(QMainWindow):
                 n_free=sum(1 for p in fit["parameters"] if p.get("free")),
                 mask=fit.get("mask"), report=report, target=self.session.label(index),
                 x_label=self.fit_canvas.ax.get_xlabel() if self.fit_canvas.ax else "",
-                title=f"{name} -- {fit.get('label') or self.session.label(index)}",
+                title=f"{name} – {fit.get('label') or self.session.label(index)}",
                 panel_inputs=inputs, panel_result=panel.result_state_for(key))
             models = self._fit_models(index)
             model["component_style"] = self._component_colour_style()
@@ -16227,13 +16284,13 @@ class MainWindow(QMainWindow):
         self._refresh_fit_model_panels()
         if missing:
             QMessageBox.information(
-                self, "Keep fits", "Not kept (its curves are not here -- run Fit All again to "
+                self, "Keep fits", "Not kept (its curves are not here – run Fit All again to "
                 "keep it): " + ", ".join(missing) + ".")
         if rows:
             self._show_rows_superimposed_in_compare(rows)
             self.statusBar().showMessage(
                 f"Kept “{name}” for {len(rows)} spectra, in Open experiments and superimposed in "
-                "Compare -- right-click an entry ▸ Fit Display… for its components, colours "
+                "Compare – right-click an entry ▸ Fit Display… for its components, colours "
                 "and residual.", 10000)
         return rows
 
@@ -16253,7 +16310,7 @@ class MainWindow(QMainWindow):
         self._refresh_compare_view(switch_tab=True, force_render=True)
 
     def _send_combined_to_simulation(self, settings: dict, site_dicts: list, nucleus: str) -> None:
-        """Fitted sites into Simulate > CSA, Quad & J-coupling, simulated
+        """Fitted sites into Simulate > Solid-state NMR, simulated
         over an automatic axis."""
         panel = self.combined_sim_panel
         panel.nucleus_combo.setCurrentText(nucleus)
@@ -16275,7 +16332,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _link_panel_field(panel):
-        """Field (T) in front of a CSA, Quad & J-coupling-style panel's
+        """Field (T) in front of a Solid-state NMR-style panel's
         Larmor box (its ``larmor_spin`` and ``nucleus_combo``)."""
         from PySide6.QtWidgets import QFormLayout
         for form in panel.findChildren(QFormLayout):
@@ -16639,7 +16696,7 @@ class MainWindow(QMainWindow):
 
     def _open_strong_coupling(self, where: str, site_dicts, nucleus: str,
                               larmor_mhz: float | None = None) -> None:
-        """CSA, Quad & J-coupling ▸ a J interaction's "Strong coupling", or
+        """Solid-state NMR ▸ a J interaction's "Strong coupling", or
         Add interaction ▸ J-coupling between peaks: the exact spin-system
         model, its spins seeded from the peaks when it has none yet."""
         panel = self.jcoupling_fit_panel if where == "fit" else self.jcoupling_sim_panel
@@ -16662,7 +16719,7 @@ class MainWindow(QMainWindow):
         notes = self.jcoupling_fit_panel.set_start_from_simulation(arguments)
         self.combined_fit_model.show_model("spin_system")
         self._open_fit_section_of(self.jcoupling_fit_panel)
-        self._report_transfer("Simulated spin system set as the Fit ▸ CSA, Quad & J-coupling (strongly coupled peaks) start",
+        self._report_transfer("Simulated spin system set as the Fit ▸ Solid-state NMR (strongly coupled peaks) start",
                               notes)
 
     def _send_combined_simulation_to_fit(self, site_dicts: list, settings: dict,
@@ -16671,14 +16728,14 @@ class MainWindow(QMainWindow):
         self.combined_fit_model.show_model("peaks")
         self._combined_fit_section.setExpanded(True)
         self._show_side_tab("Fit")
-        self._report_transfer("Simulated sites set as the Fit ▸ CSA, Quad & J-coupling start",
+        self._report_transfer("Simulated sites set as the Fit ▸ Solid-state NMR start",
                               notes)
 
     def _export_pnmr_sites(self, site_dicts: list, notes: list, nucleus: str | None,
                            larmor_mhz: float | None, destination: str, append: bool,
                            source: str) -> str:
         """pNMR's isotropic peaks (``notebook.pnmr_export`` site dicts)
-        into Simulate ▸ or Fit ▸ CSA, Quad & J-coupling, replacing or
+        into Simulate ▸ or Fit ▸ Solid-state NMR, replacing or
         added to the sites there (explicit user request, 2026-10-12). The
         Simulate panel takes the pNMR nucleus and field; the Fit panel
         keeps its spectrum's, and a mismatch is reported. Returns the
@@ -16716,7 +16773,7 @@ class MainWindow(QMainWindow):
             self._show_side_tab("Simulate")
         where = "Fit" if fit else "Simulate"
         what = (f"{len(new)} {source} site(s) {'added to' if append else 'set as'} the "
-                f"{where} ▸ CSA, Quad & J-coupling sites -- select one and add CSA, "
+                f"{where} ▸ Solid-state NMR sites – select one and add CSA, "
                 "quadrupolar or J")
         self._report_transfer(what, "; ".join(extra))
         return what
@@ -17050,7 +17107,7 @@ class MainWindow(QMainWindow):
         record = self._fit_values_record(key)
         if record is None:
             QMessageBox.information(self, "Save the fitted values",
-                                    "Run the fit first -- this panel has no fitted values yet.")
+                                    "Run the fit first – this panel has no fitted values yet.")
             return None
         written = self._write_fit_values(
             record, f"{record['spectrum'] or 'spectrum'} - {record['fit']} fitted values", path)
@@ -17138,7 +17195,7 @@ class MainWindow(QMainWindow):
         if key == "isotropic":
             if getattr(self, "_last_spectral_fit", None) is None or \
                     self.spectral_fit_canvas.shown_fit() is None:
-                QMessageBox.information(self, "Keep fit", "Run the fit first -- there is no "
+                QMessageBox.information(self, "Keep fit", "Run the fit first – there is no "
                                         "isotropic fit to keep.")
                 return None
             return self._keep_shown_fit(name, canvas=self.spectral_fit_canvas)
@@ -17149,7 +17206,7 @@ class MainWindow(QMainWindow):
             result = getattr(panel, "result", None)
             redraw = lambda: panel._draw_fit(panel.result)  # noqa: E731
         if not result:
-            QMessageBox.information(self, "Keep fit", "Run the fit first -- this panel has no "
+            QMessageBox.information(self, "Keep fit", "Run the fit first – this panel has no "
                                     "fit to keep yet.")
             return None
         shown = self.fit_canvas.shown_fit()
@@ -17176,7 +17233,7 @@ class MainWindow(QMainWindow):
         peak's, one kept fit each, named "<name>: <peak>"."""
         shown = self.fit_canvas.shown_fit()
         if shown is None or shown["kind"] not in ("curve", "curves"):
-            QMessageBox.information(self, "Keep curve fit", "Run Fit Curve first -- there is no "
+            QMessageBox.information(self, "Keep curve fit", "Run Fit Curve first – there is no "
                                     "curve fit on the Fit plot to keep.")
             return []
         if shown["kind"] == "curve":
@@ -17214,7 +17271,7 @@ class MainWindow(QMainWindow):
                 kept = self._keep_curve_fits(name)
                 return kept[0] if kept else None
         if shown is None:
-            QMessageBox.information(self, "Keep fit", "There is no fit on the plot to keep -- run "
+            QMessageBox.information(self, "Keep fit", "There is no fit on the plot to keep – run "
                                     "a fit (or show one) first.")
             return None
         index = self._selected_index()
@@ -17318,7 +17375,7 @@ class MainWindow(QMainWindow):
             f"Kept fit model “{name}” ({model['kind_label']}; R² {stats['r2']:.5f}"
             + (f", {stats['k']} free parameters" if stats["k"] is not None else "") + ")"
             + (f"\n{report}" if report else "")))
-        self.statusBar().showMessage(f"Kept “{name}” with {label} -- Fit ▸ Kept fit models.", 8000)
+        self.statusBar().showMessage(f"Kept “{name}” with {label} – Fit ▸ Kept fit models.", 8000)
         return model
 
     def _fit_model_by_id(self, index, model_id):
@@ -17419,7 +17476,7 @@ class MainWindow(QMainWindow):
         kinds = {m["kind"] == "curve" for m in models}
         if len(kinds) > 1:
             QMessageBox.information(self, "Compare", "Curve fits and spectrum fits cannot share "
-                                    "one plot -- tick fits of one kind.")
+                                    "one plot – tick fits of one kind.")
             return
         curve = kinds == {True}
         if layout in ("stack", "overlay") and not curve:
@@ -17525,7 +17582,7 @@ class MainWindow(QMainWindow):
         self._show_rows_superimposed_in_compare(rows, layout)
         self.statusBar().showMessage(
             f"{len(rows)} kept fits in Compare ({'stacked' if layout == 'stack' else 'superimposed'})"
-            " -- right-click an entry ▸ Fit Display… for its components, colours and residual.",
+            " – right-click an entry ▸ Fit Display… for its components, colours and residual.",
             10000)
 
     def _recolour_fit_model(self, index, model_id, colour) -> None:
@@ -17561,7 +17618,7 @@ class MainWindow(QMainWindow):
             return None
         dialog = FitViewDialog(model, spectrum.metadata.raw.get("fit_model_view"),
                                on_change=lambda view: self._set_fit_experiment_view(row, view),
-                               title=f"Fit display -- {self.session.label(row)}", parent=self)
+                               title=f"Fit display – {self.session.label(row)}", parent=self)
         if exec_dialog:
             dialog.exec()
         return dialog
@@ -17700,7 +17757,7 @@ class MainWindow(QMainWindow):
         self.sim_shape_combo.setToolTip(
             "Gradient pulse shape. A shaped pulse has less area than a rectangle "
             "of the same peak amplitude and duration, so a smaller b-value and "
-            "less attenuation -- 'Compare gradient shapes' below shows how much.")
+            "less attenuation – 'Compare gradient shapes' below shows how much.")
         form.addRow("Gradient shape:", self.sim_shape_combo)
         self.sim_ramp_spin = self._sim_spin(
             0.0, 50.0, 0.1, 3, " ms", "Rise time of each trapezoid edge.")
@@ -17711,7 +17768,7 @@ class MainWindow(QMainWindow):
             self.sim_sequence_combo.addItem(spec["label"], key)
         self._narrow_combo(self.sim_sequence_combo)
         self.sim_sequence_combo.setToolTip(
-            "Sequence type -- sets the diffusion-time correction. A bipolar pair "
+            "Sequence type – sets the diffusion-time correction. A bipolar pair "
             "loses τ/2 of diffusion time to the recovery delay between its lobes.")
         form.addRow("Sequence:", self.sim_sequence_combo)
         self.sim_tau_spin = self._sim_spin(
@@ -17798,7 +17855,7 @@ class MainWindow(QMainWindow):
                 lines = []
                 for c in curves:
                     if c["intensity"] is None:
-                        lines.append(f"{c['label']}: not drawn -- {c['error']}")
+                        lines.append(f"{c['label']}: not drawn – {c['error']}")
                     else:
                         lines.append(f"{c['label']}: b(max) = {c['b'][-1]:.3g} s/m², "
                                      f"I/I₀ at max = {c['intensity'][0, -1]:.3g}")
@@ -17886,9 +17943,9 @@ class MainWindow(QMainWindow):
         self.bloch_time_step_spin = self._sim_spin(
             0.0, 1000.0, 0.0, 4, " µs",
             "Time resolution of the simulated pulse. Auto: 1 µs (the X-Pulse hardware's own "
-            "synthesis) unless something needs finer -- a frequency sweep (≤ 0.05 turn of phase "
+            "synthesis) unless something needs finer – a frequency sweep (≤ 0.05 turn of phase "
             "per step at the sweep's edges; coarser ramps give wrong profiles) or a pulse "
-            "shorter than 100 µs (at least 100 steps) -- then the largest of 0.5, 0.25, 0.2, "
+            "shorter than 100 µs (at least 100 steps) – then the largest of 0.5, 0.25, 0.2, "
             "0.1, … µs that does. Set a value to match a spectrometer's own shape resolution.")
         self.bloch_time_step_spin.setSpecialValueText("auto")
         self.bloch_time_step_spin.setSingleStep(0.05)
@@ -17904,7 +17961,7 @@ class MainWindow(QMainWindow):
             "that rotation on resonance. Hard-pulse calibration: a relative TX "
             "amplitude referenced to a calibrated hard 90°, as read off a pulse "
             "programme's panel (RFAsh0 / P1Hard / RFA0). Adiabaticity: for an adiabatic "
-            "pulse, which has no flip angle -- Q₀ = 2π ν1² / (dν/dt) where the sweep crosses "
+            "pulse, which has no flip angle – Q₀ = 2π ν1² / (dν/dt) where the sweep crosses "
             "the carrier; ~5 is a common working value.")
         form.addRow("Power from:", self.bloch_power_mode_combo)
         self.bloch_q_spin = self._sim_spin(
@@ -17946,7 +18003,7 @@ class MainWindow(QMainWindow):
         sweep_form.addRow("Points:", self.bloch_n_offsets_spin)
         self.bloch_power_scales_edit = QLineEdit("1.0")
         self.bloch_power_scales_edit.setToolTip(
-            "Multipliers on the power, comma-separated -- e.g. 0.8, 1.0, 1.2 to "
+            "Multipliers on the power, comma-separated – e.g. 0.8, 1.0, 1.2 to "
             "see how sensitive the profile is to a ±20% miscalibration.")
         sweep_form.addRow("Power scales:", self.bloch_power_scales_edit)
         layout.addWidget(sweep_box)
@@ -18078,7 +18135,7 @@ class MainWindow(QMainWindow):
                  f"|Mxy| = {np.hypot(sim['Mx'][nominal, centre], sim['My'][nominal, centre]):.3f}."]
         if sim.get("max_turns_per_step", 0.0) > 0.1:
             lines.append(f"⚠ The phase ramp advances up to {sim['max_turns_per_step']:.2f} turn "
-                         "per step at the sweep's edges -- too coarse to trust the profile. Use "
+                         "per step at the sweep's edges – too coarse to trust the profile. Use "
                          "a finer time step (or auto).")
         if "adiabaticity" in sim:
             q = sim["adiabaticity"]
@@ -18130,7 +18187,7 @@ class MainWindow(QMainWindow):
         self.sim_csa_nucleus_edit = QLineEdit()
         self.sim_csa_nucleus_edit.setPlaceholderText("e.g. 13C")
         self.sim_csa_nucleus_edit.setToolTip(
-            "The observed nucleus, as its usual isotope label -- used to "
+            "The observed nucleus, as its usual isotope label – used to "
             "label the plot axis correctly. Seeded from the selected "
             "spectrum's own nucleus where one is selected.")
         form.addRow("Nucleus:", self.sim_csa_nucleus_edit)
@@ -18164,7 +18221,7 @@ class MainWindow(QMainWindow):
         self.sim_csa_larmor_spin.setDecimals(4)
         self.sim_csa_larmor_spin.setSuffix(" MHz")
         self.sim_csa_larmor_spin.setToolTip(
-            "The observed nucleus's Larmor frequency (its SFO1) -- needed to "
+            "The observed nucleus's Larmor frequency (its SFO1) – needed to "
             "convert sideband spacing (in Hz, from the MAS rate) into ppm. "
             "Seeded from the selected spectrum's own SFO1 where one is "
             "selected. Not needed for the static lineshape.")
@@ -18241,7 +18298,7 @@ class MainWindow(QMainWindow):
         self.sim_csa_eta_spin.setValue(0.5)
         self.sim_csa_eta_spin.setToolTip(
             "Gaussian/Lorentzian mixing fraction for the pseudo-Voigt "
-            "broadening kernel (0 = Gaussian, 1 = Lorentzian) -- unrelated "
+            "broadening kernel (0 = Gaussian, 1 = Lorentzian) – unrelated "
             "to the CSA tensor's own η above.")
         site_form.addRow("Broadening η:", self.sim_csa_eta_spin)
         for key, spin in (("d_iso", self.sim_csa_diso_spin),
@@ -18439,7 +18496,7 @@ class MainWindow(QMainWindow):
         self.sim_quad_nucleus_combo.setCurrentIndex(-1)
         self.sim_quad_nucleus_combo.lineEdit().setPlaceholderText("e.g. 27Al")
         self.sim_quad_nucleus_combo.setToolTip(
-            "The observed nucleus, as its usual isotope label -- sets the "
+            "The observed nucleus, as its usual isotope label – sets the "
             "plot axis and fills Spin I from the nuclide table. Type any "
             "quadrupolar nucleus, e.g. 17O. Seeded from the selected "
             "spectrum's own nucleus when that nucleus is quadrupolar.")
@@ -18463,7 +18520,7 @@ class MainWindow(QMainWindow):
         self.sim_quad_spin_spin.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.sim_quad_spin_spin.setToolTip(
             "Nuclear spin quantum number I. Read from the nuclide table for "
-            "the nucleus above, so the two cannot disagree -- pick a "
+            "the nucleus above, so the two cannot disagree – pick a "
             "different nucleus to change it.")
         form.addRow("Spin I:", self.sim_quad_spin_spin)
         # Read I from the same table the gamma comes from, rather than
@@ -18541,7 +18598,7 @@ class MainWindow(QMainWindow):
         self.sim_quad_method_combo.addItem("Second-order perturbation", "second_order")
         self.sim_quad_method_combo.addItem("First-order only", "first_order")
         self.sim_quad_method_combo.setToolTip(
-            "First-order only: each transition at its first-order shift -- "
+            "First-order only: each transition at its first-order shift – "
             "the central transition is then a single line at δiso.\n\n"
             "Second-order: adds the second-order shift (perturbation "
             "theory), which gives the central transition its static and "
@@ -18555,7 +18612,7 @@ class MainWindow(QMainWindow):
         self.sim_quad_compare_check.setToolTip(
             "Also draw all three levels of theory together on the Simulation "
             "plot, each scaled to its own maximum, with their differences "
-            "underneath -- what second order adds to first, and what is "
+            "underneath – what second order adds to first, and what is "
             "left beyond second order.")
         form.addRow("", self.sim_quad_compare_check)
 
@@ -18572,7 +18629,7 @@ class MainWindow(QMainWindow):
         self.sim_quad_pv_eta_spin.setValue(0.5)
         self.sim_quad_pv_eta_spin.setToolTip(
             "Lorentzian fraction of the pseudo-Voigt broadening (0 = Gaussian, "
-            "1 = Lorentzian) -- unrelated to η_Q.")
+            "1 = Lorentzian) – unrelated to η_Q.")
         site_rows.append(("L fraction:", self.sim_quad_pv_eta_spin))
 
         self.sim_quad_lineshape_combo = QComboBox()
@@ -18755,7 +18812,7 @@ class MainWindow(QMainWindow):
         if edge > 0.01 * maximum:
             return (
                 "\n\nWarning: intensity at the ppm axis edge is "
-                f"{edge / maximum:.1%} of the peak -- the pattern is likely "
+                f"{edge / maximum:.1%} of the peak – the pattern is likely "
                 "clipped. Widen Axis min/max and simulate again."
             )
         return ""
@@ -18780,7 +18837,7 @@ class MainWindow(QMainWindow):
         if not core_registry.find_gamma(nucleus, quiet=True):
             QMessageBox.warning(
                 self, "Simulate CSA",
-                "Enter a recognised nucleus (e.g. '13C', '27Al') -- needed "
+                "Enter a recognised nucleus (e.g. '13C', '27Al') – needed "
                 "to label the plotted axis correctly.")
             return
         ppm_min = self.sim_csa_ppm_min_spin.value()
@@ -18885,7 +18942,7 @@ class MainWindow(QMainWindow):
         if not core_registry.find_gamma(nucleus, quiet=True):
             QMessageBox.warning(
                 self, "Simulate quadrupolar",
-                "Enter a recognised nucleus (e.g. '27Al', '17O') -- needed "
+                "Enter a recognised nucleus (e.g. '27Al', '17O') – needed "
                 "to label the plotted axis correctly.")
             return
         ppm_min = self.sim_quad_ppm_min_spin.value()
@@ -19499,7 +19556,7 @@ class MainWindow(QMainWindow):
         self.csa_use_fitted_button.clicked.connect(self._csa_use_fitted_as_start)
         self.csa_send_button = QPushButton("Send to Simulate ▸ CSA")
         self.csa_send_button.setToolTip(
-            "Open a fitted site -- the one selected in the results table, else the first -- in "
+            "Open a fitted site – the one selected in the results table, else the first – in "
             "Simulate ▸ CSA, with the fit's convention, regime, spinning rate and broadening.")
         self.csa_send_button.clicked.connect(self._send_csa_fit_to_simulation)
         for button in (self.csa_use_fitted_button, self.csa_send_button):
@@ -19595,7 +19652,7 @@ class MainWindow(QMainWindow):
         dialog the isotropic peak table offers."""
         bounds, fixed = self._csa_row_constraints(row)
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Bounds / fixed parameters -- CSA site {row + 1}")
+        dialog.setWindowTitle(f"Bounds / fixed parameters – CSA site {row + 1}")
         form = QFormLayout(dialog)
         edits, checks = {}, {}
         for name, label in self._CSA_PARAM_LABELS.items():
@@ -19744,12 +19801,17 @@ class MainWindow(QMainWindow):
         # match some larger number that's rarely actually used.
         self.peak_table.setMaximumHeight(160)
         self.peak_table.setToolTip(
-            "One row per peak to fit -- shift and FWHM are initial "
+            "One row per peak to fit – shift and FWHM are initial "
             "guesses (both, and the amplitude, are refined by the fit); "
             "eta is the Gaussian/Lorentzian mixing fraction (0 = pure "
             "Gaussian, 1 = pure Lorentzian), also refined. Check Fixed "
             "to lock a peak entirely at its current row values (fit "
-            "only the others); right-click for Set Custom Bounds…"
+            "only the others); right-click for Set Custom Bounds…\n\n"
+            "Multiplet: leave empty for a singlet, or type d, t, q, p (quintet), "
+            "x (sextet), h (septet) – 'dt' is a doublet of triplets. J (Hz) "
+            "then holds the starting coupling for each letter, separated by "
+            "commas (a blank gets 7 Hz); the fit refines them. Shift is the "
+            "multiplet's centre and FWHM the width of each line."
         )
         self.peak_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.peak_table.customContextMenuRequested.connect(self._on_peak_table_context_menu)
@@ -19759,6 +19821,7 @@ class MainWindow(QMainWindow):
         # removing/auto-picking) should move its own triangle marker
         # too.
         self.peak_table.itemChanged.connect(lambda _item: self._refresh_peak_markers())
+        self.peak_table.itemChanged.connect(self._on_peak_table_item_changed)
         peak_layout.addWidget(self.peak_table)
 
         peak_button_row = QHBoxLayout()
@@ -19792,7 +19855,7 @@ class MainWindow(QMainWindow):
         # highest".
         self.peak_slice_spin.setWrapping(True)
         self.peak_slice_spin.setToolTip(
-            "Which slice of a 2D/pseudo-2D series to pick peaks on -- "
+            "Which slice of a 2D/pseudo-2D series to pick peaks on – "
             "both 'Pick from Plot' (which shows this slice on its own "
             "so there is a 1D trace to click) and 'Auto-Pick Peaks'. "
             "Wraps around at either end."
@@ -19816,7 +19879,7 @@ class MainWindow(QMainWindow):
             "Detect peaks automatically (scipy find_peaks on the "
             "current selection, or on the chosen slice of a 2D/"
             "pseudo-2D series) and "
-            "replace the table above with them, as a starting point -- "
+            "replace the table above with them, as a starting point – "
             "still just initial guesses, refined by the fit like any "
             "other row here. Sensitivity set by Min. prominence, below."
         )
@@ -19979,7 +20042,7 @@ class MainWindow(QMainWindow):
         self.position_tolerance_spin.setToolTip(
             "How far each peak's fitted position is allowed to drift "
             "from the shift entered in the table above, as a multiple "
-            "of that peak's own (initial-guess) FWHM -- keeps a fit "
+            "of that peak's own (initial-guess) FWHM – keeps a fit "
             "from sliding onto a neighbouring peak or drifting across "
             "the whole window. 0 locks the position exactly; a large "
             "value is effectively unconstrained."
@@ -19991,12 +20054,12 @@ class MainWindow(QMainWindow):
         self.amplitude_bound_regions_checkbox.setToolTip(
             "For each peak whose starting shift falls inside one of the "
             "Integration regions (Integrate tile), cap its amplitude using that "
-            "region's own raw (unfitted) integral -- converted via the "
-            "peak's lineshape/FWHM -- instead of leaving it unbounded "
+            "region's own raw (unfitted) integral – converted via the "
+            "peak's lineshape/FWHM – instead of leaving it unbounded "
             "above. Recomputed fresh per slice, so it tracks a genuinely "
             "varying true amplitude across a relaxation/diffusion series. "
             "Deliberately loose (a whole region's own integral, not a "
-            "tight per-peak estimate) -- mainly useful to keep an "
+            "tight per-peak estimate) – mainly useful to keep an "
             "unconstrained fit from inflating one peak's amplitude to "
             "compensate for an unmodelled overlapping neighbour. Has no "
             "effect unless at least one region is defined above, and "
@@ -20010,7 +20073,7 @@ class MainWindow(QMainWindow):
         self.sn_noise_region_edit = QLineEdit()
         self.sn_noise_region_edit.setPlaceholderText("optional, e.g. 8.5, 9.5")
         self.sn_noise_region_edit.setToolTip(
-            "A ppm range with no real signal, 'low, high' -- when set, "
+            "A ppm range with no real signal, 'low, high' – when set, "
             "any peak whose fitted signal-to-noise (against this "
             "region) falls below the S/N threshold has its amplitude "
             "fixed to zero for that slice, instead of the fit chasing "
@@ -20041,7 +20104,7 @@ class MainWindow(QMainWindow):
 
         fit_button = QPushButton("Fit Spectrum")
         fit_button.setToolTip(
-            "Step 1: fit peaks against the current selection -- a plain 1D "
+            "Step 1: fit peaks against the current selection – a plain 1D "
             "spectrum directly, or every slice of a pseudo-2D series."
         )
         fit_button.clicked.connect(self._on_fit_spectrum_clicked)
@@ -20072,7 +20135,7 @@ class MainWindow(QMainWindow):
         self.view_slice_fit_spin.setEnabled(False)
         self.view_slice_fit_spin.setToolTip(
             "Inspect any individual slice's spectral (pseudo-Voigt) "
-            "fit from Fit Spectrum, in the Spectral Fit tab -- "
+            "fit from Fit Spectrum, in the Spectral Fit tab – "
             "available once a fit has been run."
         )
         self.view_slice_fit_spin.valueChanged.connect(self._on_view_slice_fit_changed)
@@ -20101,7 +20164,7 @@ class MainWindow(QMainWindow):
             "Fitted values for the slice shown above, one row per peak in "
             "the same order as the peak table, with 1-sigma uncertainties "
             "rounded to the digits they support. Area (%) is each peak's "
-            "share of the total fitted area -- the relative quantity, e.g. "
+            "share of the total fitted area – the relative quantity, e.g. "
             "for a ratio of species. A value held fixed during the fit is "
             "marked (fixed) and has no uncertainty.\n\n"
             "Right-click to copy the table (tab-separated, pastes into a "
@@ -20130,7 +20193,7 @@ class MainWindow(QMainWindow):
         self.spectral_fit_correlation_button.setToolTip(
             "Show the correlation matrix of the shown fit's parameters (the slice number "
             "above still chooses the slice; untick to go back to the fit).\n\n"
-            "r near ±1: two parameters trade off -- typically the amplitudes and widths of "
+            "r near ±1: two parameters trade off – typically the amplitudes and widths of "
             "overlapping peaks. The data then fix a combination of them rather than each "
             "one, and the table's ± understate how loosely each is pinned. Fixed "
             "parameters have no row.")
@@ -20140,7 +20203,7 @@ class MainWindow(QMainWindow):
         export_report_button = QPushButton("Export Fit Report…")
         export_report_button.setToolTip(
             "Save every slice's fitted peak parameters (shift/FWHM/"
-            "amplitude/eta, with uncertainties) as a CSV file -- plus "
+            "amplitude/eta, with uncertainties) as a CSV file – plus "
             "the curve-fit (Fit Curve) result per peak, if one has "
             "been run for this spectrum."
         )
@@ -20157,7 +20220,7 @@ class MainWindow(QMainWindow):
         self.export_isotropic_pseudo2d_button.setToolTip(
             "Reconstruct every fitted slice's summed peak lineshape on "
             "the full ppm axis and stack them into a new pseudo-2D "
-            "spectrum -- lets the fitted series be viewed/compared "
+            "spectrum – lets the fitted series be viewed/compared "
             "exactly like the raw data. Needs Fit Spectrum to have "
             "been run across at least two slices."
         )
@@ -20192,9 +20255,9 @@ class MainWindow(QMainWindow):
         # contributed to that slice's integral.
         self.export_integration_pseudo2d_button = QPushButton("Export Integration to Pseudo-2D…")
         self.export_integration_pseudo2d_button.setToolTip(
-            "Stack every integrated slice's own data -- masked to "
+            "Stack every integrated slice's own data – masked to "
             "zero outside the regions above, so it's clear what "
-            "actually contributed to each integral -- into a new "
+            "actually contributed to each integral – into a new "
             "pseudo-2D spectrum. Needs Integrate Regions to have been "
             "run across at least two slices."
         )
@@ -20220,7 +20283,7 @@ class MainWindow(QMainWindow):
                 "<li>Fit ▸ Isotropic ▸ <i>Fit Spectrum</i>, or drag regions on "
                 "<i>Integrate</i> (each is integrated as it is drawn) — every slice in one "
                 "go;</li>"
-                "<li>CSA, Quad &amp; J-coupling (any CSA, quadrupolar or J model) — fit one slice (the "
+                "<li>Solid-state NMR (any CSA, quadrupolar or J model) — fit one slice (the "
                 "strongest), then <i>Fit Every Slice with this Model</i> in its Pseudo-2D "
                 "series box.</li></ul>"),
         ("curve", "<b>Fit the recovery/decay on Dynamics ▸ Fit Curve</b>: "
@@ -20308,7 +20371,7 @@ class MainWindow(QMainWindow):
             "Configures the Fit Curve button below, and the "
             "Open experiments list's right-click 'Fit Curve' action "
             "on a pseudo-2D row, and the Compare tile's Fit Curve (button "
-            "or right-click) on a checked stack of 1D spectra -- not "
+            "or right-click) on a checked stack of 1D spectra – not "
             "used by Fit Spectrum, which lives in the Fitting tab."
         )
         relax_form = QFormLayout(relax_box)
@@ -20349,7 +20412,7 @@ class MainWindow(QMainWindow):
         self.custom_equation_edit.setPlaceholderText("e.g. A*exp(-x/T1)+C")
         self.custom_equation_edit.setToolTip(
             "A formula in 'x' (the delay/b-value) and any other names "
-            "you choose -- every other name becomes a fitted "
+            "you choose – every other name becomes a fitted "
             "parameter, in the order it first appears here. Parsed "
             "with sympy; standard functions (exp, log, sin, sqrt, "
             "...) are available by name."
@@ -20372,7 +20435,7 @@ class MainWindow(QMainWindow):
             "A separate component is a claim that the sample contains two "
             "genuinely distinct species; a stretch exponent (below) is a claim "
             "that one species has a distribution of diffusion coefficients. "
-            "They are different statements about the sample -- pick the one "
+            "They are different statements about the sample – pick the one "
             "you actually mean."
         )
         self.diffusion_components_spin.valueChanged.connect(self._on_fit_model_shape_changed)
@@ -20392,7 +20455,7 @@ class MainWindow(QMainWindow):
 
         self.custom_p0_row_label = QLabel("Initial guesses:")
         self.custom_p0_edit = QLineEdit()
-        self.custom_p0_edit.setPlaceholderText("optional, e.g. 10, 0.5, 0 -- defaults to 1 each")
+        self.custom_p0_edit.setPlaceholderText("optional, e.g. 10, 0.5, 0 – defaults to 1 each")
         self.custom_p0_edit.setToolTip(
             "Initial guesses for the parameters above, in the same "
             "order, comma-separated. Any left unspecified (including "
@@ -20470,16 +20533,15 @@ class MainWindow(QMainWindow):
             "by Step, one value per slice (the count is already known "
             "from the data, so there's no separate End to enter). "
             "List file × factor: any one-column text file of numbers "
-            "sitting with the data, scaled by a constant -- a Bruker "
+            "sitting with the data, scaled by a constant – a Bruker "
             "vdlist/vclist/difflist, an X-Pulse "
             "parameters/..._valueslist.txt, or your own delays.txt. "
             "Relative gradient: an X-Pulse arrayed PFG "
             "experiment's own relative gradient-strength fractions "
-            "(0-1, from valueslist.txt) -- not an absolute b-value, "
+            "(0-1, from valueslist.txt) – not an absolute b-value, "
             "useful for judging attenuation trends or as a fit x-axis "
-            "when no gradient calibration is available; see TODO.md "
-            "for converting this to a true b-value via a max-gradient "
-            "setting."
+            "when no gradient calibration is available. Converting it to "
+            "a true b-value needs the maximum gradient strength."
         )
         self.delay_source_combo.currentIndexChanged.connect(self._on_delay_source_changed)
         relax_form.addRow(self.delays_row_label, self.delay_source_combo)
@@ -20517,7 +20579,7 @@ class MainWindow(QMainWindow):
         self.manual_delays_edit.setPlaceholderText("e.g. 0.001, 0.01, 0.1, 1.0")
         self.manual_delays_edit.setToolTip(
             "The values to fit against, comma- or whitespace-separated, one "
-            "per slice in slice order. Read at the moment Fit Curve runs -- "
+            "per slice in slice order. Read at the moment Fit Curve runs – "
             "the Values preview line below shows exactly what they resolve "
             "to, so there is never a question of whether they were used."
         )
@@ -20546,12 +20608,29 @@ class MainWindow(QMainWindow):
         self.delay_step_spin.setFixedWidth(120)
         self.delay_step_spin.setValue(0.1)
         self.delay_step_spin.setToolTip("Step")
+        self.delay_multiplier_spin = QDoubleSpinBox()
+        self.delay_multiplier_spin.setRange(0.0001, 10000.0)
+        self.delay_multiplier_spin.setDecimals(4)
+        self.delay_multiplier_spin.setSingleStep(0.1)
+        self.delay_multiplier_spin.setValue(1.0)
+        self.delay_multiplier_spin.setFixedWidth(120)
+        self.delay_multiplier_spin.setToolTip(
+            "Each step is this many times the one before it. 1 (the default) "
+            "gives equal steps: start, start + step, start + 2·step, …\n\n"
+            "Any positive number, whole or not: with start = 0.1, step = 0.1 "
+            "and a multiplier of 2 the values run 0.1, 0.2, 0.4, 0.8, 1.6, … "
+            "(a doubling series); 1.5 grows by half each time. The Values "
+            "line below shows the result."
+        )
         self.delay_start_spin.valueChanged.connect(self._refresh_values_preview)
         self.delay_step_spin.valueChanged.connect(self._refresh_values_preview)
+        self.delay_multiplier_spin.valueChanged.connect(self._refresh_values_preview)
         self.delay_start_row_label = QLabel("Start:")
         self.delay_step_row_label = QLabel("Step:")
+        self.delay_multiplier_row_label = QLabel("Step multiplier:")
         relax_form.addRow(self.delay_start_row_label, self.delay_start_spin)
         relax_form.addRow(self.delay_step_row_label, self.delay_step_spin)
+        relax_form.addRow(self.delay_multiplier_row_label, self.delay_multiplier_spin)
 
         # --- Any one-column list file, x factor --------------------
         # Was "vclist x factor", Bruker-only and hard-coded to that one
@@ -20573,7 +20652,7 @@ class MainWindow(QMainWindow):
             "Bruker's lists/ sub-folders, X-Pulse's parameters/, and the "
             "parent folder); pick Browse… for one anywhere else.\n\n"
             "Bruker time suffixes (10m = 10 ms) are honoured; blank lines and "
-            "# comments are skipped. Nothing is inferred from the filename -- "
+            "# comments are skipped. Nothing is inferred from the filename – "
             "what the numbers mean is set by the Factor below."
         )
         self.list_file_combo.currentIndexChanged.connect(self._on_list_file_changed)
@@ -20813,7 +20892,7 @@ class MainWindow(QMainWindow):
             "state for each parameter of the model above.\n\n"
             "Unchecked (the default), every fit runs from the model's own "
             "data-driven guess exactly as before. Checked, the values in the "
-            "table are used -- blank cells still fall back to the automatic "
+            "table are used – blank cells still fall back to the automatic "
             "value, so you can pin one parameter and leave the rest alone."
         )
         self.guess_group.toggled.connect(self._on_guess_group_toggled)
@@ -20860,7 +20939,7 @@ class MainWindow(QMainWindow):
             "One row per model parameter. Guess: where the fit starts. "
             "Min/Max: hard bounds it may not leave. Tick a row's Parameter "
             "cell to hold that parameter fixed at its Guess instead of "
-            "fitting it -- e.g. C = 2 for a perfect inversion, or a known D "
+            "fitting it – e.g. C = 2 for a perfect inversion, or a known D "
             "while calibrating something else."
         )
         guess_layout.addWidget(self.guess_table)
@@ -20908,7 +20987,7 @@ class MainWindow(QMainWindow):
         self.shared_params_edit.setPlaceholderText("e.g. D  (comma-separated parameter names)")
         self.shared_params_edit.setToolTip(
             "Which parameters are tied across every peak. Everything else "
-            "stays free per peak -- typically you share the rate constant (D, "
+            "stays free per peak – typically you share the rate constant (D, "
             "T1, T2) and leave each peak its own amplitude, since the peaks "
             "have genuinely different intensities."
         )
@@ -20922,14 +21001,34 @@ class MainWindow(QMainWindow):
         fit_curve_button.setToolTip(
             "Step 2: fit a relaxation/diffusion model to each peak's "
             "per-slice amplitude, across every slice of the selected "
-            "pseudo-2D series -- reuses Step 1's results if already "
+            "pseudo-2D series – reuses Step 1's results if already "
             "computed, or runs it now. For a stack of separately-loaded "
             "1D spectra instead of one pseudo-2D series, use the "
             "Compare tile's own Fit Curve button/"
             "context-menu item."
         )
         fit_curve_button.clicked.connect(self._on_fit_curve_button_clicked)
-        relax_form.addRow(fit_curve_button)
+        # The run row sits outside the settings section so it stays in
+        # view when the settings are folded away; ILT is the other way
+        # to analyse a PFG series, so it lives beside Fit Curve.
+        run_widget = QWidget()
+        run_row = QHBoxLayout(run_widget)
+        run_row.setContentsMargins(0, 0, 0, 0)
+        run_row.addWidget(fit_curve_button)
+        self.dosy_ilt_button = QPushButton("DOSY Map (ILT)…")
+        self.dosy_ilt_button.setToolTip(
+            "Build a DOSY plot – chemical shift against diffusion coefficient – "
+            "from the selected PFG series, by inverse Laplace transform of each "
+            "shift's own gradient decay. The same as Analysis ▸ DOSY Map (ILT)…, "
+            "using the b-values set above."
+        )
+        self.dosy_ilt_button.clicked.connect(lambda _checked=False: self._on_dosy_clicked())
+        run_row.addWidget(self.dosy_ilt_button)
+
+        # SCORE / OUTSCORE get their own folded section below the results.
+        score_box = QWidget()
+        relax_form = QFormLayout(score_box)
+        relax_form.setContentsMargins(0, 0, 0, 0)
 
         # --- SCORE/OUTSCORE results ---------------------------------
         # Hidden until a resolution has actually been run, so they
@@ -21055,7 +21154,14 @@ class MainWindow(QMainWindow):
         self._refresh_score_export_buttons()
         self._redraw_score_components()
 
-        layout.addWidget(relax_box)
+        relax_box.setTitle("")
+        relax_box.setFlat(True)
+        settings_section = CollapsibleSection(
+            "Fit Curve settings (relaxation / diffusion)", content=relax_box)
+        self._curve_settings_section = settings_section
+        score_section = CollapsibleSection(
+            "Resolve components (SCORE / OUTSCORE)", content=score_box)
+        self._score_section = score_section
 
         # Below Fit Curve (not above it, as these originally were) --
         # explicit user feedback: these browse Fit Curve's own result,
@@ -21078,7 +21184,7 @@ class MainWindow(QMainWindow):
         self.view_relaxation_peak_spin.setEnabled(False)
         self.view_relaxation_peak_spin.setToolTip(
             "Which peak's relaxation/diffusion curve fit (from Fit "
-            "Curve) is shown in the Fit tab -- available once a curve "
+            "Curve) is shown in the Fit tab – available once a curve "
             "fit has been run."
         )
         self.view_relaxation_peak_spin.valueChanged.connect(self._on_view_relaxation_peak_changed)
@@ -21140,13 +21246,12 @@ class MainWindow(QMainWindow):
         slice_button_row.addStretch(1)
         excluded_layout.addLayout(slice_button_row)
         self.excluded_slice_group.setVisible(False)
-        layout.addWidget(self.excluded_slice_group)
 
         self.relaxation_uncertainty_checkbox = QCheckBox("Show uncertainty band")
         self.relaxation_uncertainty_checkbox.setToolTip(
             "Shade a +/-3-sigma uncertainty envelope around the fit "
             "curve (processing.relaxation.fit_curve_uncertainty, "
-            "propagated from the fit's own parameter covariance) -- "
+            "propagated from the fit's own parameter covariance) – "
             "matches the shaded-region style of the user's own PFG "
             "diffusion-fitting plots."
         )
@@ -21177,8 +21282,6 @@ class MainWindow(QMainWindow):
                                  "right-click the plot ▸ Curve Fit Plot…")
         curve_plot_hint.setWordWrap(True)
         curve_plot_hint.setStyleSheet("color: palette(mid);")
-        layout.addWidget(curve_plot_hint)
-        layout.addWidget(self.curve_fit_plot_box.keep_button)
 
         # The data behind the plot, not just the fitted parameters --
         # the report already gives those. Explicit user request: "I
@@ -21201,7 +21304,6 @@ class MainWindow(QMainWindow):
             "so the file cannot silently change unit with a combo box."
         )
         self.export_curve_fit_button.clicked.connect(self._on_export_curve_fit_clicked)
-        layout.addWidget(self.export_curve_fit_button)
 
         # The correlation matrix of the shown peak's fit (explicit user
         # request, 2026-10-06): notebook.relaxometry.plot_correlation_matrix,
@@ -21212,12 +21314,11 @@ class MainWindow(QMainWindow):
         self.curve_fit_correlation_button.setToolTip(
             "Show the correlation matrix of the shown peak's fitted parameters instead of its "
             "curve (the peak number above still chooses the peak; untick to go back).\n\n"
-            "r near ±1: the two parameters trade off -- the data fix a combination of them "
+            "r near ±1: the two parameters trade off – the data fix a combination of them "
             "rather than each one, and their separate ± understate how loosely they are "
             "pinned. Typical of multi-exponential fits; fixed parameters have no row.")
         self.curve_fit_correlation_button.toggled.connect(
             lambda _on: self._display_relaxation_peak(self.view_relaxation_peak_spin.value() - 1))
-        layout.addWidget(self.curve_fit_correlation_button)
 
         # The spectrum's kept curve fits, here where they are made (the
         # same records as Fit ▸ Kept fit models, curve fits only).
@@ -21237,9 +21338,13 @@ class MainWindow(QMainWindow):
                 self._fit_models_index(), model_id, colour))
         # Kept from the Fit plot box above, right under the plot controls.
         self.curve_fit_models_panel.keep_button.setVisible(False)
-        self.curve_fit_models_group = QGroupBox("Kept curve fits")
-        QVBoxLayout(self.curve_fit_models_group).addWidget(self.curve_fit_models_panel)
-        layout.addWidget(self.curve_fit_models_group)
+        self.curve_fit_models_group = QWidget()
+        kept_layout = QVBoxLayout(self.curve_fit_models_group)
+        kept_layout.setContentsMargins(0, 0, 0, 0)
+        kept_layout.addWidget(self.curve_fit_models_panel)
+        kept_section = CollapsibleSection(
+            "Kept curve fits", content=self.curve_fit_models_group)
+        self._kept_curve_fits_section = kept_section
 
         # --- DOSY map display --------------------------------------
         # Explicit user report: "ILT axes have tiny text and no way to
@@ -21346,7 +21451,6 @@ class MainWindow(QMainWindow):
         self.clear_dosy_variants_button.clicked.connect(self._on_clear_dosy_variants_clicked)
         variant_layout.addWidget(self.clear_dosy_variants_button)
         self.dosy_variant_group.setVisible(False)
-        layout.addWidget(self.dosy_variant_group)
 
         # Hidden until there is a map for it to act on: every control
         # in here is a no-op without one, and an always-visible panel
@@ -21354,7 +21458,6 @@ class MainWindow(QMainWindow):
         # broken rather than as not-yet-applicable.
         self.dosy_display_box.setVisible(False)
         self.fit_canvas.dosyLevelFloorChanged.connect(self._on_dosy_scroll_floor_changed)
-        layout.addWidget(self.dosy_display_box)
 
         # The DOSY summary, with the DOSY controls -- same move, same
         # reason as score_results_label.
@@ -21364,7 +21467,6 @@ class MainWindow(QMainWindow):
             QFontDatabase.SystemFont.FixedFont))
         self.dosy_results_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.dosy_results_label)
 
 
         # The across-peaks summary, above the per-peak report it
@@ -21376,11 +21478,9 @@ class MainWindow(QMainWindow):
             QFontDatabase.SystemFont.FixedFont))
         self.curve_fit_summary_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.curve_fit_summary_label)
         self.curve_fit_advice_box = AdviceBox(on_action=self._apply_curve_advice,
                                               title="What the curve fit tells you, and what "
                                                     "to try next")
-        layout.addWidget(self.curve_fit_advice_box)
 
         self.relaxation_fit_params_label = QLabel("")
         self.relaxation_fit_params_label.setWordWrap(True)
@@ -21391,7 +21491,26 @@ class MainWindow(QMainWindow):
             QFontDatabase.SystemFont.FixedFont))
         self.relaxation_fit_params_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        # One top-to-bottom workflow, so nothing needs scrolling back up:
+        # set up, run, read the result, export and keep it, then the
+        # fits kept so far; slice selection, SCORE and the DOSY options
+        # follow because they are used less often.
+        layout.addWidget(settings_section)
+        layout.addWidget(run_widget)
+        layout.addWidget(self.curve_fit_summary_label)
+        layout.addWidget(self.curve_fit_advice_box)
         layout.addWidget(self.relaxation_fit_params_label)
+        layout.addWidget(self.curve_fit_plot_box.keep_button)
+        layout.addWidget(self.export_curve_fit_button)
+        layout.addWidget(self.curve_fit_correlation_button)
+        layout.addWidget(curve_plot_hint)
+        layout.addWidget(kept_section)
+        layout.addWidget(self.excluded_slice_group)
+        layout.addWidget(self.dosy_results_label)
+        layout.addWidget(self.dosy_variant_group)
+        layout.addWidget(self.dosy_display_box)
+        layout.addWidget(score_section)
 
         layout.addStretch(1)
         return tab
@@ -21990,7 +22109,7 @@ class MainWindow(QMainWindow):
         self.vocs_pulse_edit.setToolTip(
             "The acquisition parameter (from this spectrum's recorded "
             "acqus table, e.g. Bruker's P1) giving the 90-degree pulse "
-            "length in microseconds -- used to compute the RF "
+            "length in microseconds – used to compute the RF "
             "nutation frequency the VOCS correction is centred on.\n\n"
             "For a column extracted from a heteronuclear 2D (the F1 "
             "trace), name the pulse on the F1 nucleus's channel, which "
@@ -22046,7 +22165,7 @@ class MainWindow(QMainWindow):
         selection_sum_button = QPushButton("VOCS Sum (selected spectra)")
         selection_sum_button.setToolTip(
             "Correct and combine whatever is selected in the spectrum list, "
-            "in one step -- Ctrl/Cmd-click or Shift-click to pick a series. "
+            "in one step – Ctrl/Cmd-click or Shift-click to pick a series. "
             "No need to apply VOCS per spectrum first."
         )
         selection_sum_button.clicked.connect(self._on_vocs_sum_selection_action)
@@ -22090,7 +22209,7 @@ class MainWindow(QMainWindow):
             "into a real position axis (right-click -> Axis Units -> "
             "mm). For T2-by-integration across an imaging series, "
             "switch to mm here, then drag Integration Regions on the "
-            "Integrate tile as usual -- no separate workflow."
+            "Integrate tile as usual – no separate workflow."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -22103,7 +22222,7 @@ class MainWindow(QMainWindow):
         self.imaging_max_gradient_spin.setDecimals(2)
         self.imaging_max_gradient_spin.setSuffix(" G/cm")
         self.imaging_max_gradient_spin.setToolTip(
-            "Not recorded in the acquired data -- enter the actual "
+            "Not recorded in the acquired data – enter the actual "
             "gradient strength used for this experiment. 0 disables "
             "the mm axis option."
         )
@@ -22129,7 +22248,7 @@ class MainWindow(QMainWindow):
         self.imaging_gradient_percent_spin.setSuffix(" %")
         self.imaging_gradient_percent_spin.setToolTip(
             "Gradient actually used, as a percentage of the maximum "
-            "above -- Bruker's own GPZ1 from acqus, which is read "
+            "above – Bruker's own GPZ1 from acqus, which is read "
             "automatically. Override it if this experiment's pulse "
             "programme puts its imaging gradient on a different "
             "gradient channel."
@@ -22140,7 +22259,7 @@ class MainWindow(QMainWindow):
         save_probe_gradient_button = QPushButton("Save as default for this probe")
         save_probe_gradient_button.setToolTip(
             "Remember this max gradient value for this spectrum's own recorded probe, "
-            "app-wide -- any other spectrum (any experiment) recording the same probe "
+            "app-wide – any other spectrum (any experiment) recording the same probe "
             "and with no max gradient of its own already set will use it automatically."
         )
         save_probe_gradient_button.clicked.connect(self._on_save_probe_gradient_default_clicked)
@@ -22164,7 +22283,7 @@ class MainWindow(QMainWindow):
         self._narrow_combo(combo)
         combo.setToolTip(
             "Which gradient coil this experiment used. A probe's saved maximum "
-            "gradient is kept per axis -- the three coils of a triple-axis probe "
+            "gradient is kept per axis – the three coils of a triple-axis probe "
             "are rarely the same strength, and one number for all three quietly "
             "scales every D (or every mm axis) measured on the other two."
         )
@@ -22272,7 +22391,7 @@ class MainWindow(QMainWindow):
             )
         elif max_gradient:
             self.imaging_gradient_status_label.setText(
-                "Selected spectrum's nucleus isn't recognised -- can't compute gamma for the mm axis."
+                "Selected spectrum's nucleus isn't recognised – can't compute gamma for the mm axis."
             )
         else:
             self.imaging_gradient_status_label.setText("Set a max gradient to enable the mm axis.")
@@ -22385,12 +22504,31 @@ class MainWindow(QMainWindow):
         region_box = QGroupBox("Integration Regions")
         region_layout = QVBoxLayout(region_box)
 
+        label_row = QHBoxLayout()
+        self.integral_labels_check = QCheckBox("Label integrals under the peaks")
+        self.integral_labels_check.setToolTip(
+            "Write each region's integral under its peak on the 1D spectrum, scaled so the "
+            "smallest is 1. The labels stay on the plot (and in saved figures) after you leave "
+            "this tab; untick to remove them.")
+        self.integral_labels_check.toggled.connect(lambda _on: self._sync_integral_labels())
+        label_row.addWidget(self.integral_labels_check)
+        label_row.addWidget(QLabel("Decimals"))
+        self.integral_labels_decimals_spin = TypedSpinBox()
+        self.integral_labels_decimals_spin.setRange(0, 4)
+        self.integral_labels_decimals_spin.setValue(2)
+        self.integral_labels_decimals_spin.setToolTip("Digits after the decimal point in each label.")
+        self.integral_labels_decimals_spin.valueChanged.connect(
+            lambda _v: self._sync_integral_labels())
+        label_row.addWidget(self.integral_labels_decimals_spin)
+        label_row.addStretch(1)
+        region_layout.addLayout(label_row)
+
         self.region_table = QTableWidget(0, len(self._REGION_TABLE_COLUMNS))
         self.region_table.setHorizontalHeaderLabels(self._REGION_TABLE_COLUMNS)
         self.region_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.region_table.setMaximumHeight(120)  # same reasoning as peak_table's own cap
         self.region_table.setToolTip(
-            "x-axis regions to integrate -- a peak-fitting-free way to "
+            "x-axis regions to integrate – a peak-fitting-free way to "
             "get a per-slice value for Fit Curve, and (when any are "
             "defined) also the window the peak fit above is bounded to."
         )
@@ -22421,7 +22559,7 @@ class MainWindow(QMainWindow):
         self.select_region_button.setCheckable(True)
         self.select_region_button.setToolTip(
             "While on, drag across the Spectrum plot: each dragged range is added "
-            "to the table and every region is integrated at once -- the selected "
+            "to the table and every region is integrated at once – the selected "
             "1D spectrum, or every slice of a pseudo-2D series. Typing, removing or "
             "finding regions re-integrates too.\n\n"
             "Also Analysis ▸ Select and Integrate Regions from Plot (Ctrl+I; "
@@ -22437,7 +22575,7 @@ class MainWindow(QMainWindow):
         self.auto_regions_button = QPushButton("Find Regions Automatically")
         self.auto_regions_button.setToolTip(
             "Replace the table with regions wherever the signal rises above the threshold "
-            "-- in any slice of a pseudo-2D series -- each widened to where its peak meets "
+            "– in any slice of a pseudo-2D series – each widened to where its peak meets "
             "the noise, so the region holds the wings and not just the top.\n\n"
             "Two peaks whose wings meet above the noise come out as one region, and a "
             "broad feature below the threshold is left out: check the shaded regions. "
@@ -22808,6 +22946,28 @@ class MainWindow(QMainWindow):
         unaffected and stay correct for fitting/integration regardless."""
         self.canvas.set_regions(
             self._read_region_defs() if self._regions_tab_active() else [])
+        self._sync_integral_labels()
+
+    def _sync_integral_labels(self) -> None:
+        """Put the integral labels (Integrate ▸ Label integrals under the
+        peaks) on the Spectrum plot, or take them off. They follow the region
+        table, not the tab, so they stay while another tab is open."""
+        check = getattr(self, "integral_labels_check", None)
+        if check is None:
+            return
+        items = None
+        index = self._selected_index()
+        if check.isChecked() and index is not None:
+            spectrum = self.session.spectra[index]
+            regions = self._read_region_defs()
+            if spectrum.ndim == 1 and regions:
+                try:
+                    items = integral_labels_module.integral_labels(
+                        spectrum, regions, decimals=self.integral_labels_decimals_spin.value(),
+                        method=self.integration_method_combo.currentData() or "trapezoid")
+                except Exception:  # noqa: BLE001 -- a region too narrow to integrate has no label
+                    items = None
+        self.canvas.set_integral_labels(items)
 
     def _regions_tab_active(self) -> bool:
         """Integration regions are shaded on the Integrate tile, where they
@@ -22883,7 +23043,7 @@ class MainWindow(QMainWindow):
 
         if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
             problem("Not supported",
-                    "Region integration isn't available for a conventional 2D spectrum yet -- "
+                    "Region integration isn't available for a conventional 2D spectrum yet – "
                     "select a 1D spectrum or a pseudo-2D series.")
             return
         regions = self._read_region_defs()
@@ -22917,17 +23077,47 @@ class MainWindow(QMainWindow):
 
     def _add_peak_row(self, shift: float = 0.0, fwhm: float = 1.0, eta: float = 0.5,
                        fixed: bool = False, bounds: dict | None = None,
-                       per_param_fixed: dict | None = None) -> None:
+                       per_param_fixed: dict | None = None, multiplet: str = "",
+                       couplings: str = "") -> None:
         row = self.peak_table.rowCount()
+        self.peak_table.blockSignals(True)
         self.peak_table.insertRow(row)
         for col, value in enumerate((shift, fwhm, eta)):
             self.peak_table.setItem(row, col, QTableWidgetItem(f"{value:.4g}"))
         self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
+        self.peak_table.setItem(row, 4, QTableWidgetItem(multiplet))
+        self.peak_table.setItem(row, 5, QTableWidgetItem(couplings))
+        self.peak_table.blockSignals(False)
         if bounds:
             self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, bounds)
         if per_param_fixed:
             self.peak_table.item(row, 0).setData(self._PEAK_FIXED_ITEM_ROLE, per_param_fixed)
         self._refresh_peak_markers()
+
+    def _on_peak_table_item_changed(self, item) -> None:
+        """Typing a multiplet (dt, q ...) fills in a starting J for each
+        splitting when the J cell is empty, so the row is ready to fit."""
+        if item is None or item.column() != 4:
+            return
+        row = item.row()
+        j_item = self.peak_table.item(row, 5)
+        if j_item is not None and j_item.text().strip():
+            return
+        try:
+            counts = peak_multiplets.parse_multiplet(item.text())
+        except ValueError:
+            return
+        if not counts:
+            return
+        self.peak_table.blockSignals(True)
+        try:
+            text = ", ".join(f"{peak_multiplets.DEFAULT_J_HZ:g}" for _ in counts)
+            if j_item is None:
+                self.peak_table.setItem(row, 5, QTableWidgetItem(text))
+            else:
+                j_item.setText(text)
+        finally:
+            self.peak_table.blockSignals(False)
 
     @staticmethod
     def _make_fixed_checkbox_item(checked: bool) -> QTableWidgetItem:
@@ -22983,7 +23173,7 @@ class MainWindow(QMainWindow):
         existing_bounds = self.peak_table.item(row, 0).data(Qt.ItemDataRole.UserRole) or {}
         existing_fixed = self.peak_table.item(row, 0).data(self._PEAK_FIXED_ITEM_ROLE) or {}
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Bounds / fixed parameters -- peak {row + 1}")
+        dialog.setWindowTitle(f"Bounds / fixed parameters – peak {row + 1}")
         form = QFormLayout(dialog)
         edits = {}
         fixed_checks = {}
@@ -23136,7 +23326,7 @@ class MainWindow(QMainWindow):
         if "error" in result:
             self.statusBar().showMessage(f"Peak width: {result['error']}", 8000)
             return
-        message = f"Peak width -- {result['summary']}"
+        message = f"Peak width – {result['summary']}"
         if result.get("estimate"):
             message += ("  WARNING: an estimate, because of overlap with neighbouring peak(s); "
                         "fit the peaks for a reliable width.")
@@ -23235,7 +23425,7 @@ class MainWindow(QMainWindow):
         if not peaks:
             QMessageBox.information(
                 self, "No peaks found",
-                "No peaks found automatically -- try adding peaks manually, "
+                "No peaks found automatically – try adding peaks manually, "
                 "or check the spectrum has real signal above the noise floor.",
             )
             return
@@ -23343,6 +23533,26 @@ class MainWindow(QMainWindow):
     def _drift_spectra(self) -> list[dict]:
         return [{"label": self.session.label(i), "spectrum": s, "index": i}
                 for i, s in enumerate(self.session.spectra)]
+
+    def _drift_draw(self, draw) -> None:
+        """The peak-position-against-slice plot, on the Fit view."""
+        self._dnp_show_canvas(self.fit_canvas)
+        self.fit_canvas.show_external_plot(draw, kind="curve")
+
+    def _drift_arm(self, on: bool) -> None:
+        self.fit_canvas.set_pick_mode(bool(on))
+        if on:
+            self.statusBar().showMessage("Click the drift plot to add a point the spline passes through.", 8000)
+
+    def _drift_spectrum_changed(self, index) -> None:
+        """A drift curve was applied or removed in place: redraw that spectrum
+        (in the background, the drift plot stays in view) and save its state."""
+        if index is None or not (0 <= index < len(self.session)):
+            return
+        spectrum = self.session.spectra[index]
+        self.canvas.show_spectrum(spectrum)
+        self._capture_phase_reference()
+        self._schedule_sidecar_save(index)
 
     def _drift_log(self, index: int, text: str) -> None:
         history = self._ensure_history(index)
@@ -23709,6 +23919,16 @@ class MainWindow(QMainWindow):
             except (AttributeError, ValueError) as exc:
                 raise ValueError(f"Peak row {row + 1}: shift/FWHM/eta must all be numbers.") from exc
             peak_def = {"type": "pseudo_voigt", "shift": shift, "fwhm": fwhm, "eta": eta}
+            multiplet_item = self.peak_table.item(row, 4)
+            j_item = self.peak_table.item(row, 5)
+            try:
+                counts = peak_multiplets.parse_multiplet(multiplet_item.text() if multiplet_item else "")
+                if counts:
+                    peak_def["couplings"] = counts
+                    peak_def["J_init"] = peak_multiplets.parse_couplings(
+                        j_item.text() if j_item else "", len(counts))
+            except ValueError as exc:
+                raise ValueError(f"Peak row {row + 1}: {exc}") from exc
             # Default position bounds used to be unconstrained
             # (-inf, inf) -- a fit could slide a peak onto a neighbour
             # or drift across the whole window. Tie it to the peak's
@@ -23729,6 +23949,8 @@ class MainWindow(QMainWindow):
             fixed_item = self.peak_table.item(row, 3)
             if fixed_item is not None and fixed_item.checkState() == Qt.CheckState.Checked:
                 fixed = {"shift": True, "fwhm": True, "A": True, "eta": True}
+                for k in range(len(peak_def.get("couplings", ()))):
+                    fixed[f"J{k + 1}"] = True
             if fixed:
                 peak_def["fixed"] = fixed
             custom_bounds = self.peak_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
@@ -24367,6 +24589,8 @@ class MainWindow(QMainWindow):
         self.delay_start_spin.setVisible(index == 2)
         self.delay_step_row_label.setVisible(index == 2)
         self.delay_step_spin.setVisible(index == 2)
+        self.delay_multiplier_row_label.setVisible(index == 2)
+        self.delay_multiplier_spin.setVisible(index == 2)
         self.list_file_row_label.setVisible(index == self._LIST_FILE_SOURCE)
         self.list_file_combo.setVisible(index == self._LIST_FILE_SOURCE)
         self.list_factor_row_label.setVisible(index == self._LIST_FILE_SOURCE)
@@ -24737,7 +24961,8 @@ class MainWindow(QMainWindow):
             # One value per slice -- the count is already fixed by the
             # data, so there's no separate End to enter (and no risk
             # of an off-by-one/roundoff mismatch against n_slices).
-            return start + step * np.arange(n_slices, dtype=float)
+            return processing_relaxation.start_step_values(
+                start, step, self.delay_multiplier_spin.value(), n_slices)
 
         if source == self._LIST_FILE_SOURCE:
             # Any vendor, any filename: the file is chosen in the
@@ -24748,7 +24973,7 @@ class MainWindow(QMainWindow):
             list_path = self.selected_list_file() or self._first_list_file_for(spectrum)
             if not list_path:
                 raise ValueError(
-                    "No list file found with this experiment, and none chosen -- pick "
+                    "No list file found with this experiment, and none chosen – pick "
                     "one with Browse…. It should be a one-column text file of numbers, "
                     "one per slice (a Bruker vdlist/vclist/difflist, an X-Pulse "
                     "parameters/…_valueslist.txt, or your own)."
@@ -24781,7 +25006,7 @@ class MainWindow(QMainWindow):
             gradient_relative = spectrum.metadata.raw.get("gradient_relative")
             if gradient_relative is None:
                 raise ValueError(
-                    "No relative gradient values found -- this source needs an "
+                    "No relative gradient values found – this source needs an "
                     "X-Pulse arrayed experiment loaded with its own "
                     "parameters/G1_valueslist.txt (e.g. a PFG series)."
                 )
@@ -24912,7 +25137,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "Saved",
             f"Saved {value:g} G/cm as the default max gradient on the {axis} axis for probe "
-            f"'{probe}' -- applied automatically to any spectrum recording this same probe and "
+            f"'{probe}' – applied automatically to any spectrum recording this same probe and "
             f"axis that doesn't already have its own value set.",
         )
 
@@ -25150,7 +25375,7 @@ class MainWindow(QMainWindow):
         if relative.size != n_slices:
             raise ValueError(
                 f"This experiment records {relative.size} gradient step(s) but the series has "
-                f"{n_slices} slice(s) -- enter the gradient list manually instead."
+                f"{n_slices} slice(s) – enter the gradient list manually instead."
             )
         nucleus = spectrum.metadata.nucleus or "1H"
         return processing_diffusion.b_values_from_relative(
@@ -25279,7 +25504,7 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(
             self, "Fit landed near a region edge",
             f"The fitted shift ended up within {self._FIT_REGION_EDGE_WARNING_FRACTION:.0%} of its own "
-            f"region's edge for {detail} -- the true peak may extend beyond that region. Consider "
+            f"region's edge for {detail} – the true peak may extend beyond that region. Consider "
             f"widening the region in the Integration Regions table.",
         )
 
@@ -25354,7 +25579,7 @@ class MainWindow(QMainWindow):
         found = getattr(self, "_auto_regions_note", "")
         self.integration_results_label.setText(
             f"Integrated {len(results)} slice(s) across {n_regions} region(s) by the "
-            f"{rule.lower()} rule -- ready for Fit Curve (Value source: Integrated region)."
+            f"{rule.lower()} rule – ready for Fit Curve (Value source: Integrated region)."
             + "".join("\n" + line for line in self._integration_summary_lines(results))
             + (f"\nRegions found automatically: {found}" if found else "")
         )
@@ -25431,7 +25656,7 @@ class MainWindow(QMainWindow):
         if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
             QMessageBox.information(
                 self, "Not supported",
-                "Spectral fitting isn't available for a conventional 2D spectrum yet -- "
+                "Spectral fitting isn't available for a conventional 2D spectrum yet – "
                 "select a 1D spectrum or a pseudo-2D series.",
             )
             return
@@ -25914,12 +26139,12 @@ class MainWindow(QMainWindow):
 
     #: Tooltip addition shared by every "Powder averaging" combo.
     _POWDER_SCHEME_TIP = (
-        "ZCW: equal-weight points spread evenly over the sphere (Fibonacci sizes) -- the "
+        "ZCW: equal-weight points spread evenly over the sphere (Fibonacci sizes) – the "
         "all-round default, best for static powder lineshapes.\n\n"
         "Lebedev: Lebedev–Laikov quadrature (6 to 5810 points, unequal weights), exact for "
         "smooth functions of orientation up to a given rank. The most efficient choice for MAS "
         "sideband patterns: ~300 points match a converged ZCW average where ZCW itself needs "
-        "~1500. Not for static lineshapes, which are histograms of frequencies -- there it "
+        "~1500. Not for static lineshapes, which are histograms of frequencies – there it "
         "ripples more than ZCW at the same count. Orientations is rounded up to the next "
         "Lebedev size (6, 14, 26, 38, 50, 74, 86, 110, 146, 170, 194, 230, 266, 302, 350, 434, "
         "590, 770, 974, 1202, …, 5810).\n\n"
@@ -27014,7 +27239,7 @@ class MainWindow(QMainWindow):
             if not np.any(z[row, :]):
                 QMessageBox.information(
                     self, "Nothing there",
-                    f"The map is empty at D = {grid[row]:.3g} m²/s -- no column was inverted "
+                    f"The map is empty at D = {grid[row]:.3g} m²/s – no column was inverted "
                     f"to a component at that rate. Try a D where the map actually has signal.",
                 )
                 return
@@ -27040,7 +27265,7 @@ class MainWindow(QMainWindow):
             if not np.any(data):
                 QMessageBox.information(
                     self, "Nothing there",
-                    f"The map is empty at D = {grid[row]:.3g} m²/s -- no column was inverted "
+                    f"The map is empty at D = {grid[row]:.3g} m²/s – no column was inverted "
                     f"to a component at that rate. Try a D where the map actually has signal.",
                 )
                 return
@@ -27053,7 +27278,7 @@ class MainWindow(QMainWindow):
             if not np.any(data):
                 QMessageBox.information(
                     self, "Nothing there",
-                    f"The map is empty at {ppm[column]:.4g} ppm -- that column was below the "
+                    f"The map is empty at {ppm[column]:.4g} ppm – that column was below the "
                     f"intensity threshold, so no diffusion profile was computed for it.",
                 )
                 return
@@ -27368,7 +27593,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     _MODEL_SERIES_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar",
-                            "combined": "CSA, Quad & J-coupling"}
+                            "combined": "Solid-state NMR"}
 
     def _with_model_series_box(self, panel, kind: str) -> QWidget:
         holder = QWidget()
@@ -28038,7 +28263,7 @@ class MainWindow(QMainWindow):
         keep = [i for i in range(len(original["t"])) if i not in excluded]
         if len(keep) < 2:
             QMessageBox.information(
-                self, "Not enough points", "At least 2 points are needed to fit -- re-include some first.",
+                self, "Not enough points", "At least 2 points are needed to fit – re-include some first.",
             )
             return False
         t = original["t"][keep]
@@ -28190,6 +28415,10 @@ class MainWindow(QMainWindow):
                 cells.append(f"{float(integrals_norm[row]):.1f}")
             else:
                 cells.append("—")
+            j_names = [name for name in peak["names"] if name.startswith("J")]
+            cells.append(" / ".join(self._format_value_error(
+                float(values[name]), float(errors[name]), bool(fixed[name])) for name in j_names)
+                if j_names else "—")
             for column, text in enumerate(cells):
                 # The uncertainty on its own line: "value ± error" on one
                 # line does not fit six columns in a side panel.
@@ -28391,6 +28620,12 @@ class MainWindow(QMainWindow):
             self.peak_table.setItem(row, 1, QTableWidgetItem(f"{params['fwhm']:.4g}"))
             if "eta" in params:
                 self.peak_table.setItem(row, 2, QTableWidgetItem(f"{params['eta']:.4g}"))
+            fitted_js = [params[name] for name in peak["names"] if name.startswith("J")]
+            if fitted_js:
+                self.peak_table.blockSignals(True)
+                self.peak_table.setItem(row, 5, QTableWidgetItem(
+                    ", ".join(f"{value:.4g}" for value in fitted_js)))
+                self.peak_table.blockSignals(False)
 
     @staticmethod
     def _slice_label_from_fit_result(result: dict) -> str:
@@ -28455,6 +28690,8 @@ class MainWindow(QMainWindow):
                           for col in range(3)]  # Shift, FWHM, Eta -- plain text columns
             fixed_item = self.peak_table.item(row, 3)
             row_values.append("1" if fixed_item and fixed_item.checkState() == Qt.CheckState.Checked else "0")
+            row_values.extend(self.peak_table.item(row, col).text() if self.peak_table.item(row, col) else ""
+                              for col in (4, 5))      # Multiplet, J (Hz)
             peaks.append(row_values)
             shift_item = self.peak_table.item(row, 0)
             peak_bounds.append((shift_item.data(Qt.ItemDataRole.UserRole) if shift_item else None) or {})
@@ -28486,6 +28723,7 @@ class MainWindow(QMainWindow):
             "manual_text": self.manual_delays_edit.text(),
             "start": self.delay_start_spin.value(),
             "step": self.delay_step_spin.value(),
+            "step_multiplier": self.delay_multiplier_spin.value(),
             # "vclist_factor" keeps its pre-generalisation spelling: it
             # is a persisted sidecar key, and renaming it would silently
             # reset the factor on every state saved before this. It is
@@ -28624,6 +28862,7 @@ class MainWindow(QMainWindow):
             self.manual_delays_edit.clear()
             self.delay_start_spin.setValue(0.0)
             self.delay_step_spin.setValue(0.1)
+            self.delay_multiplier_spin.setValue(1.0)
             self.list_factor_edit.clear()
             self.slice_limit_spin.setValue(0)
             self._set_delay_scale(self._DEFAULT_DELAY_SCALE)
@@ -28653,6 +28892,8 @@ class MainWindow(QMainWindow):
                 for col, value in enumerate((shift, fwhm, eta)):
                     self.peak_table.setItem(row, col, QTableWidgetItem(value))
                 self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
+                self.peak_table.setItem(row, 4, QTableWidgetItem(peak_row[4] if len(peak_row) > 4 else ""))
+                self.peak_table.setItem(row, 5, QTableWidgetItem(peak_row[5] if len(peak_row) > 5 else ""))
                 if i < len(peak_bounds) and peak_bounds[i]:
                     self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, peak_bounds[i])
                 if i < len(peak_fixed_params) and peak_fixed_params[i]:
@@ -28672,6 +28913,7 @@ class MainWindow(QMainWindow):
             self.manual_delays_edit.setText(state["manual_text"])
             self.delay_start_spin.setValue(state["start"])
             self.delay_step_spin.setValue(state["step"])
+            self.delay_multiplier_spin.setValue(state.get("step_multiplier", 1.0))
             # A state saved before the factor could be an expression
             # carries it as a float under the old key; a state saved
             # since carries the text. Neither is guessed at.
@@ -28847,6 +29089,8 @@ class MainWindow(QMainWindow):
         defaults -- ``row`` isn't known in that case, hence optional
         (only needed for the Compare-stack check below, itself only
         relevant right after a real selection change)."""
+        # Insets belong to the spectrum they were drawn on.
+        self.canvas.set_inset_context(id(spectrum))
         # Set only across _load's select-then-apply-sidecar window, where
         # a second draw is guaranteed to follow (see _load). Never a way
         # to leave the canvas stale: nothing else sets it, and _load
@@ -29422,6 +29666,7 @@ class MainWindow(QMainWindow):
         self.slice_next_button.setVisible(is_pseudo2d)
         self.apply_all_slices_checkbox.setVisible(is_pseudo2d)
         self.autophase_each_slice_checkbox.setVisible(is_pseudo2d)
+        self.autophase_keep_sign_checkbox.setVisible(is_pseudo2d)
         self.dim_row_label.setVisible(is_2d)
         self.dim_combo.setVisible(is_2d)
 
@@ -29594,7 +29839,7 @@ class _DosySettingsDialog(QDialog):
             "automatically.\n\n"
             "Lower gives sharper peaks and eventually splits one population into "
             "spurious spikes; higher merges genuinely distinct populations into "
-            "one broad hump. There is no correct value -- treat peak positions as "
+            "one broad hump. There is no correct value – treat peak positions as "
             "the result and peak widths as an artefact of this number."
         )
         form.addRow("α (regularisation):", self.alpha_spin)
@@ -29609,7 +29854,7 @@ class _DosySettingsDialog(QDialog):
         self.d_min_spin.setSuffix(" m²/s")
         self.d_min_spin.setToolTip(
             "Bottom of the diffusion axis, as a power of ten. A grid that clips "
-            "the true D does not report nothing -- it piles the population up on "
+            "the true D does not report nothing – it piles the population up on "
             "the end point, so keep this comfortably wide."
         )
         form.addRow("D from:", self.d_min_spin)

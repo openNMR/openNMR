@@ -1,6 +1,6 @@
 """Round of 2026-10-08 (explicit user requests):
 
-1. the CSA, Quad & J-coupling fitted values as a table (row per site, column
+1. the Solid-state NMR fitted values as a table (row per site, column
    per parameter), not a list;
 2. "Put back in its panel" -> "Re-plot and show “What's next?”";
 3. "Save the fitted values" (values and errors as readable JSON) beside
@@ -74,7 +74,7 @@ def _combined_result():
 
 
 def test_a_fit_result_gives_a_site_by_parameter_table_at_full_precision(tmp_path):
-    record = fv.fitted_values_record(fit="CSA, Quad & J-coupling", spectrum="27Al",
+    record = fv.fitted_values_record(fit="Solid-state NMR", spectrum="27Al",
                                      result=_combined_result())
     v = record["values"]
     assert v["Al1"]["δiso (ppm)"] == {"value": 12.0123456, "error": 0.0312, "fixed": False}
@@ -119,7 +119,7 @@ def test_notebook_exports_the_module():
 
 def test_combined_results_are_a_table_with_a_row_per_site(window):
     panel = window.combined_fit_panel
-    panel.result = {**_combined_result(), "log": "CSA, Quad & J-coupling fit: test", "warnings": [],
+    panel.result = {**_combined_result(), "log": "Solid-state NMR fit: test", "warnings": [],
                     "quality": {"r2": 0.99, "rmse": 0.1, "reduced_chi2": 1.0}, "advice": []}
     panel._report()
     t = panel.results_table

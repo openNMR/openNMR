@@ -941,12 +941,12 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
         if captured < 0.99:
             where = "spectrum" if fit_regions is None else "fit window"
             warnings.append(f"{label}: only {100 * captured:.1f} % of the distribution falls "
-                            f"inside the {where} -- its large-C_Q tail runs off it, so the "
+                            f"inside the {where} – its large-C_Q tail runs off it, so the "
                             f"wings are not fitted; widen the {where} or check σ.")
         for i, name in ((sigma_idx[s], "σ"), (diso_idx[s], "δiso"), (d_idx[s], "d")):
             if is_free[i] and (np.isclose(popt[i] / (unit[i]), lower[i], rtol=1e-3, atol=1e-9)
                                or np.isclose(popt[i] / unit[i], upper[i], rtol=1e-3, atol=1e-9)):
-                warnings.append(f"{label}: {name} ended on a bound -- not a free minimum.")
+                warnings.append(f"{label}: {name} ended on a bound – not a free minimum.")
         if extended[s] and is_free[cq0_idx[s]]:
             # "No mean EFG needed" is two different outcomes:
             # * C_Q0 below one C_Q cell of the library -- zero, at the
@@ -966,17 +966,17 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
             var = pcov[i_s, i_s] * pcov[i_q, i_q]
             corr = float(pcov[i_s, i_q] / np.sqrt(var)) if var > 0 else 0.0
             if cq0 <= max(1e-3 * max(sigma, 1e-9), cell):
-                warnings.append(f"{label}: C_Q0 went to 0 -- the data need no mean EFG, and "
+                warnings.append(f"{label}: C_Q0 went to 0 – the data need no mean EFG, and "
                                 "plain Czjzek (fewer parameters) describes them as well.")
             elif cq0 < sigma and abs(corr) > 0.95:
                 warnings.append(f"{label}: C_Q0 ({cq0:.3g} MHz) is below σ ({sigma:.3g} MHz) "
-                                f"and traded against it (correlation {corr:+.2f}) -- the data "
+                                f"and traded against it (correlation {corr:+.2f}) – the data "
                                 "need no mean EFG that a wider plain Czjzek does not give "
                                 "as well; fit plain Czjzek and compare.")
             elif np.isclose(cq0, upper[cq0_idx[s]], rtol=1e-3):
-                warnings.append(f"{label}: C_Q0 ended on its upper bound -- not a free minimum.")
+                warnings.append(f"{label}: C_Q0 ended on its upper bound – not a free minimum.")
             if sigma < 0.1 * cq0:
-                warnings.append(f"{label}: σ is under a tenth of C_Q0 -- the site is nearly "
+                warnings.append(f"{label}: σ is under a tenth of C_Q0 – the site is nearly "
                                 "ordered; a single (C_Q, η_Q) site with a C_Q spread may be the "
                                 "simpler description.")
         lo_q = czjzek_cq_quantile(0.01, sigma, d, cq0, eta0) if extended[s] else 0.0

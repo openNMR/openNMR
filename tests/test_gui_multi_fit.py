@@ -152,7 +152,7 @@ def test_a_series_is_fitted_and_its_trend_shown(qapp, _dialogs):
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
     panel.show_combo.setCurrentIndex(0)
     panel.show_selected()
-    assert "CSA, Quad & J-coupling fit" in window.fit_canvas.ax.get_title()
+    assert "Solid-state NMR fit" in window.fit_canvas.ax.get_title()
     assert "experiment,x_value" in panel.csv_text().splitlines()[0]
     assert "MULTI-SPECTRUM FIT REPORT" in panel.text_report()
 

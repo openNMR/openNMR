@@ -176,7 +176,7 @@ class ManualBaselineBox(QWidget):
         self.regions_edit.setPlaceholderText("e.g. −50 – −20; 180 – 220")
         self.regions_edit.setToolTip(
             "Ranges that contain only baseline, no signal. The model is fitted "
-            "to the points inside them (no automatic point rejection -- these "
+            "to the points inside them (no automatic point rejection – these "
             "regions are your statement of where the baseline is).\n\n"
             "Separate ranges with “;”. Or use “Pick on plot” and drag across "
             "the Processing preview. With no regions, the first and last 5 % of "
@@ -205,7 +205,7 @@ class ManualBaselineBox(QWidget):
         self.step_combo.setCurrentIndex(1)
         self.step_combo.setToolTip(
             "How far one ▲/▼ click (or Up/Down key, or wheel notch) moves a "
-            "coefficient: a fraction of a scale taken from the spectrum -- its "
+            "coefficient: a fraction of a scale taken from the spectrum – its "
             "intensity range for an offset or amplitude, that range over the "
             "ppm width (to the power) for a slope or curvature, π for a phase. "
             "Hold Shift for ten steps at once.")
@@ -283,7 +283,7 @@ class ManualBaselineBox(QWidget):
         self.refit_check = QCheckBox("Refit on every trace (each slice, after re-phasing)")
         self.refit_check.setToolTip(
             "On: the model is fitted afresh to the regions whenever the baseline is "
-            "applied -- every slice of a series gets its own coefficients, and a "
+            "applied – every slice of a series gets its own coefficients, and a "
             "re-phased spectrum is refitted. Off: exactly the coefficients in the "
             "boxes are subtracted, everywhere. Editing a coefficient by hand turns "
             "this off.")

@@ -178,7 +178,7 @@ def predict_environments(cif_filename, atom_of_interest, shell_bins, shift_dict,
     if shift_table.empty:
         raise ValueError(
             f"No sites containing '{atom_of_interest}' were found (or none "
-            f"had neighbors assigned to a shell) -- check atom_of_interest, "
+            f"had neighbors assigned to a shell) – check atom_of_interest, "
             f"shell_bins and ignore_species."
         )
 
@@ -233,7 +233,7 @@ def default_tolerance(shift_dict: Dict[str, Dict[str, float]]) -> float:
     if not nonzero:
         raise ValueError(
             "shift_dict contains no non-zero pathway contributions, so a "
-            "default tolerance can't be inferred -- pass `tolerance` explicitly."
+            "default tolerance can't be inferred – pass `tolerance` explicitly."
         )
     return min(nonzero)
 
@@ -561,7 +561,7 @@ def print_environment_report(env_df: pd.DataFrame, dropped: Optional[pd.DataFram
         for _, r in dropped.iterrows():
             snr_txt = f", S/N={r['snr']:.2f}" if "snr" in r and pd.notna(r.get("snr")) else ""
             print(f"    {r['group_shift']:8.3f} ppm  ({r['n_members']} env., "
-                  f"p={r['group_p']:.4g}{snr_txt})  -- {r['reason']}")
+                  f"p={r['group_p']:.4g}{snr_txt})  – {r['reason']}")
     print("=" * 70 + "\n")
 
 
@@ -989,7 +989,7 @@ def fit_predicted_spectrum(
     )
     if kept.empty:
         raise ValueError(
-            "No predicted environments survived region/S:N filtering -- "
+            "No predicted environments survived region/S:N filtering – "
             "nothing to fit. Inspect `dropped` (call select_groups "
             "yourself) or loosen fit_regions/snr_threshold."
         )
@@ -1312,7 +1312,7 @@ def merge_groups_to_picks(
         idxs = pick_members[k]
         if not idxs:
             print(f"merge_groups_to_picks: pick at {pick:.3f} ppm received no "
-                  f"maximal-fit peaks -- skipped.")
+                  f"maximal-fit peaks – skipped.")
             continue
         sub = kept.loc[idxs]
         agg = _aggregate_members(sub)
@@ -1326,7 +1326,7 @@ def merge_groups_to_picks(
         rows.append(agg)
 
     if not rows:
-        raise ValueError("None of the picks received any maximal-fit peaks -- nothing to merge.")
+        raise ValueError("None of the picks received any maximal-fit peaks – nothing to merge.")
 
     merged_groups = pd.DataFrame(rows).sort_values("pick_shift").reset_index(drop=True)
     assignment_report = pd.DataFrame(assign_rows)
@@ -1442,7 +1442,7 @@ def refit_merged_groups(
     """
     if shift_float_window is None or shift_float_window <= 0:
         raise ValueError(
-            "shift_float_window must be a positive ppm value -- the whole "
+            "shift_float_window must be a positive ppm value – the whole "
             "point of refitting a merged/simplified peak set is to let its "
             "centre move; pass e.g. the tolerance/merge_tolerance used to "
             "build the merged groups, or your estimate of referencing "
@@ -1456,7 +1456,7 @@ def refit_merged_groups(
     )
     if kept.empty:
         raise ValueError(
-            "No merged group survived region/S:N filtering -- nothing to "
+            "No merged group survived region/S:N filtering – nothing to "
             "fit. Inspect `dropped` or loosen fit_regions/snr_threshold."
         )
 
@@ -1698,7 +1698,7 @@ def _fit_axis_components_members(fit: Dict):
         members = [p["members"] for p in fit["peaks"]]
     if len(members) != len(peaks):
         raise ValueError(f"The fit has {len(peaks)} peak component(s) but {len(members)} "
-                         f"member list(s) -- they must come from the same fit.")
+                         f"member list(s) – they must come from the same fit.")
     return x, peaks, members
 
 

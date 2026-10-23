@@ -40,7 +40,7 @@ def read_particles_dump(filename):
     if len(data_lines) < n_atoms:
         raise ValueError(
             f"Dump header declares {n_atoms} atoms but only {len(data_lines)} "
-            f"data lines were found before end of file -- dump may be truncated."
+            f"data lines were found before end of file – dump may be truncated."
         )
     rows = [list(map(float, l.split())) for l in data_lines]
     return np.array(rows)

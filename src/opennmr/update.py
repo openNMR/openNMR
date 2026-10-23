@@ -413,7 +413,7 @@ def check_github_release(repo: str, current_version: str | None = None,
         elif exc.code in (401, 403):
             message = (f"GitHub refused the check ({exc.code}). The access token may be wrong "
                        "or expired, or GitHub's hourly limit for unauthenticated checks was "
-                       "reached -- try again later.")
+                       "reached – try again later.")
         else:
             message = f"GitHub answered {exc.code} ({exc.reason})."
         return UpdateCheck("error", current_version, message=message)

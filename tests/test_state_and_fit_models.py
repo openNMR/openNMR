@@ -108,7 +108,7 @@ def test_state_round_trip_log_and_standalone_copies(tmp_path):
                         notes="about it")
     log = io_state.describe_state(folder)
     assert "openNMR state: My test" in log and "about it" in log
-    assert "Phase PH0: 12.5°" in log and "“1 peak” -- Isotropic peaks" in log
+    assert "Phase PH0: 12.5°" in log and "“1 peak” – Solution NMR" in log
     info = io_state.load_state(folder)
     entry = info["entries"][0]
     np.testing.assert_array_equal(entry["spectrum"].data, s.data)

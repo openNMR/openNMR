@@ -166,7 +166,7 @@ def describe_placement(nucleus, observe):
     R, src = frequency_ratio(nucleus, observe)
     zero = (R - 1.0) * 1e6
     how = {"Xi": "IUPAC frequency ratios",
-           "gamma": "gyromagnetic ratios (no IUPAC frequency ratio tabulated -- reference "
+           "gamma": "gyromagnetic ratios (no IUPAC frequency ratio tabulated – reference "
                     "shielding ignored, so the position is approximate)",
            "same": "same nucleus"}[src]
     return (f"{nucleus} on the {observe} scale: its 0 ppm is at {zero:+.2f} ppm "

@@ -1,4 +1,4 @@
-"""The "Export … Sites to CSA, Quad & J-coupling" controls shared by
+"""The "Export … Sites to Solid-state NMR" controls shared by
 Simulate ▸ pNMR (CIF) and Fit ▸ pNMR (CIF bond pathways) (explicit user
 request, 2026-10-12: pNMR computes isotropic peaks only; send them on so
 CSA, quadrupolar and J interactions can be added to each).
@@ -14,8 +14,8 @@ from PySide6.QtWidgets import (
 )
 
 #: The panels sites can go to: (combo text, key).
-DESTINATIONS = (("Simulate ▸ CSA, Quad & J-coupling", "simulate"),
-                ("Fit ▸ CSA, Quad & J-coupling (as the starting model)", "fit"))
+DESTINATIONS = (("Simulate ▸ Solid-state NMR", "simulate"),
+                ("Fit ▸ Solid-state NMR (as the starting model)", "fit"))
 
 
 class SendSitesRow(QWidget):
@@ -44,9 +44,9 @@ class SendSitesRow(QWidget):
         self.append_check = QCheckBox("Add to the sites already there (otherwise replace them)")
         v.addWidget(self.append_check)
         row = QHBoxLayout()
-        self.export_all_button = QPushButton("Export All Sites to CSA, Quad && J-coupling")
+        self.export_all_button = QPushButton("Export All Sites to Solid-state NMR")
         self.export_all_button.setToolTip(
-            "Every isotropic peak becomes a site (δiso, amount, width) in CSA, Quad & J-coupling.")
+            "Every isotropic peak becomes a site (δiso, amount, width) in Solid-state NMR.")
         self.export_all_button.clicked.connect(lambda: self.exportRequested.emit("all"))
         self.export_selected_button = QPushButton("Export Selected")
         self.export_selected_button.setToolTip(

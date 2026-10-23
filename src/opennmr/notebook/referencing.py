@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 #: Shown wherever the result is (GUI and report), so nobody reads the
 #: number without the condition it depends on.
 VALIDITY_WARNING = (
-    "Only valid for spectra recorded on the same magnet at a similar time -- no re-shim, field "
+    "Only valid for spectra recorded on the same magnet at a similar time – no re-shim, field "
     "or lock change, probe change or quench in between. The new nucleus is referenced through "
     "the spectrometer's own nucleus table; susceptibility differences between two different "
     "samples are not corrected."
@@ -167,7 +167,7 @@ def transfer_sr(sr_cal_hz: float, sfo1_cal_mhz: float, sfo1_new_mhz: float | Non
                     f"should be about {expected:.5f}: the two experiments may not be on the same "
                     f"magnet, or a nucleus is mislabelled.")
     if abs(correction_ppm) > 5.0:
-        warnings.append(f"A {correction_ppm:.2f} ppm field correction is unusually large -- "
+        warnings.append(f"A {correction_ppm:.2f} ppm field correction is unusually large – "
                         f"check SR_cal is in Hz and SFO1 in MHz.")
 
     return SRTransfer(sr_cal_hz=sr_cal_hz, sfo1_cal_mhz=sfo1_cal_mhz, sfo1_new_mhz=sfo1_new_mhz,

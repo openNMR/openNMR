@@ -1,4 +1,4 @@
-"""CSA, Quad & J-coupling: select several peaks and give them the current
+"""Solid-state NMR: select several peaks and give them the current
 peak's interactions (Copy to Peaks; explicit user request, 2026-10-12),
 and many peaks handled in one go (bulk), in Simulate and in Fit."""
 import time

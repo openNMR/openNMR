@@ -275,7 +275,7 @@ def resolve_lineshape(p0, lineshape=None) -> str:
     if len(types) > 1:
         raise ValueError(
             f"Sites ask for different lineshapes ({', '.join(sorted(types))}); a CSA fit "
-            f"broadens every site with one kernel -- give them one type, or pass lineshape=.")
+            f"broadens every site with one kernel – give them one type, or pass lineshape=.")
     return types.pop() if types else "gaussian"
 
 
@@ -506,7 +506,7 @@ def sideband_window_warning(d_iso_ppm, mas_Hz, larmor_Hz, fit_regions=None, x_pp
     return (f"The fit window holds no spinning sideband of the site at {d_iso_ppm:.4g} ppm "
             f"(first sidebands at {sidebands[1]:.4g} and {sidebands[0]:.4g} ppm for "
             f"{mas_Hz / 1e3:.4g} kHz). Without sidebands the MAS rate and the anisotropy are "
-            f"not determined by this fit -- widen the window to include them.")
+            f"not determined by this fit – widen the window to include them.")
 
 
 def merge_site_bounds(p0, bounds=None):
@@ -789,7 +789,7 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
         if np.any(is_free[eta_idx]):
             print(
                 f"Note: lineshape={lineshape!r} has no Gaussian/Lorentzian "
-                f"mixing to fit -- forcing every site's eta fixed "
+                f"mixing to fit – forcing every site's eta fixed "
                 f"({'0.0' if lineshape_key == 'gaussian' else '1.0'})."
             )
         p0_arr[eta_idx] = 0.0 if lineshape_key == "gaussian" else 1.0

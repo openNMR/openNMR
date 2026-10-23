@@ -175,7 +175,7 @@ class DataBrowser(QWidget):
             f"{len(matches):,} experiment{'s' if len(matches) != 1 else ''}. "
             f"Double-click to load, or Ctrl/Shift-click to select several "
             f"and Open Selected."
-            + (f" The scan stops at {truncated_at:,}: this folder holds more -- browse a "
+            + (f" The scan stops at {truncated_at:,}: this folder holds more – browse a "
                f"subfolder to see them." if truncated_at else "")
         )
 
@@ -209,7 +209,7 @@ class DataBrowser(QWidget):
             pending = cloud.pending_download_bytes(path)
             if pending:
                 leaf.setToolTip(
-                    0, f"{path}\n\nNot downloaded yet -- opening this will "
+                    0, f"{path}\n\nNot downloaded yet – opening this will "
                        f"fetch {cloud.format_bytes(pending)} from the cloud.",
                 )
             if parent is None:
@@ -267,7 +267,7 @@ class DataBrowser(QWidget):
         if not cloud.parameters_are_local(path):
             pending = cloud.pending_download_bytes(path)
             size = f", {cloud.format_bytes(pending)}" if pending else ""
-            return f"· in cloud{size} -- double-click to download"
+            return f"· in cloud{size} – double-click to download"
         try:
             info = io.peek(path, vendor=vendor)
         except Exception:  # noqa: BLE001 -- an undescribable experiment still lists

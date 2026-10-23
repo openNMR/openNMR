@@ -127,7 +127,7 @@ def SIMPSONpoint_series(paths, x=None, xname: str = "x", xlabel: str | None = No
     else:
         x_values = np.asarray(x, dtype=float)
         if x_values.shape != (len(paths),):
-            raise ValueError(f"x has {x_values.size} values but {len(paths)} files were given -- "
+            raise ValueError(f"x has {x_values.size} values but {len(paths)} files were given – "
                              "they must correspond one to one.")
     rows = [SIMPSONread_points(p, n_points=n_points, kind=kind) for p in paths]
     shortest = min(len(r) for r in rows)

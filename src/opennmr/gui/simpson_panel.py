@@ -186,7 +186,7 @@ class SimpsonPanel(QWidget):
         self.field_spin.setValue(0.0)
         self.field_spin.setSuffix(" T")
         self.field_spin.setSpecialValueText("not set")
-        self.field_spin.setToolTip("Field the simulation was run at -- or type the ¹H frequency "
+        self.field_spin.setToolTip("Field the simulation was run at – or type the ¹H frequency "
                                    "beside it. Needed for a ppm axis.")
         self._proton_spin = proton_frequency_box(self.field_spin, parent=self)
         row = QHBoxLayout()
@@ -198,7 +198,7 @@ class SimpsonPanel(QWidget):
         self.reference_spin.setRange(-1e6, 1e6)
         self.reference_spin.setDecimals(3)
         self.reference_spin.setSuffix(" ppm")
-        self.reference_spin.setToolTip("Shift of the transmitter (the carrier) -- 0 for a "
+        self.reference_spin.setToolTip("Shift of the transmitter (the carrier) – 0 for a "
                                        "simulation done on resonance.")
         form.addRow("Carrier at:", self.reference_spin)
         self.time_unit_combo = QComboBox()
@@ -271,9 +271,9 @@ class SimpsonPanel(QWidget):
         v.addLayout(row)
         row = QHBoxLayout()
         self.send_button = QPushButton("Send to Fit")
-        self.send_button.setToolTip("Use this simulated spectrum -- the one just plotted, or the "
+        self.send_button.setToolTip("Use this simulated spectrum – the one just plotted, or the "
                                     "SIMPSON spectrum selected in Open experiments (e.g. a "
-                                    "transformed FID) -- as a lineshape in Fit > SIMPSON spectrum.")
+                                    "transformed FID) – as a lineshape in Fit > SIMPSON spectrum.")
         self.send_button.clicked.connect(self._on_send_to_fit)
         self.send_selected_button = QPushButton("Send selected experiment to Fit")
         self.send_selected_button.setToolTip("The spectrum selected in Open experiments, "

@@ -56,7 +56,7 @@ def part1_algebraic_identity():
 
         max_err = max(max_err, np.max(np.abs(lhs - rhs)))
     print(f"  max abs error over 200 random quaternions/points: {max_err:.3e}")
-    assert max_err < 1e-10, "identity does NOT hold -- geometry.py's net convention has changed!"
+    assert max_err < 1e-10, "identity does NOT hold – geometry.py's net convention has changed!"
     print("  PASS: current code's net effect is pts@R == R_std(q) @ pt, as documented.")
 
 
@@ -88,7 +88,7 @@ def part2_orientation_sanity_check_template():
     print("  the long (v3) axis points along, leaving world x unaffected.")
     print("  Confirm the printed pattern matches what YOUR quaternion")
     print("  convention (body->world vs world->body, as produced by your")
-    print("  particle generator) predicts -- this script does not know that")
+    print("  particle generator) predicts – this script does not know that")
     print("  convention for you.")
 
 

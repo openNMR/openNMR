@@ -235,7 +235,7 @@ def peak_fwhm(x, y, x_click: float, baseline=0.0, hz_per_ppm: float | None = Non
         if mean > 0 and abs(hw_l - hw_r) / mean > ASYMMETRY_FRACTION:
             overlap = True
             warnings.append(f"Asymmetric: the half widths differ by {100 * abs(hw_l - hw_r) / mean:.0f} %"
-                            " -- possibly an unresolved shoulder (or a lineshape that is not "
+                            " – possibly an unresolved shoulder (or a lineshape that is not "
                             "symmetric).")
 
     alternatives: dict = {}

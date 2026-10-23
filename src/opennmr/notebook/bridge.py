@@ -86,7 +86,7 @@ def results_from_spectrum(spectrum, row: int | None = None) -> dict:
     if data.ndim == 2:
         if row is None:
             raise ValueError(
-                "results_from_spectrum needs a row for a 2D spectrum -- "
+                "results_from_spectrum needs a row for a 2D spectrum – "
                 "pass row=<zero-based index> to choose the slice to convert."
             )
         if not 0 <= row < data.shape[0]:
@@ -106,7 +106,7 @@ def results_from_spectrum(spectrum, row: int | None = None) -> dict:
 
     if axis.kind != "frequency" or axis.ppm is None:
         raise ValueError(
-            "results_from_spectrum needs a frequency axis in ppm -- this "
+            "results_from_spectrum needs a frequency axis in ppm – this "
             f"spectrum's is {axis.kind!r}. A pseudo-2D's F1 is a slice "
             "index, so convert along F2 instead."
         )

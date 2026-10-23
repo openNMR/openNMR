@@ -1,4 +1,4 @@
-"""Export pNMR sites to CSA, Quad & J-coupling (gui/pnmr_export_row.py on
+"""Export pNMR sites to Solid-state NMR (gui/pnmr_export_row.py on
 Simulate ▸ pNMR (CIF) and Fit ▸ pNMR (CIF bond pathways); explicit user
 request, 2026-10-12), and the rename of Combined Hamiltonian.
 
@@ -15,7 +15,7 @@ from test_gui_pnmr_fit import (  # noqa: F401,E402 -- fixtures
     SHIFTS, _no_modal_dialogs, fitted, settings_file, _window_with_model,
 )
 
-NAME = "CSA, Quad & J-coupling"
+NAME = "Solid-state NMR"
 
 
 def test_rename_in_fit_and_simulate(qapp):  # noqa: F811
@@ -23,9 +23,7 @@ def test_rename_in_fit_and_simulate(qapp):  # noqa: F811
     window = MainWindow()
     assert window._combined_fit_section.title() == NAME
     assert window._combined_sim_section.title() == NAME
-    # The "&" is shown, not taken as a keyboard mnemonic.
-    assert "Quad && J-coupling" in window._combined_fit_section._header.text()
-    assert window.combined_fit_panel.fit_button.text() == "Fit CSA, Quad && J-coupling"
+    assert window.combined_fit_panel.fit_button.text() == "Fit Solid-state NMR"
 
 
 def test_simulation_exports_every_group_to_simulate(qapp, settings_file):  # noqa: F811
@@ -87,7 +85,7 @@ def test_fit_exports_fitted_peaks_as_the_fit_start(fitted):
     assert fit_panel.nucleus_combo.currentText() == "23Na"
     assert window._combined_fit_section.isExpanded()
     assert "23Na is quadrupolar" in panel.status_log.toPlainText()
-    assert "CSA, Quad & J-coupling" in window.statusBar().currentMessage()
+    assert "Solid-state NMR" in window.statusBar().currentMessage()
 
 
 def test_fit_exports_selected_rows_to_simulate(fitted):

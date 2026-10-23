@@ -484,6 +484,78 @@ def apply_phase(spectrum: np.ndarray, freq: np.ndarray, phase0_deg: float,
     return spectrum * np.exp(-1j * phi)
 
 
+def noise_sigma(spectrum: np.ndarray) -> float:
+    """Noise level of a complex spectrum from the scatter between neighbouring
+    points (so peaks and a smooth baseline do not inflate it)."""
+    s = np.asarray(spectrum)
+    if s.size < 4:
+        return 0.0
+    parts = [np.diff(np.real(s))]
+    if np.iscomplexobj(s):
+        parts.append(np.diff(np.imag(s)))
+    d = np.concatenate(parts)
+    return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0))
+
+
+def phasing_baseline(spectrum: np.ndarray, frac: float = 0.2) -> np.ndarray:
+    """A smooth complex baseline to take off before scoring a phase.
+
+    The phase objectives assume every point is peak or noise. A broad hump
+    (probe background, a first-order error, a rolling baseline) is neither,
+    and pulls the zero-order phase by tens of degrees. This is a running
+    median over ``frac`` of the spectrum, taken on a thinned copy so it is fast,
+    and it is returned as zeros unless it is both a few percent of the tallest
+    peak and above the noise (so a clean spectrum is scored as it is)."""
+    from scipy.ndimage import median_filter
+
+    s = np.asarray(spectrum)
+    n = s.size
+    zeros = np.zeros(s.shape, dtype=complex)
+    if s.ndim != 1 or n < 64:
+        return zeros                # a 2D matrix is scored as it is
+    step = max(n // 1024, 1)
+    m = n // step
+    blocks = s[: m * step].reshape(m, step)
+    thin = np.median(np.real(blocks), axis=1) + 1j * np.median(np.imag(blocks), axis=1)
+    size = max(int(m * frac) | 1, 3)
+    smooth = (median_filter(np.real(thin), size=size, mode="nearest")
+              + 1j * median_filter(np.imag(thin), size=size, mode="nearest"))
+    peak = float(np.max(np.abs(s))) or 1.0
+    level = float(np.max(np.abs(smooth)))
+    if level < max(0.04 * peak, noise_sigma(s)):
+        return zeros
+    centres = (np.arange(m) + 0.5) * step - 0.5
+    return np.interp(np.arange(n), centres, np.real(smooth)) \
+        + 1j * np.interp(np.arange(n), centres, np.imag(smooth))
+
+
+def row_snr(spectrum: np.ndarray) -> float:
+    """Tallest peak over the noise, after the smooth baseline is taken off."""
+    s = np.asarray(spectrum)
+    s = s - phasing_baseline(s)
+    sigma = noise_sigma(s)
+    if sigma <= 0:
+        return float("inf") if np.max(np.abs(s)) > 0 else 0.0
+    return float(np.max(np.abs(s)) / sigma)
+
+
+def reference_row(matrix: np.ndarray) -> int:
+    """Index of the row to take a shared phase from: the one with the most
+    signal. (The mean of all rows is not it: rows of opposite sign or different
+    phase cancel in a mean, and what is left is the noise.)"""
+    m = np.asarray(matrix)
+    if m.ndim == 1:
+        return 0
+    return int(np.argmax(np.sum(np.abs(m), axis=1)))
+
+
+def phase_score_signless(spectrum: np.ndarray) -> float:
+    """Like the ``"magnitude"`` score but blind to overall sign: lower is
+    better, and a spectrum scores the same at phase and phase + 180 degrees."""
+    s = np.asarray(spectrum)
+    return float(np.sum((np.abs(np.real(s)) - np.abs(s)) ** 2))
+
+
 def phase_score(spectrum: np.ndarray, penalty: str = "negarea") -> float:
     """Lower is better.
 
@@ -515,11 +587,19 @@ def phase_score(spectrum: np.ndarray, penalty: str = "negarea") -> float:
         raise ValueError("penalty must be 'negarea', 'magnitude', or 'entropy'")
 
 
-def apc0(spectrum: np.ndarray, freq: np.ndarray, phase0_inc: float = 0.1, penalty: str = "magnitude") -> float:
+def apc0(spectrum: np.ndarray, freq: np.ndarray, phase0_inc: float = 0.1, penalty: str = "magnitude",
+         center: float | None = None, window: float = 90.0, remove_baseline: bool = True) -> float:
     """Zero-order-only autophase: grid search minimizing
     :func:`phase_score` (same criterion/default ``penalty`` as
     :func:`autophase01`'s own stage-1 search -- see :func:`autophase01`
     for a joint zero-/first-order fit).
+
+    ``remove_baseline`` (default on) takes a smooth hump off before scoring,
+    but only when it is a few percent of the tallest peak and above the noise
+    (:func:`phasing_baseline`). ``center`` / ``window`` search only
+    ``center`` +/- ``window`` degrees. ``penalty="signless"`` ignores the sign
+    of the signal (phase and phase + 180 score alike), for a row that may be
+    negative, such as an inversion-recovery slice.
 
     Used to score by raw ``sum(real(corrected))`` (maximize) instead --
     changed because it's unreliable on anything but a strong, clean
@@ -535,23 +615,31 @@ def apc0(spectrum: np.ndarray, freq: np.ndarray, phase0_inc: float = 0.1, penalt
     higher noise. Real bug, not just theoretical: this is what
     "Autophase zeroes everything" on real, lower-SNR data actually
     was."""
-    phase0_values = np.arange(-180, 180, phase0_inc)
+    spectrum = np.asarray(spectrum)
+    if remove_baseline:
+        spectrum = spectrum - phasing_baseline(spectrum)
+    if center is None:
+        phase0_values = np.arange(-180, 180, phase0_inc)
+    else:
+        phase0_values = center + np.arange(-window, window + phase0_inc / 2, phase0_inc)
+    signless = penalty == "signless"
     best_score = np.inf
     best_phase0 = 0.0
 
     for phase0 in phase0_values:
         corrected = spectrum * np.exp(1j * -np.deg2rad(phase0))
-        score = phase_score(corrected, penalty)
+        score = phase_score_signless(corrected) if signless else phase_score(corrected, penalty)
         if score < best_score:
             best_score = score
             best_phase0 = phase0
 
-    return float(best_phase0)
+    return float(((best_phase0 + 180) % 360) - 180) if center is not None else float(best_phase0)
 
 
 def autophase01(spectrum: np.ndarray, freq: np.ndarray, phase0_range: tuple[float, float] = (-180, 180),
                  phase0_inc: float = 1.0, phase1_max: float = 20.0, phase1_improvement: float = 0.15,
-                 penalty: str = "magnitude", pivot_frac: float = 0.5, verbose: bool = False) -> tuple[float, float]:
+                 penalty: str = "magnitude", pivot_frac: float = 0.5, verbose: bool = False,
+                 remove_baseline: bool = True) -> tuple[float, float]:
     """``phase0, phase1 = autophase01(spectrum, freq, ...)``
 
     Joint zero- and first-order autophasing, but phase1 is only ever
@@ -573,6 +661,9 @@ def autophase01(spectrum: np.ndarray, freq: np.ndarray, phase0_range: tuple[floa
     Returns ``(phase0_deg, phase1_deg)``. ``phase1`` is exactly ``0.0``
     whenever stage 2 didn't earn its keep.
     """
+    spectrum = np.asarray(spectrum)
+    if remove_baseline:
+        spectrum = spectrum - phasing_baseline(spectrum)
     phase0_grid = np.arange(phase0_range[0], phase0_range[1], phase0_inc)
     scores = [
         phase_score(apply_phase(spectrum, freq, p0, 0.0, pivot_frac), penalty)

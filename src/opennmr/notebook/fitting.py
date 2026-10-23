@@ -22,6 +22,7 @@ or, end-to-end, ``NMR2D_workflow``.
 """
 
 import numpy as np
+from ..processing import multiplets as _multiplets
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 
@@ -215,6 +216,40 @@ def build_region_mask(x, fit_regions):
     return mask
 
 
+def _peak_step(peak):
+    """How many entries of the parameter vector a peak itself takes
+    (shift, FWHM, amplitude[, eta]); its J couplings sit after all the
+    peaks, before the baseline."""
+    return 3 if peak["type"] in ("gaussian", "lorentzian") else 4
+
+
+def _n_j(peak):
+    """Number of fitted J couplings of a peak (0 unless it is a multiplet)."""
+    return len(peak.get("couplings") or ())
+
+
+def _j_start(peak_defs):
+    """Index of the first J parameter in the full vector."""
+    return sum(_peak_step(p) for p in peak_defs)
+
+
+def _peak_curve(peak, x, values, js):
+    """One peak (or multiplet) evaluated on ``x``; ``values`` are its
+    (shift, FWHM, amplitude[, eta]) and ``js`` its J couplings in Hz."""
+    if peak["type"] == "gaussian":
+        x0, fwhm, A = values
+        single = lambda centre: gaussian(x, centre, fwhm, A)
+    elif peak["type"] == "lorentzian":
+        x0, fwhm, A = values
+        single = lambda centre: lorentzian(x, centre, fwhm, A)
+    else:
+        x0, fwhm, A, eta = values
+        single = lambda centre: pseudo_voigt(x, centre, fwhm, A, eta)
+    return _multiplets.apply(single, x0, peak.get("couplings") or [], js,
+                             peak.get("j_scale") or 1.0)
+
+
+
 def _peak_param_names(peak):
     return ["shift", "fwhm", "A"] if peak["type"] in ("gaussian", "lorentzian") \
         else ["shift", "fwhm", "A", "eta"]
@@ -276,6 +311,17 @@ def initialise_params_with_map(x, y, peak_defs, b0_init, b1_init,
             else:
                 is_free.append(name not in fixed)
 
+    for peak in peak_defs:
+        fixed = peak.get("fixed", {})
+        starts = list(peak.get("J_init") or [])
+        for k in range(_n_j(peak)):
+            name = f"J{k + 1}"
+            p0.append(float(starts[k]) if k < len(starts) else _multiplets.DEFAULT_J_HZ)
+            if isinstance(fixed, dict):
+                is_free.append(not fixed.get(name, False))
+            else:
+                is_free.append(name not in fixed)
+
     p0.extend([b0_init, b1_init])
     is_free.extend([True, True])
 
@@ -296,25 +342,23 @@ def build_model(x, params, peak_defs, x_ref=None):
     Parameters
     ----------
     params : ndarray
-        Ordered as, for each peak, (shift, FWHM, amplitude[, eta]),
-        followed by (baseline offset, baseline slope).
+        Ordered as, for each peak, (shift, FWHM, amplitude[, eta]), then the
+        J couplings (Hz) of any multiplets, peak by peak, and last
+        (baseline offset, baseline slope).
     """
 
     y = np.zeros_like(x)
     idx = 0
+    j_idx = _j_start(peak_defs)
 
     for peak in peak_defs:
-        if peak['type'] in ['gaussian', 'lorentzian']:
-            x0, fwhm, A = params[idx:idx + 3]
-            idx += 3
-            y += gaussian(x, x0, fwhm, A) if peak['type'] == 'gaussian' \
-                else lorentzian(x, x0, fwhm, A)
-        else:
-            x0, fwhm, A, eta = params[idx:idx + 4]
-            idx += 4
-            y += pseudo_voigt(x, x0, fwhm, A, eta)
+        step = _peak_step(peak)
+        n_j = _n_j(peak)
+        y += _peak_curve(peak, x, params[idx:idx + step], params[j_idx:j_idx + n_j])
+        idx += step
+        j_idx += n_j
 
-    b0, b1 = params[idx:idx + 2]
+    b0, b1 = params[-2:]
     x_ref = np.mean(x) if x_ref is None else x_ref
     y += b0 + b1 * (x - x_ref)
 
@@ -368,6 +412,13 @@ def build_bounds(peak_defs, positive_intensity=True, allow_negative_intensity=Fa
             eta_b = normalise_bound(b.get("eta", (0.0, 1.0)), "eta", i)
             lower.extend([shift_b[0], fwhm_b[0], amp_lower, eta_b[0]])
             upper.extend([shift_b[1], fwhm_b[1], amp_upper, eta_b[1]])
+
+    for i, peak in enumerate(peak_defs):
+        b = peak.get("bounds", {})
+        for k in range(_n_j(peak)):
+            j_b = normalise_bound(b.get(f"J{k + 1}", (0.0, _multiplets.MAX_J_HZ)), f"J{k + 1}", i)
+            lower.append(j_b[0])
+            upper.append(j_b[1])
 
     return np.array(lower), np.array(upper)
 
@@ -478,6 +529,9 @@ def fit_spectrum(results, peak_defs, fit_regions=None, use_normalised=True, x_un
     else:
         raise ValueError("x_unit must be 'ppm' or 'Hz'")
 
+    _multiplets.ensure_j_scale(
+        peak_defs, results.get("SFO1") or results.get("sfo1"), "ppm" if x_unit == "ppm" else "hz")
+
     if use_normalised:
         y_raw = results['real_spectrum']
         scale = np.max(np.abs(y_raw))
@@ -546,7 +600,7 @@ def fit_spectrum(results, peak_defs, fit_regions=None, use_normalised=True, x_un
             step = 3 if peak["type"] in ["gaussian", "lorentzian"] else 4
             popt[idx + 2] *= scale
             idx += step
-        popt[idx:idx + 2] *= scale  # baseline b0, b1
+        popt[-2:] *= scale  # baseline b0, b1
         return popt
 
     final_popt = rescale_params(popt, scale) if use_normalised else popt
@@ -558,27 +612,26 @@ def evaluate_fit(x, popt, peak_defs, x_ref=None, return_components=False):
     """
     Evaluate the fitted model at ``x``. If ``return_components=True``,
     also return each individual peak (plus the baseline, last) as a
-    list -- useful for plotting and integration.
+    list -- useful for plotting and integration. A multiplet is one
+    component, all its lines together.
     """
 
     y_fit = np.zeros_like(x)
     components = []
     idx = 0
+    j_idx = _j_start(peak_defs)
 
     for peak in peak_defs:
-        if peak['type'] in ['gaussian', 'lorentzian']:
-            x0, fwhm, A = popt[idx:idx + 3]
-            idx += 3
-            y = gaussian(x, x0, fwhm, A) if peak['type'] == 'gaussian' else lorentzian(x, x0, fwhm, A)
-        else:
-            x0, fwhm, A, eta = popt[idx:idx + 4]
-            idx += 4
-            y = pseudo_voigt(x, x0, fwhm, A, eta)
+        step = _peak_step(peak)
+        n_j = _n_j(peak)
+        y = _peak_curve(peak, x, popt[idx:idx + step], popt[j_idx:j_idx + n_j])
+        idx += step
+        j_idx += n_j
 
         components.append(y)
         y_fit += y
 
-    b0, b1 = popt[idx:idx + 2]
+    b0, b1 = popt[-2:]
     x_ref = np.mean(x) if x_ref is None else x_ref
     baseline = b0 + b1 * (x - x_ref)
 
@@ -703,6 +756,18 @@ def check_bound_hits(popt, pcov, is_free, lower, upper, peak_defs):
 
             idx += 1
 
+    j_idx = _j_start(peak_defs)
+    for i, peak in enumerate(peak_defs):
+        for k in range(_n_j(peak)):
+            val, lo, hi = popt[j_idx], lower[j_idx], upper[j_idx]
+            if is_free[j_idx]:
+                err = np.sqrt(max(pcov[j_idx, j_idx], 0.0))
+                if np.isfinite(hi) and val + err >= hi:
+                    warnings.append(f"Peak {i + 1} J{k + 1} near upper bound {hi}")
+                if np.isfinite(lo) and val - err <= lo:
+                    warnings.append(f"Peak {i + 1} J{k + 1} near lower bound {lo}")
+            j_idx += 1
+
     return warnings
 
 
@@ -729,6 +794,19 @@ def extract_params_and_errors(popt, pcov, peak_defs, is_free):
         })
 
         idx += n
+
+    j_idx = _j_start(peak_defs)
+    for peak, entry in zip(peak_defs, per_peak):
+        n_j = _n_j(peak)
+        if not n_j:
+            continue
+        j_slice = slice(j_idx, j_idx + n_j)
+        entry["names"] = list(entry["names"]) + [f"J{k + 1}" for k in range(n_j)]
+        entry["params"] = np.concatenate([entry["params"], popt[j_slice]])
+        entry["errors"] = np.concatenate([entry["errors"], np.sqrt(np.diag(pcov[j_slice, j_slice]))])
+        entry["fixed"] = np.concatenate([entry["fixed"], ~is_free[j_slice]])
+        entry["couplings"] = list(peak["couplings"])
+        j_idx += n_j
 
     return per_peak
 
@@ -1697,7 +1775,7 @@ def NMR2D_plot_integrals(fits, mode="rows", x_axis="shift", normalised=False,
         except IndexError:
             raise ValueError(
                 f"vdlist has {len(vdlist_seconds)} entries, but a fitted "
-                f"slice index falls outside that range -- check the vdlist "
+                f"slice index falls outside that range – check the vdlist "
                 f"matches this dataset."
             )
 

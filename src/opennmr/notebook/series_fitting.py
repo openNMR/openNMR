@@ -1,7 +1,7 @@
 """
 Fit every slice of a pseudo-2D series with a lineshape model fitted to
 one slice -- T1/T2/T1rho (or any series) with CSA, quadrupolar,
-Czjzek (distributed quadrupolar) or CSA, Quad & J-coupling (mixed) sites.
+Czjzek (distributed quadrupolar) or Solid-state NMR (mixed) sites.
 
 Explicit user request (2026-09-28): "When I try to fit T1/T2 pseudo-2d
 data using CSA or quad models (or mixed), I extract a slice, then fit
@@ -74,7 +74,7 @@ _trapezoid = getattr(np, "trapezoid", None) or np.trapz
 MODEL_KINDS = ("csa", "quadrupolar", "czjzek", "combined")
 
 _KIND_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar", "czjzek": "Czjzek",
-                "combined": "CSA, Quad & J-coupling"}
+                "combined": "Solid-state NMR"}
 
 
 def model_components(kind: str, fit: dict, x=None):
@@ -285,7 +285,7 @@ def series_fit_report(results) -> str:
         lines.append("\t".join(row))
     low = [r["index"] for r in results if np.isfinite(r["r_squared"]) and r["r_squared"] < 0.9]
     if low:
-        lines += ["", f"R² below 0.9 in slice(s) {', '.join(map(str, low))} -- expected where "
+        lines += ["", f"R² below 0.9 in slice(s) {', '.join(map(str, low))} – expected where "
                       "the signal has decayed into the noise, a sign of a changing lineshape "
                       "otherwise."]
     return "\n".join(lines)

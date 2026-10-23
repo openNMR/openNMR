@@ -22,7 +22,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QPushButton, QVBoxLayout
 
 _TEMPLATE = """\
-# openNMR facts -- Cmd/Ctrl+B shows one of these at random.
+# openNMR facts – Cmd/Ctrl+B shows one of these at random.
 # One fact per line. Lines starting with # and blank lines are skipped.
 """
 

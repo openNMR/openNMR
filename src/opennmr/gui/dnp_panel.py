@@ -324,7 +324,7 @@ class DnpWorkflowPanel(QWidget):
         self.field_source_combo.setToolTip(
             "From SFO1: B₀ = SFO1 / γ, which assumes the line sat exactly on the carrier. At the "
             "aligned line: B₀ from the line's own frequency in each spectrum (carrier + its "
-            "offset, as the alignment found it) -- the direct measurement; the carrier is set by "
+            "offset, as the alignment found it) – the direct measurement; the carrier is set by "
             "hand and can sit several kHz (~1 mT for ²³Na) off the line.")
         self.field_source_combo.currentIndexChanged.connect(lambda _i: self.plot_profile())
         form.addRow("B₀:", self.field_source_combo)
@@ -884,7 +884,7 @@ class DnpWorkflowPanel(QWidget):
         if fields["difference_mT"] is not None:
             worst = float(np.nanmax(np.abs(fields["difference_mT"])))
             extra = (f"\nB₀ at the line vs from SFO1: up to {worst:.3f} mT apart"
-                     + (" -- worth using the line." if worst > 0.05 else "."))
+                     + (" – worth using the line." if worst > 0.05 else "."))
         # The panel says what was plotted; the per-spectrum numbers are in
         # the tooltip, the CSV and the kept record (too long for the side).
         n = len(self.profile["labels"])

@@ -1,4 +1,4 @@
-"""Simulate > CSA, Quad & J-coupling: sites with any mix of CSA,
+"""Simulate > Solid-state NMR: sites with any mix of CSA,
 quadrupolar and J interactions, static or MAS.
 
 A list of sites on the left; the selected site's shift, amount and
@@ -184,7 +184,7 @@ class InteractionEditor(QGroupBox):
                 self.treatment_combo.addItem("Strong coupling: exact, between peaks…", "strong")
                 self.treatment_combo.setToolTip(
                     "First order: this peak split by n partner nuclei (any isotope, with its "
-                    "natural abundance) -- valid when J is much smaller than the shift "
+                    "natural abundance) – valid when J is much smaller than the shift "
                     "difference to the partner.\n\nStrong coupling: J between observed peaks, "
                     "solved exactly (roofing, AB, ABX, AA'BB'). Opens the spin-system model "
                     "with these peaks as its spins.")
@@ -350,7 +350,7 @@ class CombinedHamiltonianPanel(QWidget):
         self.add_partner_button.setVisible(self.OTHER_NUCLEI)
         self.copy_button = QPushButton("Copy to Peaks ▾")
         self.copy_button.setToolTip(
-            "Give other peaks this peak's interactions (CSA, quadrupolar, J) -- the selected "
+            "Give other peaks this peak's interactions (CSA, quadrupolar, J) – the selected "
             "peaks (Ctrl/Shift-click, Ctrl+A for all) or every peak. Their own interactions are "
             "replaced; δiso and amount are kept.")
         self._copy_menu = QMenu(self)
@@ -393,7 +393,7 @@ class CombinedHamiltonianPanel(QWidget):
         self.link_combo = QComboBox()
         self.link_combo.setToolTip(
             "Share another isotope's site's chemistry: this peak then has no parameters of its "
-            "own (except those ticked under Not shared) -- they follow that site, so the two "
+            "own (except those ticked under Not shared) – they follow that site, so the two "
             "isotopes are fitted as one. '(own parameters)' keeps them independent.")
         self.link_combo.currentIndexChanged.connect(self._on_link)
         sform.addRow("Same chemistry as:", self.link_combo)
@@ -402,12 +402,12 @@ class CombinedHamiltonianPanel(QWidget):
         own_row.setContentsMargins(0, 0, 0, 0)
         self.own_amount_check = QCheckBox("Amount")
         self.own_amount_check.setToolTip(
-            "Fit this isotope's amount separately -- for a selective (long or weak) pulse, which "
+            "Fit this isotope's amount separately – for a selective (long or weak) pulse, which "
             "excites the two isotopes' central transitions differently, or an isotopically "
             "enriched sample. Otherwise it is the parent's × abundance × receptivity.")
         self.own_fwhm_check = QCheckBox("Broadening")
         self.own_fwhm_check.setToolTip(
-            "Fit this isotope's broadening separately -- when a distribution of quadrupolar "
+            "Fit this isotope's broadening separately – when a distribution of quadrupolar "
             "couplings, rather than of shifts, dominates the width.")
         for box, name in ((self.own_amount_check, "amount"), (self.own_fwhm_check, "fwhm")):
             box.toggled.connect(lambda on, n=name: self._on_own(n, on))
@@ -477,7 +477,7 @@ class CombinedHamiltonianPanel(QWidget):
 
     def _build_actions(self, v) -> None:
         """The part below the site editor: for Simulate, the axis and
-        Simulate/Export; Fit > CSA, Quad & J-coupling replaces it."""
+        Simulate/Export; Fit > Solid-state NMR replaces it."""
         aform = QFormLayout()
         self.auto_axis_check = QCheckBox("Auto: frame every site")
         self.auto_axis_check.setChecked(True)
@@ -521,7 +521,7 @@ class CombinedHamiltonianPanel(QWidget):
         self.python_button.setToolTip("Copy notebook code that reproduces this simulation.")
         self.python_button.clicked.connect(self.copy_python)
         self.to_fit_button = QPushButton("Send to Fit as Starting Values")
-        self.to_fit_button.setToolTip("Put these sites into Fit ▸ CSA, Quad & J-coupling as the "
+        self.to_fit_button.setToolTip("Put these sites into Fit ▸ Solid-state NMR as the "
                                       "starting model, with this regime, transitions and level "
                                       "of theory.")
         self.to_fit_button.setEnabled(self._send_to_fit is not None)
@@ -687,7 +687,7 @@ class CombinedHamiltonianPanel(QWidget):
                              "for uniform excitation)")
                 lines.append(text + ". Edit the parent to change them.")
                 if self._resolved(site) is None:
-                    lines.append("⚠ This link cannot hold as the peaks stand -- see Simulate "
+                    lines.append("⚠ This link cannot hold as the peaks stand – see Simulate "
                                  "or Fit for the reason.")
         except KeyError:
             return ""
@@ -946,7 +946,7 @@ class CombinedHamiltonianPanel(QWidget):
         total = len(self.site_dicts)
         if total > 1:
             self.selection_label.setText(
-                f"{n} of {total} peaks selected" + (" -- Copy to Peaks gives them the current "
+                f"{n} of {total} peaks selected" + (" – Copy to Peaks gives them the current "
                                                     "peak's interactions." if n > 1 else "."))
         else:
             self.selection_label.setText("")
@@ -1092,7 +1092,7 @@ class CombinedHamiltonianPanel(QWidget):
             return None
         if kind in ("csa", "quadrupolar") and any(i["type"] == kind for i in site["interactions"]):
             QMessageBox.information(self, "Add interaction",
-                                    f"{site['label']} already has a {_TITLES[kind]} -- a site "
+                                    f"{site['label']} already has a {_TITLES[kind]} – a site "
                                     "has one; edit it instead.")
             return None
         if kind == "quadrupolar" and (self._site_spin(site) or 0) < 1:
@@ -1232,7 +1232,7 @@ class CombinedHamiltonianPanel(QWidget):
                 result = ch.simulate_combined(sites, axis, **settings)
             elapsed = time.perf_counter() - started
         except (ValueError, KeyError) as exc:
-            QMessageBox.warning(self, "CSA, Quad & J-coupling", str(exc))
+            QMessageBox.warning(self, "Solid-state NMR", str(exc))
             return False
         nucleus = self.observed() or sites[0].nucleus
         self.result = {"result": result, "sites": sites, "settings": settings, "axis": axis}
@@ -1249,7 +1249,7 @@ class CombinedHamiltonianPanel(QWidget):
         elif self._draw_sites is not None and self.show_sites_check.isChecked() and len(sites) > 1:
             self._draw_sites(result, nucleus)
         edge = max(abs(data[0]), abs(data[-1])) / (np.max(np.abs(data)) or 1.0)
-        warn = ("\n⚠ Intensity at the axis edge is {:.0%} of the peak -- the pattern is "
+        warn = ("\n⚠ Intensity at the axis edge is {:.0%} of the peak – the pattern is "
                 "clipped; widen the axis.".format(edge)) if edge > 0.01 else ""
         muted, warn_colour = self.results_label.colours()
         self.results_label.setReport(
@@ -1312,7 +1312,7 @@ def _describe_site(site: dict) -> str:
     if site.get("link"):
         own = site["link"].get("free") or []
         bits.append(f"linked to {site['link'].get('to')}"
-                    + (f" (own {', '.join(own)})" if own else "") + " -- its other values follow")
+                    + (f" (own {', '.join(own)})" if own else "") + " – its other values follow")
     for i in site.get("interactions") or []:
         kind = i.get("type")
         if kind == "csa":
@@ -1326,7 +1326,7 @@ def _describe_site(site: dict) -> str:
 
 
 # ============================================================================
-# Fit > CSA, Quad & J-coupling
+# Fit > Solid-state NMR
 # ============================================================================
 
 #: Parameter table columns.
@@ -1357,8 +1357,8 @@ def _parse_float(text: str):
 
 
 class CombinedFitPanel(CombinedHamiltonianPanel):
-    """Fit CSA, Quad & J-coupling sites to the selected spectrum: the same
-    site editor as Simulate > CSA, Quad & J-coupling, plus a table of every
+    """Fit Solid-state NMR sites to the selected spectrum: the same
+    site editor as Simulate > Solid-state NMR, plus a table of every
     parameter -- start, free/fixed, bounds, and optional extra starting
     values for a multi-start fit -- and the result as a table.
 
@@ -1460,11 +1460,11 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self._parameter_note_text = {
             "parameters": "Start values come from the sites above (and can be typed here). "
                           "Untick Free to hold a value. Min/Max blank: the natural limits. Try "
-                          "starts: extra starting values, comma-separated -- every combination "
+                          "starts: extra starting values, comma-separated – every combination "
                           "is fitted and the best kept (a static CSA is often multimodal).",
             "sites": "Start values, a site per row (type to change them). Grey italic: held "
-                     "fixed. Tinted: limits or extra starts set. Right-click a cell -- or a "
-                     "selection, e.g. a column (click its header) -- to free, fix or set "
+                     "fixed. Tinted: limits or extra starts set. Right-click a cell – or a "
+                     "selection, e.g. a column (click its header) – to free, fix or set "
                      "limits; hover for its settings."}
         note = QLabel(self._parameter_note_text["parameters"])
         note.setWordWrap(True)
@@ -1526,7 +1526,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.preview_check.setChecked(True)
         self.preview_check.setToolTip(
             "Draw the model the fit will start from over the data, redrawn as peaks, "
-            "interactions and settings change -- the fit's own first step: same window, "
+            "interactions and settings change – the fit's own first step: same window, "
             "held baseline and amounts.")
         form.addRow("", self.preview_check)
         self.preview_orientations_spin = TypedSpinBox()
@@ -1535,7 +1535,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.preview_orientations_spin.setSpecialValueText("auto")
         self.preview_orientations_spin.setValue(0)
         self.preview_orientations_spin.setToolTip(
-            "Powder orientations for the preview (auto: 4,181 static, 233 MAS -- a few % of "
+            "Powder orientations for the preview (auto: 4,181 static, 233 MAS – a few % of "
             "the converged shape, fast enough to follow each change). The fit itself uses "
             "Orientations above.")
         form.addRow("Preview orientations:", self.preview_orientations_spin)
@@ -1555,7 +1555,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.preview_button.setToolTip("Draw the starting model over the data now.")
         self.preview_button.clicked.connect(lambda: self.preview_now(quiet=False))
         preview_row.addWidget(self.preview_button)
-        self.fit_button = QPushButton("Fit CSA, Quad && J-coupling")
+        self.fit_button = QPushButton("Fit Solid-state NMR")
         self.fit_button.clicked.connect(self.fit)
         preview_row.addWidget(self.fit_button, 1)
         v.addLayout(preview_row)
@@ -1584,7 +1584,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.use_fitted_button = QPushButton("Use fitted values as start")
         self.use_fitted_button.clicked.connect(self.use_fitted_as_start)
         self.send_button = QPushButton("Open in Simulate")
-        self.send_button.setToolTip("Put the fitted sites into Simulate > CSA, Quad & J-coupling.")
+        self.send_button.setToolTip("Put the fitted sites into Simulate > Solid-state NMR.")
         self.send_button.clicked.connect(self._on_send)
         for b in (self.use_fitted_button, self.send_button):
             b.setEnabled(False)
@@ -1598,7 +1598,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.correlation_button.setToolTip(
             "Show the correlation matrix of the fitted parameters instead of the fit (untick "
             "to go back).\n\n"
-            "r near ±1: two parameters trade off -- typically Δ and η of a CSA, C_Q and "
+            "r near ±1: two parameters trade off – typically Δ and η of a CSA, C_Q and "
             "δiso of a quadrupolar site, or the amounts and widths of overlapping sites. The "
             "data then fix a combination of them, not each one, and their ± understate how "
             "loosely each is pinned. Fixed parameters have no row.")
@@ -2079,7 +2079,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             return self.window_ranges_edit.ranges()
         regions = self._get_regions() or None
         if not regions:
-            raise ValueError("Fit window is 'Integration regions', but there are none -- draw "
+            raise ValueError("Fit window is 'Integration regions', but there are none – draw "
                              "them under Fit > Integration, or choose another window.")
         return regions
 
@@ -2131,7 +2131,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             results = bridge.results_from_spectrum(spectrum, row=row)
             args = self.fit_arguments()
         except (ValueError, IndexError, KeyError) as exc:
-            QMessageBox.warning(self, "CSA, Quad & J-coupling fit", str(exc))
+            QMessageBox.warning(self, "Solid-state NMR fit", str(exc))
             return False
         self._preview_timer.stop()
         kwargs = dict(vary=args["vary"], bounds=args["bounds"] or None,
@@ -2139,7 +2139,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                       estimate_amounts=args["estimate_amounts"], **args["settings"])
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         started = time.perf_counter()
-        with FitProgress(self, "CSA, Quad & J-coupling fit") as fit_progress_box:
+        with FitProgress(self, "Solid-state NMR fit") as fit_progress_box:
             try:
                 if args["starts"]:
                     fit = cfit.fit_combined_multistart(
@@ -2149,7 +2149,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                     fit = cfit.fit_combined(results, args["sites"], **kwargs)
             except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
                 QApplication.restoreOverrideCursor()
-                QMessageBox.warning(self, "CSA, Quad & J-coupling fit", f"The fit did not succeed:\n\n{exc}")
+                QMessageBox.warning(self, "Solid-state NMR fit", f"The fit did not succeed:\n\n{exc}")
                 return False
         if fit_progress_box.stopped:
             return False
@@ -2498,7 +2498,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         t.setVisible(True)
         q = r["quality"]
         head = r["log"].splitlines()
-        lines = [head[0].replace("CSA, Quad & J-coupling fit: ", "CSA, Quad & J-coupling fit — ")]
+        lines = [head[0].replace("Solid-state NMR fit: ", "Solid-state NMR fit — ")]
         lines += [line for line in head[1:] if line.startswith("Multi-start")]
         multi = [line for line in head[1:] if line.startswith("Multi-start")]
         lines.append(f"R² {q['r2']:.5f}  ·  RMSE {q['rmse']:.3g}  ·  reduced χ² "

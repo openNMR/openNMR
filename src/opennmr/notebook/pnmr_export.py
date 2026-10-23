@@ -1,10 +1,10 @@
 """
-pNMR (CIF bond pathways) peaks as CSA, Quad & J-coupling sites.
+pNMR (CIF bond pathways) peaks as Solid-state NMR sites.
 
 The pNMR simulation and fit (:mod:`.pnmr_simulator`, :mod:`.pnmr_fit`)
 compute **isotropic** peaks only -- one shift per environment (group).
 These functions turn those peaks into site dicts for
-:mod:`.combined_hamiltonian` (the GUI's "CSA, Quad & J-coupling"
+:mod:`.combined_hamiltonian` (the GUI's "Solid-state NMR"
 panels), where CSA, quadrupolar and J interactions can be added to each
 (explicit user request, 2026-10-12: "Export All (or selected) sites to
 'Combined Hamiltonian'").
@@ -79,7 +79,7 @@ def _common_notes(nucleus: str, source: str) -> list[str]:
     notes = [
         "Each site has its isotropic shift only. Add CSA (e.g. the electron-nuclear dipolar "
         "anisotropy, often hundreds of ppm in paramagnets), quadrupolar or J interactions to "
-        "it in CSA, Quad & J-coupling."]
+        "it in Solid-state NMR."]
     spin = _spin(nucleus)
     if spin is not None and spin > 0.5:
         if source == "fit":

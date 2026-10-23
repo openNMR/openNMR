@@ -39,9 +39,9 @@ import math
 import numpy as np
 
 KIND_LABELS = {
-    "isotropic": "Isotropic peaks", "integration": "Integration", "jcoupling": "J-coupling",
+    "isotropic": "Solution NMR", "integration": "Integration", "jcoupling": "J-coupling",
     "csa": "CSA/Dipolar", "quadrupolar": "Quadrupolar", "czjzek": "Czjzek",
-    "combined": "CSA, Quad & J-coupling", "curve": "Curve fit", "spectrum": "Spectral fit",
+    "combined": "Solid-state NMR", "curve": "Curve fit", "spectrum": "Spectral fit",
     "multi": "Multi-spectrum fit",
 }
 
@@ -162,7 +162,7 @@ def compare_fit_models(models) -> dict:
     note = ""
     if len(models) > 1 and not comparable:
         note = ("These fits used different points (window, regions or data), so AIC/BIC "
-                "cannot rank them -- only fits to the same points can be compared.")
+                "cannot rank them – only fits to the same points can be compared.")
     for key in ("aic", "bic"):
         values = [r[key] for r in rows if r[key] is not None]
         best = min(values) if values and comparable else None

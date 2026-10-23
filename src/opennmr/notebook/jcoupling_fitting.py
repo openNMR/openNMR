@@ -179,7 +179,7 @@ def _normalise_jcoupling_sites(p0):
         if len(site["couplings"]) == 0:
             raise ValueError(
                 f"p0[{i}] (label={site.get('label')!r}) has an empty "
-                f"'couplings' list -- for an uncoupled singlet, this "
+                f"'couplings' list – for an uncoupled singlet, this "
                 f"module has nothing to do; use ordinary peak fitting "
                 f"(nmrtools.fitting.fit_spectrum) instead."
             )

@@ -35,15 +35,15 @@ def _titles(window, tab_name):
 
 def test_sections_are_where_asked(qapp):  # noqa: F811
     # 2026-10-06: no J-coupling section any more -- first-order J is an
-    # interaction of a CSA, Quad & J-coupling peak, and these panels are
+    # interaction of a Solid-state NMR peak, and these panels are
     # Combined's "Strongly coupled peaks" model, in spin-system mode.
     window = MainWindow()
     fit = _titles(window, "Fit")
     assert "J-coupling" not in fit and "CSA/Dipolar" not in fit
     # Integration moved to its own Integrate tile (2026-10-16).
     assert "Integration" not in fit
-    assert fit.index("Isotropic (Gauss/Lor)") + 1 == fit.index("CSA, Quad & J-coupling")
-    assert _titles(window, "Simulate")[0] == "CSA, Quad & J-coupling"
+    assert fit.index("Solution NMR") + 1 == fit.index("Solid-state NMR")
+    assert _titles(window, "Simulate")[0] == "Solid-state NMR"
     for model, panel in ((window.combined_fit_model, window.jcoupling_fit_panel),
                          (window.combined_sim_model, window.jcoupling_sim_panel)):
         assert model.spin_widget is panel and panel.spin_mode()
@@ -53,7 +53,7 @@ def test_sections_are_where_asked(qapp):  # noqa: F811
 
 def _editor(qapp, mode="simulate"):  # noqa: F811
     """The first-order editor. Since 2026-10-06 the panels open in
-    spin-system mode (first-order J is CSA, Quad & J-coupling's); their
+    spin-system mode (first-order J is Solid-state NMR's); their
     first-order mode remains, for kept fits and saved states."""
     window = MainWindow()
     panel = window.jcoupling_sim_panel if mode == "simulate" else window.jcoupling_fit_panel

@@ -127,7 +127,7 @@ def sample_particle_sizes(n, mean, spread, kind="gaussian", eta=0.5,
     if kind != "gaussian":
         warnings.warn(
             f"kind={kind!r}: 'spread' is used as the distribution's scale "
-            f"parameter (HWHM), not a literal standard deviation -- {kind} has "
+            f"parameter (HWHM), not a literal standard deviation – {kind} has "
             f"no finite variance. See sample_particle_sizes' docstring.",
             stacklevel=2,
         )
@@ -306,7 +306,7 @@ def random_close_pack(
         warnings.warn(
             f"{int(too_big.sum())} of {n} sampled particles have a "
             f"bounding-sphere diameter larger than the smallest box "
-            f"dimension ({box.min():.4g}) and cannot be placed at all -- "
+            f"dimension ({box.min():.4g}) and cannot be placed at all – "
             f"they are skipped, not silently shrunk. Reduce mean_size/"
             f"spread_size or enlarge box_size.",
             stacklevel=2,
@@ -368,7 +368,7 @@ def random_close_pack(
         if stats["n_placed"] < n:
             print(f"  {n_jammed} particle(s) never found a non-overlapping slot "
                   f"within max_attempts_per_particle={max_attempts_per_particle} "
-                  f"(RSA jamming -- see module docstring, not a bug). Lower n or "
+                  f"(RSA jamming – see module docstring, not a bug). Lower n or "
                   f"mean_size, raise box_size, or raise max_attempts_per_particle "
                   f"to place more.")
 
@@ -592,7 +592,7 @@ def grow_and_separate_pack(
         warnings.warn(
             f"{int(too_big.sum())} of {n} sampled particles have a "
             f"bounding-sphere diameter larger than the smallest box "
-            f"dimension ({box.min():.4g}) and can never fit -- they are "
+            f"dimension ({box.min():.4g}) and can never fit – they are "
             f"excluded (frozen at zero size), not silently shrunk.",
             stacklevel=2,
         )
@@ -662,7 +662,7 @@ def grow_and_separate_pack(
         positions, s * R_target, box, min_gap, max_iters=10 * relax_iters_per_step, rng=rng)
     if not polish_resolved and verbose:
         print(f"  Warning: final polish pass left a residual max overlap of "
-              f"{polish_overlap:.3g} (vs typical particle size {np.mean(R_target):.3g}) -- "
+              f"{polish_overlap:.3g} (vs typical particle size {np.mean(R_target):.3g}) – "
               f"consider raising relax_iters_per_step if this matters for your use case.")
 
     kept = s > 1e-9
@@ -695,7 +695,7 @@ def grow_and_separate_pack(
               f"mean achieved size fraction = {stats['mean_achieved_size_fraction']:.3f}, "
               f"achieved volume fraction = {stats['achieved_volume_fraction']:.3f}")
         if stats["n_at_full_size"] < stats["n_placed"]:
-            print("  Some particles were shrunk (isotropically, aspect ratio preserved) to fit -- "
+            print("  Some particles were shrunk (isotropically, aspect ratio preserved) to fit – "
                   "check achieved_size_fraction per-particle (`s` in the source) if the size "
                   "distribution fidelity matters for your analysis, or lower n / mean_size / "
                   "packing density expectations.")

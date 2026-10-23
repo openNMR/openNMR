@@ -334,7 +334,7 @@ class UpdatesPanel(QWidget):
         self._save()
         self._show_result(result)
         if result.status == "newer":
-            self._notify(f"openNMR {result.info.version} is available -- Settings ▸ Updates.")
+            self._notify(f"openNMR {result.info.version} is available – Settings ▸ Updates.")
         elif not quiet and result.status == "current":
             self._notify("openNMR is up to date.")
         self.checkFinished.emit(result)
@@ -462,7 +462,7 @@ class UpdatesPanel(QWidget):
                 self.command_row.show()
             self._notify(f"The update could not be started ({exc}).")
             return
-        self.status_label.setText("Updating -- openNMR will close and open again.")
+        self.status_label.setText("Updating – openNMR will close and open again.")
         self._exit_app()
 
     def _start_install(self, info) -> None:
@@ -527,7 +527,7 @@ class UpdatesPanel(QWidget):
         self.install_button.setEnabled(True)
         if not payload.get("ok"):
             self.status_label.setText(f"The update did not install: {payload.get('message', '')}")
-            self._notify("The update did not install -- see Settings ▸ Updates.")
+            self._notify("The update did not install – see Settings ▸ Updates.")
             return
         if payload.get("pip"):
             text = f"openNMR was updated to {payload.get('version', 'the newest version')}. " \
@@ -545,7 +545,7 @@ class UpdatesPanel(QWidget):
         except update_install.InstallError as exc:
             self.status_label.setText(f"The update did not install: {exc}")
             return
-        self.status_label.setText("Installing -- openNMR will close and start again.")
+        self.status_label.setText("Installing – openNMR will close and start again.")
         self._exit_app()
 
     def _on_release_page_clicked(self) -> None:

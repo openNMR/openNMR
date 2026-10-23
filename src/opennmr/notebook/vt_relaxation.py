@@ -936,7 +936,7 @@ def fit_vt_regions(datasets, regions, **kwargs) -> dict:
         except (ValueError, RuntimeError) as exc:
             fits.append({"error": str(exc), "region_label": label, "T_range": (lo, hi),
                          "model_text": label, "n_points": n_points})
-            lines.append(f"{label} ({lo:g}-{hi:g} K): not fitted -- {exc}")
+            lines.append(f"{label} ({lo:g}-{hi:g} K): not fitted – {exc}")
             continue
         fit["region_label"] = label
         fit["T_range"] = (lo, hi)

@@ -41,9 +41,9 @@ def _offset_spectra():
 
 def test_triangles_are_gone_and_named_in_the_error():
     assert "triangles" not in ot.STYLES and "lineshape" in ot.STYLES
-    with pytest.raises(ValueError, match="replaced by 'lineshape'"):
+    with pytest.raises(ValueError, match="is now called 'lineshape'"):
         ot.plot_offset_series(_series(), style="triangles")
-    with pytest.raises(ValueError, match="replaced by 'lineshape'"):
+    with pytest.raises(ValueError, match="is now called 'lineshape'"):
         ot.pattern_spectrum(_series(), style="triangles")
 
 

@@ -950,7 +950,7 @@ def load_simulation_parameters(path, cif_filename=None) -> Dict:
     missing = [k for k in ("cif_filename", "atom_of_interest", "shell_bins", "shift_dict",
                            "nuclide", "B0_tesla") if k not in raw]
     if missing:
-        raise ValueError(f"{os.path.basename(path)} is missing {', '.join(missing)} -- "
+        raise ValueError(f"{os.path.basename(path)} is missing {', '.join(missing)} – "
                          f"not a pNMR parameters file?")
     kwargs = {k: raw[k] for k in _RECORDED_ARGUMENTS if k in raw}
     kwargs["shell_bins"] = [(str(n), float(a), float(b)) for n, a, b in kwargs["shell_bins"]]

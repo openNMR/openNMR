@@ -246,8 +246,8 @@ def _parameter_items(parameters, pcov=None, free_names=None, natural_bounds=None
                              f"allowed range ({lo:g} to {hi:g}). Whatever value it shows is not "
                              "a measurement."))
             out.append(_item("next", "note",
-                             f"Fix {who} at a sensible value (untick Free) -- a literature "
-                             "value, or one from another measurement -- so the other numbers "
+                             f"Fix {who} at a sensible value (untick Free) – a literature "
+                             "value, or one from another measurement – so the other numbers "
                              "stop depending on it.", {"type": "fix_parameter", "site": label,
                                                        "name": name}))
             continue
@@ -359,7 +359,7 @@ def _join(parts):
 
 
 # ============================================================
-# CSA, Quad & J-coupling fits (one spectrum)
+# Solid-state NMR fits (one spectrum)
 # ============================================================
 
 def _site_info(fit):
@@ -756,7 +756,7 @@ def advise_combined_fit(fit, alternatives=None, nucleus_spin=None):
                 items.append(_item(
                     "tells", "warn",
                     f"There is signal near {where} that the model leaves out, where spinning "
-                    f"sidebands of {label} would be -- but {label} has no anisotropy, so the model "
+                    f"sidebands of {label} would be – but {label} has no anisotropy, so the model "
                     "gives it none."))
                 items.append(_item(
                     "next", "note",
@@ -810,7 +810,7 @@ def advise_combined_fit(fit, alternatives=None, nucleus_spin=None):
             items.append(_item(
                 "tells", "note",
                 f"{s['label']} makes up only {share:.1f}% of the signal"
-                + (" -- not distinguishable from zero" if err is not None and err > share else "")
+                + (" – not distinguishable from zero" if err is not None and err > share else "")
                 + ": your data may not need it."))
             items.append(_item(
                 "next", "note",
@@ -992,7 +992,7 @@ def compare_items(fit, alternatives, this_name="this fit"):
                     else "slightly better")
         if d > 0:
             extra = k_this - k_other
-            why = (" -- by far more than its extra parameters would give by chance"
+            why = (" – by far more than its extra parameters would give by chance"
                    if extra > 0 and d > 10 else "")
             out.append(_item("tells", "good",
                              f"This fit ({desc_mine}) describes your data {strength} than "
@@ -1046,8 +1046,8 @@ def advise_series(results):
                  if is_model else "The fit leaves real signal behind in slice")
                 + f"{'s' if len(bad) > 1 else ''} {_ranges(bad)} (worst, slice "
                 f"{results[worst]['index']}: about {ratios[worst]:.0f}× the noise). "
-                + ("The shape changes along the series -- for example, one part of the "
-                   "pattern relaxing faster than another -- so the intensities from those "
+                + ("The shape changes along the series – for example, one part of the "
+                   "pattern relaxing faster than another – so the intensities from those "
                    "slices are less reliable." if is_model else
                    "The intensities from those slices are less reliable.")))
             items.append(_item(
@@ -1247,7 +1247,7 @@ def advise_relaxation(result, label=None):
                                    "roughly determined."))
             elif rel < 0.05 and not systematic and extrapolated:
                 items.append(_item("tells", "note",
-                                   f"{sym}{who} = {value:.4g} ± {float(err):.2g} (±{rel:.1%}) -- "
+                                   f"{sym}{who} = {value:.4g} ± {float(err):.2g} (±{rel:.1%}) – "
                                    "but that small uncertainty assumes the curve carries on as "
                                    "the model says beyond your last point."))
             elif rel < 0.05 and not systematic:
@@ -1286,7 +1286,7 @@ def advise_relaxation(result, label=None):
             items.append(_item(
                 "tells", "note",
                 f"The two components{who} have similar rates ({rates[0]} = {a:.3g}, "
-                f"{rates[1]} = {b:.3g}): the data may not support two -- compare with a "
+                f"{rates[1]} = {b:.3g}): the data may not support two – compare with a "
                 "single-component or stretched fit."))
     if model.startswith("triexp"):
         items += _triexp_items(result, names, params, errors, who)
@@ -1393,7 +1393,7 @@ def _triexp_items(result, names, params, errors, who):
     else:
         items.append(_item(
             "tells", "good",
-            f"Three components fit{who} clearly better than two (ΔBIC = {d:+.1f}) -- far "
+            f"Three components fit{who} clearly better than two (ΔBIC = {d:+.1f}) – far "
             "more than the extra parameters would give by chance."))
     return items
 

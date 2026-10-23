@@ -139,7 +139,7 @@ class Compare2DControls(QGroupBox):
         self.inset_floor_spin.setSuffix(" %")
         self.inset_floor_spin.setSpecialValueText("Same as plot")
         self.inset_floor_spin.setToolTip(
-            "Lowest contour in this inset, as a percentage of the whole spectrum's maximum -- "
+            "Lowest contour in this inset, as a percentage of the whole spectrum's maximum – "
             "lower it to bring out weak peaks. Levels are always relative to the whole spectrum, "
             "so a contour means the same intensity in the inset and the plot.")
         edit_form.addRow("Lowest contour:", self.inset_floor_spin)

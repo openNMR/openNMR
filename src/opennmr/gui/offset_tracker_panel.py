@@ -113,7 +113,7 @@ class OffsetTrackerPanel(QWidget):
         for key in ot.CHANNELS:
             self.channel_combo.addItem(key, key)
         self.channel_combo.setToolTip(
-            "The channel whose offset was stepped: O2 (f2) or O3 (f3) -- whichever the pulse "
+            "The channel whose offset was stepped: O2 (f2) or O3 (f3) – whichever the pulse "
             "programme pulses the second nucleus on. Read as O/BF in ppm of that channel's "
             "nucleus.")
         row.addWidget(self.channel_combo)
@@ -127,7 +127,7 @@ class OffsetTrackerPanel(QWidget):
         self.shift_edit = QLineEdit("0")
         self.shift_edit.setMaximumWidth(80)
         self.shift_edit.setToolTip(
-            "ppm added to every offset -- when the pulsed nucleus's 0 ppm is not at its "
+            "ppm added to every offset – when the pulsed nucleus's 0 ppm is not at its "
             "channel's basic frequency (BF), e.g. a non-standard reference.")
         shift_row.addWidget(self.shift_edit)
         shift_row.addWidget(QLabel("ppm"))
@@ -156,7 +156,7 @@ class OffsetTrackerPanel(QWidget):
         region.addStretch(1)
         form.addRow("Region:", region)
         self.drag_on_combo = QComboBox()
-        self.drag_on_combo.setToolTip("The spectrum shown to drag the region on -- any of them.")
+        self.drag_on_combo.setToolTip("The spectrum shown to drag the region on – any of them.")
         form.addRow("Drag on:", self.drag_on_combo)
         v.addLayout(form)
         buttons = QHBoxLayout()

@@ -37,6 +37,7 @@ from ...core.registry import find_gamma, NUC_label
 from ...notebook import fit_display
 from ...core.spectrum import NMRAxis, NMRSpectrum
 from ... import plotting
+from ...plotting import inset as inset_module
 from ...processing import slicing as processing_slicing
 
 
@@ -930,6 +931,16 @@ class MplCanvas(QWidget):
     #: message}`` when there is no peak to measure there.
     peakWidthMeasured = Signal(dict)
     widthModeChanged = Signal(bool)
+    #: Inset mode (draw a box on the plot to magnify) switched on or off.
+    insetModeChanged = Signal(bool)
+    #: An inset was added from a box drawn on the plot (its index), or the
+    #: insets on this plot were changed some other way.
+    insetAdded = Signal(int)
+    insetsChanged = Signal()
+    #: The user asked for the inset options (right-click on the Inset button).
+    insetOptionsRequested = Signal()
+    #: An inset could not be added (the reason).
+    insetFailed = Signal(str)
     #: Click-to-pick / drag-to-select switched on or off -- including
     #: *by the canvas*, when another interaction mode takes over (see
     #: _release_other_modes), so the button that started it can uncheck.
@@ -984,6 +995,7 @@ class MplCanvas(QWidget):
     #: list that would go stale across a figure.clear() (a brand new
     #: Axes each time, invalidating any previously held patch objects).
     _REGION_PATCH_GID = "integration_region"
+    _integral_label_items: list = []
 
     #: Tag on the not-yet-committed baseline overlay, so it can be
     #: found and replaced without keeping a reference that a figure
@@ -1061,11 +1073,24 @@ class MplCanvas(QWidget):
             "Width",
             "Peak width: click on a peak and its full width at half maximum is drawn and "
             "given in ppm and Hz (along F2 and F1 on a 2D). Where peaks overlap the value "
-            "is marked as an estimate -- fit the peaks for a reliable width. Cmd/Ctrl+L toggles "
+            "is marked as an estimate – fit the peaks for a reliable width. Cmd/Ctrl+L toggles "
             "this from anywhere.",
             self.set_width_mode,
             checked=False,
         )
+
+        self._inset_button = self._add_toolbar_toggle(
+            "Inset",
+            "Magnify part of the plot: drag a box over the region and a zoomed copy is "
+            "placed on the plot. Works on spectra, 2D contours, curves and profiles. "
+            "Right-click this button, or the plot, for the inset's position, typeface, "
+            "connecting lines and axes.",
+            self.set_inset_mode,
+            checked=False,
+        )
+        self._inset_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._inset_button.customContextMenuRequested.connect(
+            lambda _pos: self.insetOptionsRequested.emit())
 
         # "Showing:" -- which stored result this canvas is displaying,
         # when its owner has several to choose between (a curve fit, a
@@ -1390,6 +1415,15 @@ class MplCanvas(QWidget):
         self._region_select_mode = False
         self._measurement_mode = False
         self._width_mode = False
+        # Insets on any plot (see the "insets" section): the specs live
+        # here, keyed by the plot they were drawn on, so they come back
+        # whenever that plot is drawn again.
+        self._inset_mode = False
+        self._inset_start = None
+        self._inset_store: dict = {}
+        self._inset_context = None
+        self._inset_target = 0
+        self._inset_applying = False
         # The Qt cursor shape currently set on the canvas, so
         # _refresh_cursor can skip a setCursor that would change
         # nothing -- it runs on every mouse move, alongside a blitted
@@ -1614,6 +1648,7 @@ class MplCanvas(QWidget):
         self.canvas.mpl_connect("motion_notify_event", self._on_motion)
         self.canvas.mpl_connect("figure_leave_event", self._on_figure_leave)
         self.canvas.mpl_connect("button_release_event", self._on_release)
+        self.canvas.mpl_connect("draw_event", self._on_draw_apply_insets)
         # Deliberately no matplotlib key_press_event binding for the
         # measurement toggle. It used to be a bare "d", which fired on
         # any keystroke over the canvas -- including the "d" of anything
@@ -1685,6 +1720,8 @@ class MplCanvas(QWidget):
             self.set_measurement_mode(False)
         if keep != "width" and getattr(self, "_width_mode", False):
             self.set_width_mode(False)
+        if keep != "inset" and getattr(self, "_inset_mode", False):
+            self.set_inset_mode(False)
         if keep != "nav" and self.toolbar.mode:
             # The base-class toggles, not _Toolbar's overrides: this is
             # the canvas releasing the tool, not the user choosing one.
@@ -1730,6 +1767,8 @@ class MplCanvas(QWidget):
             self.set_measurement_mode(False)
         if enabled and getattr(self, "_width_mode", False):
             self.set_width_mode(False)
+        if enabled and getattr(self, "_inset_mode", False):
+            self.set_inset_mode(False)
         self._crosshair_enabled = enabled
         self._sync_toggle(getattr(self, "_crosshair_button", None), enabled)
         if not enabled:
@@ -1898,6 +1937,29 @@ class MplCanvas(QWidget):
         if changed:
             self.widthModeChanged.emit(enabled)
 
+    def set_inset_mode(self, enabled: bool) -> None:
+        """Toggle Inset mode: while on, a left-drag draws a box over the
+        part of the plot to magnify, and on release an inset of it is added
+        (:meth:`add_inset_region`) and the mode switches itself off.
+        Releases the other click modes and the Crosshair, as Width does."""
+        enabled = bool(enabled)
+        changed = enabled != self._inset_mode
+        if enabled:
+            self._release_other_modes(keep="inset")
+            if self._crosshair_enabled:
+                self.set_crosshair_enabled(False)
+        self._inset_mode = enabled
+        if not enabled:
+            self._inset_start = None
+            try:
+                self.toolbar.remove_rubberband()
+            except Exception:  # noqa: BLE001 -- a stale rubber band is harmless
+                pass
+        self._sync_toggle(getattr(self, "_inset_button", None), enabled)
+        self._refresh_cursor()
+        if changed:
+            self.insetModeChanged.emit(enabled)
+
     def set_view_switcher(self, entries: list[tuple[str, str]], current: str | None = None) -> None:
         """Populate the "Showing:" switcher with ``(key, label)`` pairs
         and select ``current``.
@@ -1970,6 +2032,25 @@ class MplCanvas(QWidget):
         for lo, hi in regions:
             span = self.ax.axvspan(lo, hi, color="tab:orange", alpha=0.15, zorder=0)
             span.set_gid(self._REGION_PATCH_GID)
+        self.canvas.draw_idle()
+
+    def set_integral_labels(self, items) -> None:
+        """Write the integral of each region under its peak on the Spectrum
+        plot (``items``: ``[(x, text), ...]``, from
+        :mod:`opennmr.notebook.integral_labels`; ``None`` or empty removes
+        them). The items are kept, so a redraw of the plot puts them back."""
+        from ...notebook import peak_integral_labels as _labels
+        self._integral_label_items = list(items or [])
+        ax = self.ax
+        if ax is None or ax not in self.figure.axes:
+            return
+        _labels.remove_integral_labels(ax)
+        if self._integral_label_items:
+            size = None
+            ticks = ax.xaxis.get_ticklabels()
+            if ticks:
+                size = ticks[0].get_fontsize()
+            _labels.add_integral_labels(ax, self._integral_label_items, fontsize=size)
         self.canvas.draw_idle()
 
     def set_highlight_regions(self, regions, key: str = "highlight") -> None:
@@ -2445,7 +2526,7 @@ class MplCanvas(QWidget):
                 or self._zoom_start is not None):
             return
         if (self._pick_mode or self._region_select_mode or self._measurement_mode
-                or getattr(self, "_width_mode", False)):
+                or getattr(self, "_width_mode", False) or self._inset_mode):
             shape = Qt.CursorShape.CrossCursor
         else:
             strip = self._scroll_strip_at(event)
@@ -3516,6 +3597,256 @@ class MplCanvas(QWidget):
         self._apply_layout()
         self.canvas.draw_idle()
 
+
+    # ---- insets on any plot ---------------------------------------------------
+    #
+    # An inset is a magnified copy of part of a plot (opennmr.plotting.inset).
+    # Its settings are kept here, against the plot they were drawn on, and
+    # put back after every redraw: each redraw makes new axes, which would
+    # otherwise lose them. A single 2D contour keeps its own list
+    # (``_contour_insets``), because a contour is re-contoured from the data
+    # in the region rather than copied.
+
+    def set_inset_context(self, key) -> None:
+        """Name the data on show (the selected spectrum, say), so insets
+        drawn on one spectrum are not applied to another that happens to
+        have the same axes."""
+        if key != self._inset_context:
+            self._inset_context = key
+            self.canvas.draw_idle()
+
+    def _plain_axes(self) -> list:
+        return [a for a in self.figure.axes
+                if a.get_gid() != inset_module.INSET_GID and getattr(a, "name", "") != "3d"]
+
+    def insets_supported(self) -> bool:
+        """Whether the plot on show can take an inset: any 2D plot made of
+        lines, areas, points or images. Not a 3D plot."""
+        if self._contour_spectrum is not None:
+            return True
+        return bool(self._plain_axes()) and not any(
+            getattr(a, "name", "") == "3d" for a in self.figure.axes)
+
+    @staticmethod
+    def _inset_xrange(ax):
+        """The x-extent of the data on an axes -- what tells two plots with
+        the same labels apart, and unchanged when a long line is thinned for
+        display or the plot is re-phased or zoomed."""
+        lines = [l for l in ax.get_lines() if inset_module._copyable(l) and len(l.get_xdata()) > 1]
+        if lines:
+            x = np.asarray(max(lines, key=lambda l: len(l.get_xdata())).get_xdata(), dtype=float)
+            if x.size and np.isfinite(x).any():
+                return float(np.nanmin(x)), float(np.nanmax(x))
+        if ax.images:
+            extent = ax.images[0].get_extent()
+            return float(min(extent[:2])), float(max(extent[:2]))
+        return 0.0, 1.0
+
+    @staticmethod
+    def _inset_ranges_match(a, b) -> bool:
+        span = max(abs(a[1] - a[0]), abs(b[1] - b[0]), 1e-12)
+        return abs(a[0] - b[0]) <= 0.01 * span and abs(a[1] - b[1]) <= 0.01 * span
+
+    def _inset_entry(self, index: int, ax, create: bool = False):
+        """The stored insets of this plot -- ``{"xrange", "specs"}`` -- found
+        by the data they were drawn on (spectrum, axes, label, x-extent)."""
+        base = (self._inset_context, index, ax.get_xlabel())
+        rng = self._inset_xrange(ax)
+        for entry in self._inset_store.get(base, []):
+            if self._inset_ranges_match(entry["xrange"], rng):
+                return entry
+        if not create:
+            return None
+        entry = {"xrange": rng, "specs": []}
+        self._inset_store.setdefault(base, []).append(entry)
+        return entry
+
+    @staticmethod
+    def _inset_stamp(ax):
+        """Changes when the plotted values do, so an inset is redrawn."""
+        lines = [l for l in ax.get_lines() if inset_module._copyable(l) and len(l.get_xdata()) > 1]
+        if not lines:
+            return None
+        line = max(lines, key=lambda l: len(l.get_xdata()))
+        y = np.asarray(line.get_ydata(), dtype=float)
+        return (len(lines), int(y.size), float(np.nansum(y)))
+
+    def _inset_target_axes(self):
+        axes = self._plain_axes()
+        if not axes:
+            return None, -1
+        index = self._inset_target if 0 <= self._inset_target < len(axes) else 0
+        return axes[index], index
+
+    def _on_draw_apply_insets(self, _event=None) -> None:
+        """After a redraw, put back the insets that belong to what was
+        drawn, and refresh any whose data has changed since."""
+        if self._inset_applying or not self._inset_store or self._contour_spectrum is not None:
+            return
+        self._inset_applying = True
+        try:
+            changed = False
+            for index, ax in enumerate(self._plain_axes()):
+                entry = self._inset_entry(index, ax)
+                specs = entry["specs"] if entry else None
+                if not specs:
+                    continue
+                stamp = self._inset_stamp(ax)
+                if (len(getattr(ax, "_opennmr_insets", [])) == len(specs)
+                        and getattr(ax, "_opennmr_inset_stamp", None) == stamp):
+                    continue
+                try:
+                    inset_module.draw_insets(ax, specs)
+                except ValueError:
+                    pass
+                ax._opennmr_inset_stamp = stamp
+                changed = True
+            if changed:
+                self.canvas.draw_idle()
+        finally:
+            self._inset_applying = False
+
+    def inset_specs(self) -> list[dict]:
+        """The insets on the plot on show, as complete specs
+        (:data:`opennmr.plotting.inset.INSET_DEFAULTS`). For a 2D contour
+        they carry ``factor`` (lowest contour) as well."""
+        if self._contour_spectrum is not None:
+            return [self._contour_to_generic(spec) for spec in self._contour_insets]
+        ax, index = self._inset_target_axes()
+        if ax is None:
+            return []
+        entry = self._inset_entry(index, ax)
+        return [dict(spec) for spec in (entry["specs"] if entry else [])]
+
+    def set_inset_specs(self, specs) -> None:
+        """Replace the insets on the plot on show. ``ValueError`` (and the
+        old insets kept) for a region with nothing in it."""
+        specs = [dict(spec) for spec in (specs or [])]
+        if self._contour_spectrum is not None:
+            self.set_contour_insets([self._generic_to_contour(spec) for spec in specs])
+            self.insetsChanged.emit()
+            return
+        ax, index = self._inset_target_axes()
+        if ax is None:
+            raise ValueError("There is no plot to put an inset on.")
+        checked = [inset_module.normalise(spec) for spec in specs]
+        entry = self._inset_entry(index, ax)
+        old = list(entry["specs"]) if entry else None
+        try:
+            inset_module.draw_insets(ax, checked)
+        except ValueError:
+            if old is not None:
+                inset_module.draw_insets(ax, old)
+            self.canvas.draw_idle()
+            raise
+        if checked:
+            self._inset_entry(index, ax, create=True)["specs"] = checked
+        elif entry is not None:
+            entry["specs"] = []
+        ax._opennmr_inset_stamp = self._inset_stamp(ax)
+        self.canvas.draw_idle()
+        self.insetsChanged.emit()
+
+    def clear_insets(self) -> None:
+        self.set_inset_specs([])
+
+    #: The 2D contour's own spec keys, and what they are called generically.
+    @staticmethod
+    def _contour_to_generic(spec: dict) -> dict:
+        out = dict(spec)
+        out["xlim"] = tuple(out.pop("xlims"))
+        out["ylim"] = tuple(out.pop("ylims"))
+        if "width" not in out:
+            out["width"] = out["height"] = float(out.get("size", 0.4))
+        out["connectors"] = bool(out.pop("mark_inset", True))
+        out.pop("size", None)
+        return out
+
+    @staticmethod
+    def _generic_to_contour(spec: dict) -> dict:
+        out = dict(spec)
+        out["xlims"] = tuple(sorted(out.pop("xlim"), reverse=True))
+        out["ylims"] = tuple(sorted(out.pop("ylim")))
+        out["mark_inset"] = bool(out.pop("connectors", True))
+        out["size"] = float(out.get("width", 0.4))
+        out.setdefault("factor", None)
+        return out
+
+    def inset_view_region(self):
+        """``(xlim, ylim)`` of the target axes' current view, or ``None``."""
+        if self._contour_spectrum is not None:
+            return self.contour_view_region()
+        ax, _index = self._inset_target_axes()
+        if ax is None:
+            return None
+        return (tuple(float(v) for v in ax.get_xlim()), tuple(float(v) for v in ax.get_ylim()))
+
+    @staticmethod
+    def _free_inset_corner(ax, xlim, ylim, used) -> str:
+        """The corner farthest from the region, and not already holding an
+        inset, so a new inset never hides what it shows."""
+        try:
+            cx, cy = ax.transAxes.inverted().transform(
+                ax.transData.transform((sum(xlim) / 2.0, sum(ylim) / 2.0)))
+        except Exception:  # noqa: BLE001 -- only for placing the inset
+            cx, cy = 0.5, 0.5
+        centres = {"upper right": (0.75, 0.75), "upper left": (0.25, 0.75),
+                   "lower left": (0.25, 0.25), "lower right": (0.75, 0.25)}
+        return min(centres, key=lambda name: (
+            name in used, -((centres[name][0] - cx) ** 2 + (centres[name][1] - cy) ** 2)))
+
+    def add_inset_region(self, xlim, ylim, ax=None, **options) -> dict:
+        """Add an inset magnifying ``xlim`` x ``ylim`` (data coordinates of
+        the plot on show) and return its spec. Raises ``ValueError`` when
+        the region holds nothing to show."""
+        target = ax if ax is not None else self._inset_target_axes()[0]
+        if self._contour_spectrum is None:
+            axes = self._plain_axes()
+            if target not in axes:
+                raise ValueError("There is no plot to put an inset on.")
+            self._inset_target = axes.index(target)
+        current = self.inset_specs()
+        used = {spec["corner"] for spec in current}
+        spec = dict(inset_module.INSET_DEFAULTS)
+        spec.update(options)
+        spec["xlim"] = tuple(float(v) for v in xlim)
+        spec["ylim"] = tuple(float(v) for v in ylim)
+        if "corner" not in options and target is not None:
+            spec["corner"] = self._free_inset_corner(target, spec["xlim"], spec["ylim"], used)
+        if self._contour_spectrum is not None:
+            spec.setdefault("factor", None)
+        self.set_inset_specs(current + [spec])
+        return spec
+
+    def _finish_inset_box(self, event) -> None:
+        x0, y0, ax = self._inset_start
+        self._inset_start = None
+        try:
+            self.toolbar.remove_rubberband()
+        except Exception:  # noqa: BLE001
+            pass
+        if event.x is None or event.y is None:
+            return
+        box = ax.bbox
+        x1 = min(max(event.x, box.x0), box.x1)
+        y1 = min(max(event.y, box.y0), box.y1)
+        if abs(x1 - x0) < self._ZOOM_MIN_PX or abs(y1 - y0) < self._ZOOM_MIN_PX:
+            return                      # a click, not a box: stay in the mode
+        inv = ax.transData.inverted()
+        (dx0, dy0), (dx1, dy1) = inv.transform((x0, y0)), inv.transform((x1, y1))
+        xlim = ((min(dx0, dx1), max(dx0, dx1)) if ax.get_xlim()[0] <= ax.get_xlim()[1]
+                else (max(dx0, dx1), min(dx0, dx1)))
+        ylim = ((min(dy0, dy1), max(dy0, dy1)) if ax.get_ylim()[0] <= ax.get_ylim()[1]
+                else (max(dy0, dy1), min(dy0, dy1)))
+        try:
+            self.add_inset_region(xlim, ylim, ax=ax)
+        except ValueError as exc:
+            self.set_inset_mode(False)
+            self.insetFailed.emit(str(exc))
+            return
+        self.set_inset_mode(False)
+        self.insetAdded.emit(len(self.inset_specs()) - 1)
+
     def contour_insets(self) -> list[dict]:
         """Copies of the insets drawn on the 2D contour on show."""
         return [dict(spec) for spec in self._contour_insets]
@@ -3672,7 +4003,7 @@ class MplCanvas(QWidget):
         if (
             self._compare_axes and event.button == 1 and self.toolbar.mode == ""
             and not self._pick_mode and not self._region_select_mode and not self._measurement_mode
-            and not self._width_mode
+            and not self._width_mode and not self._inset_mode
             and event.x is not None and event.y is not None
         ):
             self._compare_click_start = (event.x, event.y, event.inaxes)
@@ -3681,6 +4012,12 @@ class MplCanvas(QWidget):
         if self._pick_mode:
             if event.xdata is not None:
                 self.peakPicked.emit(float(event.xdata))
+            return
+        if self._inset_mode:
+            if (event.xdata is not None and event.ydata is not None
+                    and event.inaxes.get_gid() != inset_module.INSET_GID
+                    and (self._contour_spectrum is None or event.inaxes is self.ax)):
+                self._inset_start = (event.x, event.y, event.inaxes)
             return
         if self._region_select_mode:
             if event.xdata is not None:
@@ -3732,7 +4069,8 @@ class MplCanvas(QWidget):
     def _click_mode_active(self) -> bool:
         return bool(getattr(self, "_pick_mode", False) or getattr(self, "_region_select_mode", False)
                     or getattr(self, "_measurement_mode", False)
-                    or getattr(self, "_width_mode", False))
+                    or getattr(self, "_width_mode", False)
+                    or getattr(self, "_inset_mode", False))
 
     def _zoom_drag_to(self, event) -> None:
         x0, y0, ax = self._zoom_start
@@ -3776,6 +4114,12 @@ class MplCanvas(QWidget):
             x1 = min(max(event.x, box.x0), box.x1)
             y1 = min(max(event.y, box.y0), box.y1)
             self.toolbar.draw_rubberband(event, x0, y0, x1, y1)
+            return
+        if self._inset_start is not None and event.x is not None and event.y is not None:
+            x0, y0, ax = self._inset_start
+            box = ax.bbox
+            self.toolbar.draw_rubberband(
+                event, x0, y0, min(max(event.x, box.x0), box.x1), min(max(event.y, box.y0), box.y1))
             return
         if self._region_select_start is not None and event.x is not None and self._region_select_ax is not None:
             # Pixel coordinates, not event.xdata directly -- like the
@@ -3874,6 +4218,9 @@ class MplCanvas(QWidget):
         self._refit_3d_ticks_after_release(event)
         if self._zoom_start is not None:
             self._zoom_drag_to(event)
+        if self._inset_start is not None:
+            self._finish_inset_box(event)
+            return
         if self._region_select_start is not None:
             end = self._region_select_start
             if event.xdata is not None:
@@ -4074,6 +4421,8 @@ class MplCanvas(QWidget):
             owners.append("curve_fit")
         if self._slice_fit_active and self._slice_fit_labels:
             owners.append("fit_components")
+        if self.insets_supported():
+            owners.append("inset")
         return [o for o in owners if o in self._plot_options]
 
     #: Emitted after a style setting was changed from this canvas's own
@@ -4252,7 +4601,7 @@ class MplCanvas(QWidget):
             dosy_spectrum_action = menu.addAction(
                 f"Extract Spectrum at D = {diffusion:.3g} m²/s")
             dosy_spectrum_action.setToolTip(
-                "The row of the map at this diffusion coefficient -- the spectrum "
+                "The row of the map at this diffusion coefficient – the spectrum "
                 "of whatever is diffusing at that rate, as its own 1D spectrum."
             )
             # The other of the two things worth doing with a row, and a
@@ -4268,13 +4617,13 @@ class MplCanvas(QWidget):
             dosy_panel_action.setToolTip(
                 "Keeps the map, draws a dashed line across it at this diffusion "
                 "coefficient, and stacks the spectrum there in a panel to the "
-                "right -- the same as a 2D contour's own extracted slices."
+                "right – the same as a 2D contour's own extracted slices."
             )
             if self._dosy_slices:
                 dosy_clear_slices_action = menu.addAction("Clear Rows Beside the Map")
             dosy_profile_action = menu.addAction(f"Extract Diffusion Profile at {shift:.4g} ppm")
             dosy_profile_action.setToolTip(
-                "The column of the map at this shift -- how this peak's intensity is "
+                "The column of the map at this shift – how this peak's intensity is "
                 "distributed over D, which is what the ILT actually computed."
             )
             dosy_levels_action = menu.addAction("Reset Contour Levels")
@@ -5645,7 +5994,7 @@ class MplCanvas(QWidget):
         start_spin.setValue(self._contour_factor)
         start_spin.setToolTip(
             "Lowest contour level, as a fraction of the data's own peak "
-            "intensity -- the noise floor. Same value scroll-over-the-"
+            "intensity – the noise floor. Same value scroll-over-the-"
             "contour adjusts; the top level is always the peak itself."
         )
         form.addRow("Start (fraction of peak):", start_spin)
@@ -5660,7 +6009,7 @@ class MplCanvas(QWidget):
         power_spin.setSingleStep(0.05)
         power_spin.setValue(self._contour_power)
         power_spin.setToolTip(
-            "Higher values bunch more levels near the noise floor -- "
+            "Higher values bunch more levels near the noise floor – "
             "good for finding weak peaks near a strong one without "
             "saturating the display. Only used for Power scaling."
         )

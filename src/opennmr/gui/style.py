@@ -196,7 +196,7 @@ QPushButton:disabled, QToolButton:disabled {{
     color: palette(placeholder-text);
     border-color: palette(midlight);
 }}
-/* A button that has asked for no border keeps none -- the collapsible
+/* A button that has asked for no border keeps none – the collapsible
    section headers and the ModeButton arrow both do, and boxing them in
    is not what "softer edges" meant. */
 QToolButton[flat="true"] {{ border: none; background: transparent; }}

@@ -49,7 +49,7 @@ _MODELS = (("Czjzek (random EFG centred on zero)", "czjzek"),
            ("Extended Czjzek (mean EFG (C_Q0, η_Q0) + random part)", "extended"))
 _MODEL_TIP = (
     "Czjzek's model is a fully random EFG centred on zero: it has no 'central' C_Q. Its "
-    "⟨C_Q⟩ ≈ 2σ, its most probable C_Q and ⟨η_Q⟩ = 0.61 all follow from σ alone -- shown "
+    "⟨C_Q⟩ ≈ 2σ, its most probable C_Q and ⟨η_Q⟩ = 0.61 all follow from σ alone – shown "
     "beside the sites.\n\n"
     "The extended Czjzek model (Le Caër & Brand 1998) adds a mean EFG: a site with a "
     "definite local structure (C_Q0, η_Q0) spread by disorder of width σ. As σ → 0 it becomes "
@@ -281,7 +281,7 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
         self.show_map_button = QPushButton("Show Distribution Map")
         self.show_map_button.setToolTip(
             "The distribution of environments (C_Q across, η_Q up) as a heat map, with the "
-            "data, fit and sites beside it -- on the Fit view, exportable from there.")
+            "data, fit and sites beside it – on the Fit view, exportable from there.")
         self.show_map_button.clicked.connect(self.show_map)
         buttons.addWidget(self.show_fit_button)
         buttons.addWidget(self.show_map_button)
@@ -391,7 +391,7 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
             site["fixed"] = {name: bool(fixed.get(name)) for name in cz.CZJZEK_PARAM_NAMES}
             if self.model() == "extended" and (not site["fixed"]["d"] or site["d"] != 5):
                 raise ValueError(f"Site row {row + 1}: the extended Czjzek model is defined for "
-                                 "d = 5 -- set d to 5 and keep it fixed.")
+                                 "d = 5 – set d to 5 and keep it fixed.")
             if bounds:
                 site["bounds"] = {n: tuple(b) for n, b in bounds.items()}
             sites.append(site)
@@ -603,7 +603,7 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
                  f"{quality['reduced_chi2']:.3g}  ·  {r['elapsed']:.1f} s. ⟨C_Q⟩, the C_Q mode, "
                  "⟨η_Q⟩ and ⟨P_Q⟩ are averages over each fitted distribution"
                  + (" (for the extended model, sample averages; errors propagated from σ, C_Q0 "
-                    "and η_Q0). C_Q0 and η_Q0 are the mean EFG the disorder spreads around -- not "
+                    "and η_Q0). C_Q0 and η_Q0 are the mean EFG the disorder spreads around – not "
                     "⟨C_Q⟩, which the random part raises." if any_ext else
                     " (their errors follow from σ's; ⟨η_Q⟩ depends on d only). Czjzek's model is "
                     "centred on a zero EFG: there is no central C_Q, and ⟨C_Q⟩ comes from σ.")]
@@ -723,7 +723,7 @@ class CzjzekSimPanel(QWidget):
         self.model_combo.currentIndexChanged.connect(lambda _i: self._sync())
         form.addRow("Distribution:", self.model_combo)
         self.cq0_spin = self._spin(0.0, 100.0, 3.0, 3, " MHz",
-                                   "C_Q0: the mean EFG's coupling -- the local, ordered structure "
+                                   "C_Q0: the mean EFG's coupling – the local, ordered structure "
                                    "the disorder spreads around.")
         form.addRow("C_Q0 (mean EFG):", self.cq0_spin)
         self.eta0_spin = self._spin(0.0, 1.0, 0.0, 3, "", "η_Q0: the mean EFG's asymmetry.")

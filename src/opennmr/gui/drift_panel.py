@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
@@ -36,7 +37,9 @@ from PySide6.QtWidgets import (
 )
 
 from ..notebook import drift_correction as dc
+from ..notebook import field_drift as fd
 from . import data_directory
+from .widgets.typed_spinbox import TypedSpinBox
 
 _SAME_AS_BEFORE = "(the 'before' spectrum)"
 
@@ -74,11 +77,18 @@ class DriftCorrectionPanel(QWidget):
     #: Something was measured, applied or written (for tests and MainWindow).
     changed = Signal()
 
-    def __init__(self, spectra, selected, apply, log=None, parent=None) -> None:
+    def __init__(self, spectra, selected, apply, log=None, parent=None, draw=None, arm=None,
+                 spectrum_changed=None) -> None:
         super().__init__(parent)
         self._spectra, self._selected, self._apply, self._log = spectra, selected, apply, log
+        #: ``draw(fn)`` puts ``fn(figure)`` on the plot area; ``arm(on)`` makes clicks on the
+        #: plot reach :meth:`on_canvas_pick`; ``spectrum_changed(index)`` redraws and saves.
+        self._draw, self._arm, self._spectrum_changed = draw, arm, spectrum_changed
         self.last_result: dc.DriftCorrectionResult | None = None
         self.last_measurement: dict | None = None
+        self.track: dict | None = None
+        self.fit: dict | None = None
+        self.armed = False
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -87,6 +97,7 @@ class DriftCorrectionPanel(QWidget):
             "linear in time: each FID is shifted back by a drift interpolated between a start "
             "and an end value, in the direct and (scaled by the frequency ratio) every indirect "
             "dimension."))
+        v.addWidget(self._build_track())
         v.addWidget(self._build_measure())
         v.addWidget(self._build_shifts())
         v.addWidget(self._build_apply())
@@ -100,6 +111,265 @@ class DriftCorrectionPanel(QWidget):
     # ------------------------------------------------------------------
     # construction
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # drift seen along the slices of a pseudo-2D
+    # ------------------------------------------------------------------
+
+    def _build_track(self) -> QGroupBox:
+        box = QGroupBox("Measure along the slices (pseudo-2D, any vendor)")
+        form = QFormLayout(box)
+        form.addRow(_wrapped(
+            "Follow one peak through the series, see how it drifts, fit a curve to that, and "
+            "shift every slice back by what the curve says. Works on the spectra themselves, so "
+            "it does not depend on the vendor."))
+        region = QWidget()
+        h = QHBoxLayout(region)
+        h.setContentsMargins(0, 0, 0, 0)
+        self.track_hi_spin = _ppm_spin(5.5)
+        self.track_lo_spin = _ppm_spin(4.0)
+        h.addWidget(self.track_hi_spin)
+        h.addWidget(QLabel("to"))
+        h.addWidget(self.track_lo_spin)
+        self.track_hi_spin.setToolTip("A range that holds the peak in every slice and no other peak.")
+        self.track_lo_spin.setToolTip(self.track_hi_spin.toolTip())
+        form.addRow("Peak region:", region)
+        self.track_method_combo = QComboBox()
+        self.track_method_combo.addItem("Top of the peak", "peak")
+        self.track_method_combo.addItem("Centre of the peak", "centroid")
+        self.track_method_combo.setToolTip(
+            "Top of the peak: the tallest point, refined to a fraction of a point.\n"
+            "Centre of the peak: the intensity-weighted centre of the upper half; steadier for a "
+            "noisy or broad line.")
+        form.addRow("Position by:", self.track_method_combo)
+        self.track_button = QPushButton("Track Peak Along Slices")
+        self.track_button.setToolTip("Read the peak's position off every slice and plot it "
+                                     "against the slice number, with the fitted curve.")
+        self.track_button.clicked.connect(self._on_track_clicked)
+        form.addRow(self.track_button)
+
+        self.drift_model_combo = QComboBox()
+        for key in fd.MODELS:
+            self.drift_model_combo.addItem(fd.MODEL_LABELS[key], key)
+        self.drift_model_combo.currentIndexChanged.connect(self._on_model_changed)
+        form.addRow("Drift curve:", self.drift_model_combo)
+        self.drift_degree_spin = TypedSpinBox()
+        self.drift_degree_spin.setRange(1, 12)
+        self.drift_degree_spin.setValue(3)
+        self.drift_degree_spin.valueChanged.connect(lambda _v: self._refit())
+        self.drift_degree_label = QLabel("Degree:")
+        form.addRow(self.drift_degree_label, self.drift_degree_spin)
+        nodes = QWidget()
+        nh = QHBoxLayout(nodes)
+        nh.setContentsMargins(0, 0, 0, 0)
+        self.drift_nodes_edit = QLineEdit()
+        self.drift_nodes_edit.setPlaceholderText("slice numbers, e.g. 1, 8, 15, 30 (empty: evenly spaced)")
+        self.drift_nodes_edit.editingFinished.connect(self._refit)
+        self.drift_pick_button = QPushButton("Pick on Plot")
+        self.drift_pick_button.setCheckable(True)
+        self.drift_pick_button.setToolTip("While on, each click on the drift plot adds the nearest "
+                                          "slice as a point the spline passes through.")
+        self.drift_pick_button.toggled.connect(self._on_pick_toggled)
+        nh.addWidget(self.drift_nodes_edit, 1)
+        nh.addWidget(self.drift_pick_button)
+        self.drift_nodes_widget = nodes
+        self.drift_nodes_label = QLabel("Points:")
+        form.addRow(self.drift_nodes_label, nodes)
+        self.drift_period_spin = QDoubleSpinBox()
+        self.drift_period_spin.setRange(0.0, 1.0e5)
+        self.drift_period_spin.setDecimals(2)
+        self.drift_period_spin.setSuffix(" slices")
+        self.drift_period_spin.setSpecialValueText("find it")
+        self.drift_period_spin.setToolTip("Period of the oscillation, if you know it; otherwise it is found.")
+        self.drift_period_spin.valueChanged.connect(lambda _v: self._refit())
+        self.drift_period_label = QLabel("Period:")
+        form.addRow(self.drift_period_label, self.drift_period_spin)
+        self.drift_reference_combo = QComboBox()
+        self.drift_reference_combo.addItem("First slice", "first")
+        self.drift_reference_combo.addItem("Mean position", "mean")
+        self.drift_reference_combo.addItem("Last slice", "last")
+        self.drift_reference_combo.setToolTip("Where the peak is brought to in every slice.")
+        self.drift_reference_combo.currentIndexChanged.connect(lambda _i: self._refit())
+        form.addRow("Bring peaks to:", self.drift_reference_combo)
+
+        row = QHBoxLayout()
+        self.drift_apply_button = QPushButton("Apply Drift Curve to Slices")
+        self.drift_apply_button.setToolTip("Shift every slice of the selected spectrum back by the "
+                                           "fitted drift. Remove Drift Curve undoes it.")
+        self.drift_apply_button.clicked.connect(self._on_apply_curve_clicked)
+        self.drift_remove_button = QPushButton("Remove Drift Curve")
+        self.drift_remove_button.clicked.connect(self._on_remove_curve_clicked)
+        row.addWidget(self.drift_apply_button)
+        row.addWidget(self.drift_remove_button)
+        form.addRow(row)
+        self.track_label = _wrapped("")
+        form.addRow(self.track_label)
+        self._on_model_changed()
+        self._sync_track_buttons()
+        return box
+
+    def _slice_spectrum(self):
+        index, spectrum = self._selected_spectrum()
+        if spectrum is None or spectrum.ndim != 2:
+            return index, None
+        return index, spectrum
+
+    def _sync_track_buttons(self) -> None:
+        _index, spectrum = self._slice_spectrum()
+        ok = spectrum is not None
+        self.track_button.setEnabled(ok)
+        self.drift_apply_button.setEnabled(ok and self.fit is not None)
+        self.drift_remove_button.setEnabled(bool(
+            ok and spectrum.metadata.raw.get(fd.RECORD_KEY)))
+
+    def _on_model_changed(self, _index: int = 0) -> None:
+        model = self.drift_model_combo.currentData()
+        for widget, shown in ((self.drift_degree_spin, model == "polynomial"),
+                              (self.drift_degree_label, model == "polynomial"),
+                              (self.drift_nodes_widget, model == "spline_points"),
+                              (self.drift_nodes_label, model == "spline_points"),
+                              (self.drift_period_spin, model == "sinusoidal"),
+                              (self.drift_period_label, model == "sinusoidal")):
+            widget.setVisible(shown)
+        if model != "spline_points" and self.drift_pick_button.isChecked():
+            self.drift_pick_button.setChecked(False)
+        self._refit()
+
+    def _node_list(self) -> list[float]:
+        out = []
+        for part in self.drift_nodes_edit.text().replace(";", ",").split(","):
+            try:
+                out.append(float(part) - 1.0)          # typed as slice numbers (1-based)
+            except ValueError:
+                continue
+        return sorted(set(out))
+
+    def _on_track_clicked(self) -> None:
+        index, spectrum = self._slice_spectrum()
+        if spectrum is None:
+            self.track_label.setText("Select a pseudo-2D spectrum in Open experiments first.")
+            return
+        region = (self.track_lo_spin.value(), self.track_hi_spin.value())
+        try:
+            self.track = fd.track_peak(spectrum, region, method=self.track_method_combo.currentData(),
+                                       original=True)
+        except ValueError as exc:
+            self.track = None
+            self.fit = None
+            self.track_label.setText(f"Could not follow the peak: {exc}")
+            self._sync_track_buttons()
+            return
+        self._refit()
+
+    def _refit(self) -> None:
+        if self.track is None:
+            self._sync_track_buttons()
+            return
+        model = self.drift_model_combo.currentData()
+        period = self.drift_period_spin.value() or None
+        try:
+            self.fit = fd.fit_drift(
+                self.track["row"], self.track["hz"], model=model,
+                degree=self.drift_degree_spin.value(), node_x=self._node_list() or None,
+                period=period, reference=self.drift_reference_combo.currentData())
+        except ValueError as exc:
+            self.fit = None
+            self.track_label.setText(f"Could not fit: {exc}")
+            self._sync_track_buttons()
+            return
+        self.fit["region_ppm"] = self.track["region_ppm"]
+        shifts = self.fit["shifts_hz"]
+        self.track_label.setText(
+            f"{fd.MODEL_LABELS[model]}: the peak moves {self.fit['fit'][-1] - self.fit['fit'][0]:+.3f} Hz "
+            f"over {len(self.fit['x'])} slices; scatter about the curve {self.fit['rms']:.3f} Hz (rms). "
+            f"Slice shifts run from {shifts.min():+.3f} to {shifts.max():+.3f} Hz.")
+        self._show_plot()
+        self._sync_track_buttons()
+        self.changed.emit()
+
+    def _show_plot(self) -> None:
+        if self._draw is None or self.track is None:
+            return
+        track, fit = self.track, self.fit
+        _index, spectrum = self._slice_spectrum()
+        after = None
+        if spectrum is not None and spectrum.metadata.raw.get(fd.RECORD_KEY):
+            try:
+                after = fd.track_peak(spectrum, track["region_ppm"], method=track["method"])
+            except ValueError:
+                after = None
+
+        def draw(figure):
+            ax = figure.add_subplot(111)
+            fd.plot_drift(track, fit, ax=ax, corrected=after)
+            if self.fit is not None and self.drift_model_combo.currentData() == "spline_points":
+                nodes = fit["params"].get("nodes", [])
+                ax.plot(np.asarray(nodes) + 1, fit["predict"](nodes), "s", ms=6, mfc="none",
+                        mec="#CC79A7", label="spline points")
+                ax.legend(frameon=False)
+            figure.tight_layout()
+
+        self._draw(draw)
+
+    def _on_pick_toggled(self, checked: bool) -> None:
+        self.armed = bool(checked)
+        if self._arm is not None:
+            self._arm(bool(checked))
+
+    def canvas_mode_released(self) -> None:
+        if self.drift_pick_button.isChecked():
+            self.drift_pick_button.blockSignals(True)
+            self.drift_pick_button.setChecked(False)
+            self.drift_pick_button.blockSignals(False)
+        self.armed = False
+
+    def on_canvas_pick(self, x: float) -> None:
+        """A click on the drift plot while picking: add the nearest slice."""
+        if self.track is None or not self.armed:
+            return
+        slice_number = int(round(min(max(x, 1.0), len(self.track["row"]))))
+        nodes = sorted(set(self._node_list() + [slice_number - 1.0]))
+        self.drift_nodes_edit.setText(", ".join(str(int(n) + 1) for n in nodes))
+        self._refit()
+
+    def _on_apply_curve_clicked(self) -> None:
+        index, spectrum = self._slice_spectrum()
+        if spectrum is None or self.fit is None:
+            return
+        try:
+            info = fd.apply_drift(spectrum, self.fit["shifts_hz"], record=self.fit)
+        except ValueError as exc:
+            self.track_label.setText(f"Could not apply: {exc}")
+            return
+        if self._log and index is not None:
+            region = info.get("region_ppm") or [0, 0]
+            self._log(index, (
+                f"Field drift corrected along the slices: peak in {min(region):.3f}–"
+                f"{max(region):.3f} ppm followed through {len(info['shifts_hz'])} slices, "
+                f"{fd.MODEL_LABELS.get(info['model'], info['model'])} curve (rms "
+                f"{info['rms_hz']:.3f} Hz), shifts {min(info['shifts_hz']):+.3f} to "
+                f"{max(info['shifts_hz']):+.3f} Hz."))
+        if self._spectrum_changed:
+            self._spectrum_changed(index)
+        self.track_label.setText("Applied: every slice was shifted back by the fitted drift. "
+                                 "The open circles on the plot show the peak position now.")
+        self._show_plot()
+        self._sync_track_buttons()
+        self.changed.emit()
+
+    def _on_remove_curve_clicked(self) -> None:
+        index, spectrum = self._slice_spectrum()
+        if spectrum is None:
+            return
+        fd.remove_drift(spectrum)
+        if self._log and index is not None:
+            self._log(index, "Field drift correction along the slices removed.")
+        if self._spectrum_changed:
+            self._spectrum_changed(index)
+        self.track_label.setText("Drift curve removed.")
+        self._show_plot()
+        self._sync_track_buttons()
+        self.changed.emit()
 
     def _build_measure(self) -> QGroupBox:
         box = QGroupBox("1. Measure the drift (optional)")
@@ -166,7 +436,7 @@ class DriftCorrectionPanel(QWidget):
         self.write_button = QPushButton("Write Corrected Bruker Dataset…")
         self.write_button.setToolTip(
             "Copy a Bruker 2D/3D/4D experiment (planes, points or NUS) to a new EXPNO with its "
-            "ser corrected -- like lindriftcomp. The original is not touched; reprocess the copy "
+            "ser corrected – like lindriftcomp. The original is not touched; reprocess the copy "
             "here or in TopSpin.")
         self.write_button.clicked.connect(self._on_write_clicked)
         self.concat_button = QPushButton("Concatenate NUS Blocks…")
@@ -215,6 +485,12 @@ class DriftCorrectionPanel(QWidget):
             self.after_combo.setCurrentIndex(1)
         self.measure_button.setEnabled(len(one_d) >= 1)
         self._sync_target()
+        index, _spectrum = self._selected_spectrum()
+        if index != getattr(self, "_track_index", None):
+            self._track_index = index
+            self.track = None
+            self.fit = None
+        self._sync_track_buttons()
 
     def _selected_spectrum(self):
         try:
@@ -232,7 +508,7 @@ class DriftCorrectionPanel(QWidget):
         index, spectrum = self._selected_spectrum()
         can_apply = False
         if spectrum is None:
-            text = "Select a 2D or pseudo-2D in Open experiments to correct it here (Bruker, or an X-Pulse, Varian or Spinsolve series)."
+            text = "Select a 2D or pseudo-2D in Open experiments to correct it here."
         elif not dc.drift_support(spectrum)[0]:
             text = dc.drift_support(spectrum)[1]
         else:

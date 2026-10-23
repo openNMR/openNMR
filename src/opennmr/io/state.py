@@ -116,7 +116,7 @@ def _fit_lines(state: dict) -> list[str]:
                 lines.append("    (unreadable record)")
                 continue
             stats = fit_statistics(model)
-            lines.append(f"    “{model['name']}” -- {model.get('kind_label', model['kind'])}, "
+            lines.append(f"    “{model['name']}” – {model.get('kind_label', model['kind'])}, "
                          f"R² {stats['r2']:.5f}"
                          + (f", {stats['k']} free parameters" if stats["k"] is not None else "")
                          + f", kept {model.get('time', '')}")
@@ -149,7 +149,7 @@ def render_state_log(info: dict) -> str:
     lines.append(f"{len(info['entries'])} spectra:")
     for number, entry in enumerate(info["entries"], 1):
         lines.append("")
-        lines.append(f"{number}. {entry['label']} -- {KIND_NAMES.get(entry['kind'], entry['kind'])}")
+        lines.append(f"{number}. {entry['label']} – {KIND_NAMES.get(entry['kind'], entry['kind'])}")
         lines += ["   " + line for line in entry.get("summary") or []]
         lines += ["   " + line for line in _fit_lines(entry.get("state") or {})]
     return "\n".join(lines) + "\n"
@@ -173,7 +173,7 @@ def save_state(folder: str, name: str, entries: list[dict], notes: str = "",
         raise ValueError("Choose at least one spectrum to save.")
     if os.path.exists(folder) and os.listdir(folder):
         if not overwrite:
-            raise FileExistsError(f"{folder} already exists -- choose another name or folder.")
+            raise FileExistsError(f"{folder} already exists – choose another name or folder.")
         if not is_state_folder(folder):
             raise FileExistsError(f"{folder} exists and is not an openNMR state; not overwriting it.")
     os.makedirs(os.path.join(folder, "spectra"), exist_ok=True)

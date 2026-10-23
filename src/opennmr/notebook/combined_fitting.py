@@ -1,5 +1,5 @@
 """
-Fit spectra with CSA, Quad & J-coupling sites: any mix of CSA,
+Fit spectra with Solid-state NMR sites: any mix of CSA,
 quadrupolar and J interactions per site, static or MAS -- the model of
 :mod:`opennmr.notebook.combined_hamiltonian`, fitted by least squares.
 
@@ -229,7 +229,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
                  estimate_amounts=True, max_nfev=None, fit_mas=False, mas_window_Hz=500.0,
                  mas_scan_points=41, mas_bounds_Hz=None, observe=None):
     """
-    Fit CSA, Quad & J-coupling sites to a 1D spectrum.
+    Fit Solid-state NMR sites to a 1D spectrum.
 
     Parameters
     ----------
@@ -472,7 +472,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
         popt, pcov = _fit_progress.limited_curve_fit(
             _fit_progress.tracked(model, y[mask], n_free=int(which.sum())),
             x[mask], y[mask], p0=p_all[which], bounds=(lo, hi),
-            diff_step=1e-4, max_iterations=max_nfev, label="The CSA, Quad & J-coupling fit", **kw)
+            diff_step=1e-4, max_iterations=max_nfev, label="The Solid-state NMR fit", **kw)
         p_all[which] = popt
         return pcov
 
@@ -523,7 +523,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
                        {s.label: nu0 for s, (_a, nu0) in zip(fitted_sites, axes)},
                        sources=_linked_sources(dicts))
     if q["r2"] < 0.9:
-        warnings.append(f"Poor fit (R^2 {q['r2']:.3f}): most likely a local minimum -- try "
+        warnings.append(f"Poor fit (R^2 {q['r2']:.3f}): most likely a local minimum – try "
                         "other starting values (fit_combined_multistart), or check the model.")
     warnings += _warnings(parameters, pcov, free_names, curves, x, mask, baseline_regions,
                           fit_baseline, start_curves)
@@ -532,7 +532,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
         mas_row = next(p for p in parameters if p["name"] == "mas_Hz")
         regime = (f"MAS {mas_Hz:.1f} ± {mas_row['error'] or 0.0:.1f} Hz (fitted; started at "
                   f"{mas_start:g} Hz, allowed {mas_row['lower']:g} to {mas_row['upper']:g} Hz)")
-    log = ("CSA, Quad & J-coupling fit: " + f"{regime}, nu0 = {larmor_Hz / 1e6:.7g} MHz, "
+    log = ("Solid-state NMR fit: " + f"{regime}, nu0 = {larmor_Hz / 1e6:.7g} MHz, "
            f"quadrupolar {order}" + ("" if order == "exact" else "-order")
            + f", transitions {transitions}, {n_zcw} orientations, window "
            + ("whole spectrum" if fit_regions is None else
@@ -543,7 +543,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
     if any("gyromagnetic ratios" in n for n in placement_notes(fitted_sites, observe)):
         warnings.append("A nucleus without a tabulated IUPAC frequency ratio was placed by its "
                         "gyromagnetic ratio, which ignores the reference compounds' shielding: "
-                        "its position may be off by up to thousands of ppm -- free its δiso.")
+                        "its position may be off by up to thousands of ppm – free its δiso.")
     return {"sites": fitted_sites, "parameters": parameters, "pcov": pcov,
             "free_names": free_names, "derived": derived, "x": x, "y": y_raw, "y_fit": y_fit,
             "site_spectra": {s.label: c * scale for s, c in zip(fitted_sites, curves)},
@@ -626,7 +626,7 @@ def fit_combined_multistart(results, sites, starts, screen_n_zcw=None, max_start
     best["log"] += (f"\nMulti-start: {len(combos)} starts; {n_good} reached the best chi^2 "
                     f"(within 1%).")
     if n_good == 1 and len(combos) > 1:
-        best["warnings"].append("Only one start reached the best minimum -- scan more starting "
+        best["warnings"].append("Only one start reached the best minimum – scan more starting "
                                 "values before trusting it.")
     return best
 
@@ -793,7 +793,7 @@ def _warnings(parameters, pcov, free_names, curves, x, mask, baseline_regions, f
         if at_upper and at_lower:
             # +/- 1 sigma covers the whole allowed range: the data do not
             # determine it at all, which is not the same as "on a bound".
-            out.append(f"{p['label']}: {p['name']} is not determined by the data -- its 1σ "
+            out.append(f"{p['label']}: {p['name']} is not determined by the data – its 1σ "
                        f"uncertainty spans its whole range ({p['lower']:g} to {p['upper']:g}); "
                        "fix it, or add data that constrain it")
         elif at_upper:
@@ -801,14 +801,14 @@ def _warnings(parameters, pcov, free_names, curves, x, mask, baseline_regions, f
         elif at_lower:
             out.append(f"{p['label']}: {p['name']} at its lower bound {p['lower']:g}")
         if p["name"] == "C_Q" and p["value"] < 0.02:
-            out.append(f"{p['label']}: C_Q fitted to ~0 -- no quadrupolar splitting is resolved")
+            out.append(f"{p['label']}: C_Q fitted to ~0 – no quadrupolar splitting is resolved")
     d = np.sqrt(np.clip(np.diag(pcov), 1e-300, None))
     corr = pcov / np.outer(d, d) if pcov.size else pcov
     for a in range(len(free_names)):
         for b in range(a + 1, len(free_names)):
             if abs(corr[a, b]) > 0.95 and "amount" not in free_names[a] + free_names[b]:
                 out.append(f"{free_names[a]} and {free_names[b]} are {abs(corr[a, b]):.0%} "
-                           "correlated -- the data do not separate them; fix one, or add data "
+                           "correlated – the data do not separate them; fix one, or add data "
                            "(another field or spinning rate)")
     total = np.sum(curves, axis=0)
     peak = float(np.max(np.abs(total[mask]))) if mask.any() else 0.0
@@ -817,7 +817,7 @@ def _warnings(parameters, pcov, free_names, curves, x, mask, baseline_regions, f
         ends = np.clip(np.concatenate([edges[0::2], edges[1::2] - 1]), 0, x.size - 1)
         if np.max(np.abs(total[ends])) > 0.05 * peak:
             out.append("The fitted pattern still has intensity at an edge of the fit window: it "
-                       "is clipped -- widen the window")
+                       "is clipped – widen the window")
         if not fit_baseline:
             if baseline_regions is not None:
                 zone = build_region_mask(x, [baseline_regions] if np.isscalar(baseline_regions[0])

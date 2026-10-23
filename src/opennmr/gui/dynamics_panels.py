@@ -299,12 +299,12 @@ class VTRelaxationPanel(QWidget):
         self.asymmetric_check = QCheckBox("Asymmetric (free β)")
         self.asymmetric_check.setToolTip(
             "J(ω) = τ/(1+(ωτ)^β), 1 < β ≤ 2: the low-temperature flank has slope (β−1)Ea, "
-            "the high-temperature flank Ea -- the usual signature of correlated hopping "
+            "the high-temperature flank Ea – the usual signature of correlated hopping "
             "in ion conductors. β = 2 is BPP.")
         self.background_check = QCheckBox("Background rate")
         self.background_check.setToolTip(
             "A temperature-independent rate R_bg added to the total (paramagnetic "
-            "impurities, a spin-diffusion floor) -- it flattens the low-temperature end.")
+            "impurities, a spin-diffusion floor) – it flattens the low-temperature end.")
         self.per_dataset_check = QCheckBox("Amplitude per dataset")
         self.per_dataset_check.setToolTip(
             "In a joint fit of several fields, give each dataset its own amplitude "
@@ -372,7 +372,7 @@ class VTRelaxationPanel(QWidget):
         rv = QVBoxLayout(self.regions_box)
         regions_blurb = QLabel(
             "Each region is fitted on its own, to the points inside it, with the model above "
-            "and its own number of processes -- so each gets its own Ea and τ₀. Its curve is "
+            "and its own number of processes – so each gets its own Ea and τ₀. Its curve is "
             "drawn over its own range only.")
         regions_blurb.setWordWrap(True)
         rv.addWidget(regions_blurb)
@@ -385,7 +385,7 @@ class VTRelaxationPanel(QWidget):
         self.regions_table.setToolTip(
             "Temperatures in kelvin, whatever the table above uses.\n\n"
             "Model: BPP (the model above), Arrhenius line (a straight line through "
-            "ln(rate) against 1/k_BT -- the right model for one flank, and the only one "
+            "ln(rate) against 1/k_BT – the right model for one flank, and the only one "
             "a region of two or three points can support), or Auto: BPP when the region "
             "has at least two more points than BPP has free parameters, else the line. "
             "A region that cannot be fitted is named on the plot with the reason.")
@@ -620,7 +620,7 @@ class VTRelaxationPanel(QWidget):
                           else f"{r['error'] * scale:.3g}",
                           "" if not r.get("larmor_MHz") else f"{r['larmor_MHz']:.6g}"])
         self._log(f"Added {len(rows)} value(s) from {source}"
-                  + (f"; {missing} without a recorded temperature -- type it in." if missing else "."))
+                  + (f"; {missing} without a recorded temperature – type it in." if missing else "."))
         return len(rows)
 
     def datasets(self) -> list:
@@ -979,7 +979,7 @@ class VTRelaxationPanel(QWidget):
         if failed:
             QMessageBox.warning(
                 self, "Temperature regions",
-                "\n".join(f"{f['region_label']}: not fitted -- {f['error']}" for f in failed))
+                "\n".join(f"{f['region_label']}: not fitted – {f['error']}" for f in failed))
         self.results_label.setText(
             f"{len(ok)} of {len(result['fits'])} region(s) fitted, each separately"
             + (": " + "; ".join(

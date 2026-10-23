@@ -96,7 +96,7 @@ def test_keep_asks_for_a_name(qapp, _dialogs, monkeypatch):
 # ---- Copy sites from --------------------------------------------------------
 
 def _no_other_panels(window):
-    """Fit / Simulate ▸ CSA, Quad & J-coupling start with a peak; empty them."""
+    """Fit / Simulate ▸ Solid-state NMR start with a peak; empty them."""
     for panel in (window.combined_fit_panel, window.combined_sim_panel):
         panel.site_dicts = []
 
@@ -129,7 +129,7 @@ def test_copy_from_the_fit_panel_for_one_nucleus(qapp, _dialogs):
                    "lineshape": "gaussian", "eta": 0.5,
                    "interactions": [{"type": "quadrupolar", "C_Q": 4.0, "eta_Q": 0.3}]})
     texts = _menu_texts(panel)
-    assert texts[0][0].startswith("Fit ▸ CSA, Quad && J-coupling (27Al, 1 peak)") and texts[0][1]
+    assert texts[0][0].startswith("Fit ▸ Solid-state NMR (27Al, 1 peak)") and texts[0][1]
     panel._copy_menu.actions()[0].trigger()
     assert [d["label"] for d in panel.sites_by_nucleus["27Al"]] == ["AlO6"]
     got = panel.sites_by_nucleus["27Al"][0]

@@ -333,8 +333,8 @@ def _read_jeol_jdf(path: str) -> dict:
         raise ValueError(f"{path!r} is not a JEOL .jdf file (unexpected file identifier).")
     if header["dataFormat"] != "One_D":
         raise ValueError(
-            f"read_1d only supports 1D JEOL data so far, got dataFormat={header['dataFormat']!r} "
-            f"-- 2D (COSY/HSQC/HMBC/...) JEOL support isn't built yet, see TODO.md."
+            f"read_1d only supports 1D JEOL data so far, got dataFormat={header['dataFormat']!r}. "
+            f"2D JEOL files (COSY, HSQC, HMBC and similar) cannot be opened yet."
         )
     params = _parse_parameters(r, header)
     data = _read_data_1d(r, header)

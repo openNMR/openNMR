@@ -100,7 +100,7 @@ class ExperimentNotesEditor(QWidget):
         self._dirty = False
         self.edit.setEnabled(spectrum is not None)
         self.edit.setPlaceholderText(
-            "No title yet -- type one, or any notes about this experiment."
+            "No title yet – type one, or any notes about this experiment."
             if spectrum is not None else
             "Select an experiment to see or add its title and notes.")
         if spectrum is not None:

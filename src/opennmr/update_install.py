@@ -541,7 +541,7 @@ def upgrade_blocker(kind: str | None = None, python: str | None = None) -> str:
     return ""
 
 
-_UPGRADE_HELPER = r'''"""openNMR update helper -- started by the running app, which quits at once.
+_UPGRADE_HELPER = r'''"""openNMR update helper – started by the running app, which quits at once.
 
 Waits for the app to exit, upgrades openNMR with pip, checks that the new
 version starts, goes back to the old version if anything failed, and opens

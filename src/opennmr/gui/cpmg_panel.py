@@ -115,7 +115,7 @@ class CpmgProcessingPanel(QWidget):
         self.safety_spin.setRange(0, 100_000)
         self.safety_spin.setValue(10)
         self.safety_spin.setToolTip(
-            "Points kept back from the blanking at each end of every echo -- guards "
+            "Points kept back from the blanking at each end of every echo – guards "
             "against blanking artefacts at the echo edges.")
         split_form.addRow("Safety (points):", self.safety_spin)
         self.cutout_spin = TypedSpinBox()

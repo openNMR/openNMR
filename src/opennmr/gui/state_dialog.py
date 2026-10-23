@@ -58,8 +58,8 @@ class SaveStateDialog(QDialog):
         self._folder_chosen = False
         v = QVBoxLayout(self)
         intro = QLabel(
-            "Save a group of open spectra together -- with their processing, fits and kept fit "
-            "models -- under one name, to reopen later with File ▸ Open openNMR State. "
+            "Save a group of open spectra together – with their processing, fits and kept fit "
+            "models – under one name, to reopen later with File ▸ Open openNMR State. "
             "Experiments are reopened from their own data and reprocessed exactly as now; "
             "anything without raw data of its own (slices, simulations, VOCS, arithmetic) is "
             "saved as its data.")

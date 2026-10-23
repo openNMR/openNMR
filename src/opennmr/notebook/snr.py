@@ -419,7 +419,7 @@ def signal_to_noise(spectrum, signal_region, noise_region, *, detrend: int = DEF
     if abs(z[worst]) > z_limit:
         warnings.append(
             f"A point in the noise region at {xn[worst]:.4g} ppm is {abs(z[worst]):.1f} σ from "
-            f"the trend -- more than pure noise reaches 1 % of the time ({z_limit:.1f} σ). "
+            f"the trend – more than pure noise reaches 1 % of the time ({z_limit:.1f} σ). "
             "There may be signal or a spike there.")
 
     # --- signal ----------------------------------------------------------
@@ -664,7 +664,7 @@ def signal_to_noise_2d(spectrum, signal_region, noise_region, signal_region_f1=N
     if abs(residual[worst]) / sigma > z_limit:
         warnings.append(
             f"A point in the noise box at F2 {xs2[worst[1]]:.4g}, F1 {xs1[worst[0]]:.4g} ppm is "
-            f"{abs(residual[worst]) / sigma:.1f} σ from the trend -- more than pure noise reaches "
+            f"{abs(residual[worst]) / sigma:.1f} σ from the trend – more than pure noise reaches "
             f"1 % of the time ({z_limit:.1f} σ). There may be signal, a t1 ridge or a spike there.")
 
     # --- signal ----------------------------------------------------------
@@ -1012,7 +1012,7 @@ def _g(v, digits=3) -> str:
 
 def _conventions_lines(r: dict, indent: str) -> list[str]:
     lines = [f"{indent}  The same measurement by each convention (they differ by fixed factors "
-             "or by what is measured -- quote the convention with the number):"]
+             "or by what is measured – quote the convention with the number):"]
     for c in snr_conventions(r):
         lines.append(f"{indent}    {c['name']}: {c['formula']} = {_g(c['value'], 4)}")
     return lines
@@ -1041,7 +1041,7 @@ def _row_report_2d(r: dict, indent: str = "") -> list[str]:
     lines += _conventions_lines(r, indent)
     lines.append(
         f"{indent}  Detection: pure noise in this signal box would reach "
-        f"{_g(r['detection_threshold'])} σ {100 * (1 - r['confidence']):.0f} % of the time -- "
+        f"{_g(r['detection_threshold'])} σ {100 * (1 - r['confidence']):.0f} % of the time – "
         + ("the peak is detected." if r["detected"] else "NOT detected."))
     if r.get("ns"):
         lines.append(f"{indent}  NS = {r['ns']:g}: S/N per √scan {_g(r['snr_per_sqrt_scan'], 4)}.")
@@ -1074,7 +1074,7 @@ def _row_report(r: dict, indent: str = "") -> list[str]:
     lines += _conventions_lines(r, indent)
     lines += [
         f"{indent}  Detection: pure noise in this signal region would reach "
-        f"{_g(r['detection_threshold'])} σ {100 * (1 - r['confidence']):.0f} % of the time -- "
+        f"{_g(r['detection_threshold'])} σ {100 * (1 - r['confidence']):.0f} % of the time – "
         + ("the line is detected." if r["detected"] else "NOT detected."),
     ]
     if r.get("ns"):
@@ -1107,13 +1107,13 @@ def snr_report(result: dict) -> str:
         ref = rows[result["reference"]]["label"]
         lines.append(f"Against {ref}:")
         for c in result["comparisons"]:
-            text = (f"  {c['label']}: S/N ratio {_g(c['ratio'], 4)} ± {_g(c['ratio_error'], 2)} -- "
+            text = (f"  {c['label']}: S/N ratio {_g(c['ratio'], 4)} ± {_g(c['ratio_error'], 2)} – "
                     + ("differs significantly (95 %)." if c["significant"]
                        else "not significantly different (95 %)."))
             if c["expected_from_scans"] is not None:
                 text += (f" √(NS ratio) predicts {_g(c['expected_from_scans'], 4)}: "
                          + ("consistent." if c["consistent_with_scans"] else
-                            "NOT consistent -- something besides the number of scans changed."))
+                            "NOT consistent – something besides the number of scans changed."))
             if c["regions_differ"]:
                 text += " (different regions)"
             lines.append(text)

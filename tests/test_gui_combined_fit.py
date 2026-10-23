@@ -1,5 +1,5 @@
-"""Fit > CSA, Quad & J-coupling (gui/combined_panels.CombinedFitPanel): the
-site editor of Simulate > CSA, Quad & J-coupling plus a parameter table
+"""Fit > Solid-state NMR (gui/combined_panels.CombinedFitPanel): the
+site editor of Simulate > Solid-state NMR plus a parameter table
 (start / free / bounds / multi-start values), run through
 notebook.combined_fitting against synthetic 27Al spectra with known
 parameters, and kept with the spectrum like every other fit."""
@@ -132,7 +132,7 @@ def test_the_fit_recovers_both_sites_and_reports_them(qapp, _dialogs):
     assert {"C_Q (MHz)", "Share (%)", "P_Q (MHz)", "CT c.o.g. (ppm)"} <= set(columns)
     assert "±" in t.item(rows.index("Al1"), columns.index("C_Q (MHz)")).text()
     text = panel.results_label.text()
-    assert "CSA, Quad & J-coupling fit — MAS 20 kHz" in text and "R² 0.99" in text
+    assert "Solid-state NMR fit — MAS 20 kHz" in text and "R² 0.99" in text
     assert "COMBINED-HAMILTONIAN FIT REPORT" in panel.text_report()
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
 
@@ -217,10 +217,10 @@ def test_the_fit_is_kept_with_its_spectrum_and_logged(qapp, _dialogs):
     _settle_sidecar_save(window)
     shown = (panel.results_label.text(), panel.report_text())
     saved = window.session.spectra[index].metadata.raw["fits"]["combined"]
-    assert saved["label"] == "CSA, Quad & J-coupling"
+    assert saved["label"] == "Solid-state NMR"
     json.dumps(saved)  # all plain data
     text = io_history.render_log(window.session.info(index)["history"])
-    assert "CSA, Quad & J-coupling fit of 27Al MAS" in text
+    assert "Solid-state NMR fit of 27Al MAS" in text
     # The values table (a row per site, a column per parameter) is in the log.
     assert "| C_Q (MHz) |" in text and "Al1 | " in text and "Al2 | " in text
     # The parameter choices are part of the settings.

@@ -282,7 +282,7 @@ def fit_relaxation(t, y, model="inversion_recovery", y_err=None, p0=None,
     free_names = [p for p in param_names if p not in fixed]
 
     if not free_names:
-        raise ValueError("Every parameter is fixed -- nothing to fit.")
+        raise ValueError("Every parameter is fixed – nothing to fit.")
 
     p0_full = spec["p0"](t, y) if p0 is None else list(p0)
     lo_full, hi_full = spec["bounds"](t, y) if bounds is None else bounds
@@ -609,7 +609,7 @@ def _get_delays(fits, vdlist=None):
         if datapath is None:
             raise ValueError(
                 "No vdlist given and none could be recovered from the "
-                "fitted slices -- pass vdlist explicitly (a Bruker "
+                "fitted slices – pass vdlist explicitly (a Bruker "
                 "experiment path, the dict from "
                 "nmrtools.utils.read_vdlist(), or an array of delays "
                 "in seconds indexed by 1-based F1 slice index)."
@@ -629,7 +629,7 @@ def _get_delays(fits, vdlist=None):
     except IndexError:
         raise ValueError(
             f"vdlist has {len(vdlist_seconds)} entries, but a fitted "
-            f"slice index falls outside that range -- check the vdlist "
+            f"slice index falls outside that range – check the vdlist "
             f"matches this dataset."
         )
 
@@ -752,7 +752,7 @@ def _broadcast(value, n, name):
         if len(value) != n:
             raise ValueError(
                 f"{name} has {len(value)} entries but {n} series are being "
-                f"plotted -- give one entry per series (after any "
+                f"plotted – give one entry per series (after any "
                 f"show_series filtering), or a single value to apply to all."
             )
         return value
@@ -1131,7 +1131,7 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
     if row_requested and col_requested:
         raise ValueError(
             "NMR2D_relaxation_workflow fits one relaxation series "
-            "(one direction) at a time -- pass rows/row_shifts OR "
+            "(one direction) at a time – pass rows/row_shifts OR "
             "columns/column_shifts, not both. Call it twice for a "
             "dataset needing both."
         )

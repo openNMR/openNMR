@@ -218,7 +218,7 @@ def build_kernel(model=None, kind: str = "diffusion", x_values=None, y_values=No
             f"The model '{name}' has no single amplitude parameter, so it cannot be a "
             f"SCORE kernel: its parameters are {', '.join(param_names)}. A model that "
             f"already describes several populations (a biexponential, an N-component "
-            f"Stejskal-Tanner) is doing the job SCORE's component count does -- use the "
+            f"Stejskal-Tanner) is doing the job SCORE's component count does – use the "
             f"single-component form of it and ask SCORE for that many components."
         )
 
@@ -394,11 +394,11 @@ def _signal_columns(matrix, threshold: float):
     strongest = np.max(np.abs(matrix), axis=0)
     peak = float(np.max(strongest)) if strongest.size else 0.0
     if peak <= 0:
-        raise ValueError("The data matrix is entirely zero -- nothing to resolve.")
+        raise ValueError("The data matrix is entirely zero – nothing to resolve.")
     keep = np.flatnonzero(strongest >= threshold * peak)
     if keep.size < 1:
         raise ValueError(
-            f"No spectral point reaches {threshold:.1%} of the maximum -- lower the threshold."
+            f"No spectral point reaches {threshold:.1%} of the maximum – lower the threshold."
         )
     return keep
 
@@ -552,7 +552,7 @@ def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
         raise ValueError(f"data must be 2-D (levels x points), got shape {matrix.shape}.")
     if matrix.shape[0] != x_values.size:
         raise ValueError(
-            f"{matrix.shape[0]} rows against {x_values.size} x-values -- one per row is required."
+            f"{matrix.shape[0]} rows against {x_values.size} x-values – one per row is required."
         )
     if n_components < 1:
         raise ValueError(f"n_components must be >= 1, got {n_components}.")
@@ -565,7 +565,7 @@ def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
     if x_values.size < n_components + 1:
         raise ValueError(
             f"{x_values.size} gradient level(s)/delay(s) cannot determine {n_components} "
-            f"component(s) -- the bilinear model is underdetermined."
+            f"component(s) – the bilinear model is underdetermined."
         )
 
     order = np.argsort(x_values)
@@ -804,7 +804,7 @@ def _diagnose(result: dict, seed: dict | None) -> list[str]:
             f"Cross-talk is still {result['crosstalk']:.2f} after minimising it "
             f"(≲0.1 when components separate cleanly). The components appear to "
             f"share resonances, which is the case OUTSCORE's assumption does not "
-            f"cover -- minimising overlap then pulls away from the truth rather "
+            f"cover – minimising overlap then pulls away from the truth rather "
             f"than toward it. Prefer SCORE for this sample."
         )
 
@@ -816,7 +816,7 @@ def _diagnose(result: dict, seed: dict | None) -> list[str]:
                 f"OUTSCORE and SCORE disagree by up to {worst:.0%} on the decay "
                 f"constants while fitting the data equally well (R² {result['r_squared']:.5f} "
                 f"vs {seed['r_squared']:.5f}). The data does not determine the answer "
-                f"to that precision -- treat neither as settled, and get more "
+                f"to that precision – treat neither as settled, and get more "
                 f"gradient levels or a wider range before trusting either."
             )
     return warnings

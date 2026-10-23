@@ -78,10 +78,10 @@ def _fitted_series(window):
 # The Integrate tile
 # ----------------------------------------------------------------------
 
-def test_integrate_tile_sits_after_fit_and_holds_the_area_tools(qapp):  # noqa: F811
+def test_integrate_tile_sits_before_fit_and_holds_the_area_tools(qapp):  # noqa: F811
     window = MainWindow()
     tiles = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
-    assert tiles.index("Integrate") == tiles.index("Fit") + 1
+    assert tiles.index("Integrate") == tiles.index("Fit") - 1
     page = window.side_tabs.widget(window._integrate_tab_index)
     for section in (window._integration_section, window._dnp_section, window._snr_section,
                     window._cp_buildup_section):

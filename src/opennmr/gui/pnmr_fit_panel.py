@@ -145,7 +145,7 @@ class PnmrFitPanel(QWidget):
                  export_sites: Callable | None = None, parent=None) -> None:
         super().__init__(parent)
         #: ``export_sites(site_dicts, notes, nucleus, larmor_mhz, destination,
-        #: append, source)`` -- puts sites into CSA, Quad & J-coupling.
+        #: append, source)`` -- puts sites into Solid-state NMR.
         self._export_sites = export_sites
         self._model = model
         self._describe_model = describe_model
@@ -280,7 +280,7 @@ class PnmrFitPanel(QWidget):
         self.tolerance_auto_check = QCheckBox("Automatic")
         self.tolerance_auto_check.setChecked(True)
         self.tolerance_auto_check.setToolTip(
-            "Group shifts closer than the smallest non-zero bond-pathway shift -- the smallest "
+            "Group shifts closer than the smallest non-zero bond-pathway shift – the smallest "
             "difference the model itself can make.")
         self.tolerance_spin = QDoubleSpinBox()
         self.tolerance_spin.setRange(0.001, 10000.0)
@@ -409,7 +409,7 @@ class PnmrFitPanel(QWidget):
         nucleus = getattr(spectrum.metadata, "nucleus", None)
         have, want = _nucleus_element(nucleus), species_element(atom)
         if have and want and have != want:
-            self._log(f"Warning: the spectrum is {nucleus} but the model observes {atom} -- "
+            self._log(f"Warning: the spectrum is {nucleus} but the model observes {atom} – "
                       f"check the spectrum and the observed species.")
 
     # ------------------------------------------------------------------
@@ -703,8 +703,8 @@ class PnmrFitPanel(QWidget):
         return sorted({index.row() for index in model.selectedRows()}) if model else []
 
     def export_sites(self, which: str = "all") -> list[dict] | None:
-        """The fitted peaks (all, or the selected rows) as sites in CSA,
-        Quad & J-coupling (:func:`notebook.pnmr_export.sites_from_pnmr_fit`)."""
+        """The fitted peaks (all, or the selected rows) as sites in Solid-state NMR
+        (:func:`notebook.pnmr_export.sites_from_pnmr_fit`)."""
         if not self.result:
             return None
         chosen = None if which == "all" else self.selected_peak_indices()
@@ -723,7 +723,7 @@ class PnmrFitPanel(QWidget):
         larmor = getattr(meta, "bf1", None) or getattr(meta, "sfo1", None)
         destination = self.send_sites_row.destination()
         self._log(f"Exported {len(sites)} site(s) to "
-                  f"{'Fit' if destination == 'fit' else 'Simulate'} ▸ CSA, Quad & J-coupling"
+                  f"{'Fit' if destination == 'fit' else 'Simulate'} ▸ Solid-state NMR"
                   + (" (added)" if self.send_sites_row.append() else "") + ": "
                   + ", ".join(s["label"] for s in sites) + ".\n  " + "\n  ".join(notes))
         if self._export_sites is not None:
@@ -760,7 +760,7 @@ class PnmrFitPanel(QWidget):
                 reasons[d["reason"]] = reasons.get(d["reason"], 0) + 1
             text += " Left out: " + "; ".join(f"{n} {why}" for why, n in reasons.items()) + "."
         if r["bound_warnings"]:
-            text += f" <i>{len(r['bound_warnings'])} parameter(s) at a bound -- see the log.</i>"
+            text += f" <i>{len(r['bound_warnings'])} parameter(s) at a bound – see the log.</i>"
         self.results_label.setText(text)
         table.setRowCount(len(r["peaks"]))
         table.setVerticalHeaderLabels([str(p["index"] + 1) for p in r["peaks"]])
@@ -888,7 +888,7 @@ class PnmrFitPanel(QWidget):
         self.sticks_check = QCheckBox("Show predicted environments as sticks")
         self.sticks_check.setToolTip(
             "A stick at each predicted environment's shift along the bottom of the plot, its "
-            "height its probability -- shows what each peak was built from.")
+            "height its probability – shows what each peak was built from.")
         self.sticks_check.toggled.connect(self.redraw)
         form.addRow(self.sticks_check)
         self.hover_check = QCheckBox("Show environments under the cursor")

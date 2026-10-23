@@ -600,7 +600,7 @@ def fit_exchange_spectra(spectra, sites, hops, vary, larmor_MHz=None, nucleus=No
     for h in range(1, len(hops) + 1):
         if {f"hop{h}.Ea_eV", f"hop{h}.log10_nu0"} <= set(vary) and len(temps) < 2:
             raise ValueError(f"Hop {h}: Ea and the attempt frequency cannot both be fitted to "
-                             "spectra at a single temperature -- only their combination, the "
+                             "spectra at a single temperature – only their combination, the "
                              "rate, is defined. Fit hop{h}.log10_k instead, or add temperatures.")
     larmor = _larmor_MHz(nucleus, B0_T, larmor_MHz)
     sites0 = copy.deepcopy(list(sites))

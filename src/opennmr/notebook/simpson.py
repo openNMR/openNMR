@@ -158,7 +158,7 @@ def _read_simp_text(path):
                 imag.append(float(im_val))
 
     if NP is None or SW is None:
-        raise ValueError(f"{path}: missing NP/SW header -- not a valid SIMPSON SIMP file.")
+        raise ValueError(f"{path}: missing NP/SW header – not a valid SIMPSON SIMP file.")
     if len(real) != NP:
         raise ValueError(
             f"{path}: header declares NP={NP} but {len(real)} data lines were read."
@@ -272,7 +272,7 @@ def SIMPSONapodization_window(npoints, dt, kind='exponential', lb=0.0, gb=0.0,
         window = np.sin(np.pi * phase) ** 2
     else:
         raise ValueError(
-            f"Unknown apodization kind '{kind}' -- expected one of "
+            f"Unknown apodization kind '{kind}' – expected one of "
             f"'none', 'exponential', 'gaussian', 'lorentz_to_gauss', "
             f"'sine', 'sine_squared'."
         )
@@ -381,7 +381,7 @@ def SIMPSONread_fid(path):
     raw = _read_simp_text(path) if fmt == 'simp' else _read_dat_text(path)
     if raw.get('TYPE') != 'FID':
         raise ValueError(
-            f"{path}: TYPE is '{raw.get('TYPE')}', not FID -- this looks "
+            f"{path}: TYPE is '{raw.get('TYPE')}', not FID – this looks "
             f"like an already-processed spectrum. Use SIMPSONimport() "
             f"instead, or fft it yourself with fft_simpson_fid() if you "
             f"specifically need x_Hz/real_spectrum/imag_spectrum."
@@ -430,7 +430,7 @@ def _resolve_SFO1_from_field(nuclide, field):
             proton_freq_MHz = float(field)
         except ValueError:
             raise ValueError(
-                f'field={field!r} is a string but not a number -- pass e.g. '
+                f'field={field!r} is a string but not a number – pass e.g. '
                 f'field="500" for a conversational "500 MHz" magnet, or a '
                 f'plain number (field=11.7) for the field strength in Tesla.'
             )
@@ -464,7 +464,7 @@ def _hz_to_ppm(x_Hz, nuclide, field, SFO1):
         raise ValueError(
             f"Converting {nuclide!r} to ppm needs a field (a Tesla float, "
             f'or a conversational 1H-frequency string like "500") or an '
-            f"explicit SFO1 -- neither was given."
+            f"explicit SFO1 – neither was given."
         )
 
     resolved_SFO1, _, _ = _resolve_SFO1_from_field(nuclide, field)
@@ -566,7 +566,7 @@ def SIMPSONimport(path, nuclide=None, field=None, SFO1=None, mass=1,
     if f1p != 0 or f2p != 0:
         if x_ppm is None:
             raise ValueError(
-                "f1p/f2p cropping needs a ppm axis -- supply nuclide "
+                "f1p/f2p cropping needs a ppm axis – supply nuclide "
                 "(+field or SFO1)."
             )
         # NMR1dimport's crop (np.argmax(xAxppm < f1p)) relies on its
@@ -635,10 +635,10 @@ def CSDMimport(path, nuclide=None, field=None, SFO1=None, mass=1,
     if not _HAS_CSDMPY:
         raise ImportError(
             "CSDMimport needs the 'csdmpy' package (pip install csdmpy) "
-            "to read genuine CSDM/JSON files -- a different format from "
+            "to read genuine CSDM/JSON files – a different format from "
             "SIMPSON's SIMP text output. If your file starts with 'SIMP' "
             "rather than '{', it's SIMP text despite the .csdf extension "
-            "-- use SIMPSONimport for that instead."
+            "– use SIMPSONimport for that instead."
         )
 
     data = cp.load(path)
@@ -659,7 +659,7 @@ def CSDMimport(path, nuclide=None, field=None, SFO1=None, mass=1,
         x_ppm, resolved_SFO1 = _hz_to_ppm(x_Hz, nuclide, field, SFO1)
     else:
         raise ValueError(
-            f"{path}: dimension unit is '{unit}' -- CSDMimport currently "
+            f"{path}: dimension unit is '{unit}' – CSDMimport currently "
             f"only handles 'Hz' and 'ppm' axes, extend it for this case."
         )
 
@@ -736,7 +736,7 @@ def SIMPSONread_fid_series(paths, x=None, xlabel=None):
     """
     if x is not None and len(x) != len(paths):
         raise ValueError(
-            f"x has {len(x)} values but {len(paths)} paths were given -- "
+            f"x has {len(x)} values but {len(paths)} paths were given – "
             f"they must correspond 1:1."
         )
 
@@ -832,7 +832,7 @@ def SIMPSONplot_1d_stack(spectra, labels=None, linestyles=None, colours=None,
         if x is None:
             raise ValueError(
                 f"Spectrum {i} ({results.get('path')}) has no x_{x_unit} "
-                f"axis -- for SIMPSON/CSDM imports this means "
+                f"axis – for SIMPSON/CSDM imports this means "
                 f"nuclide/field/SFO1 wasn't supplied at import time."
             )
         y = results['normalised_real_spectrum'] if normalise else results['real_spectrum']

@@ -140,7 +140,7 @@ def parse_simp_text(path: str) -> dict:
         raise ValueError(f"{path} is a binary SIMPSON file (fsave -binary), which is not "
                          "supported. Save it again without -binary.")
     if "NP" not in header or "SW" not in header:
-        raise ValueError(f"{path}: missing NP/SW header -- not a valid SIMPSON SIMP file.")
+        raise ValueError(f"{path}: missing NP/SW header – not a valid SIMPSON SIMP file.")
     np_header = int(float(header["NP"]))
     nelem = max(int(float(header.get("NELEM", 1) or 1)), 1)
     if len(real) != np_header * nelem:
@@ -420,7 +420,7 @@ def resolve_frequency(nucleus: str | None, field=None, sfo1: float | None = None
         try:
             proton_mhz = float(field)
         except ValueError as exc:
-            raise ValueError(f"field={field!r} is a string but not a number -- give e.g. "
+            raise ValueError(f"field={field!r} is a string but not a number – give e.g. "
                              "field='500' (a '500 MHz' magnet) or field=11.7 (Tesla).") from exc
         gamma_1h = find_gamma("1H")
         if gamma_1h is None:
@@ -456,6 +456,7 @@ def read_1d(path: str, *, nucleus: str | None = None, field=None, sfo1: float | 
             phase0: float = 0.0, phase1: float = 0.0, pivot_frac: float = 0.5,
             phase0_inc: float = 0.1, phase1_max: float = 20.0, phase1_improvement: float = 0.15,
             phase_penalty: str = "magnitude", mass: float = 1.0, element: int = 0,
+            raw: dict | None = None, title: str | None = None,
             **_ignored) -> NMRSpectrum:
     """A SIMPSON spectrum or FID as an :class:`NMRSpectrum`. See the module
     docstring for what is read and the frequency-axis arguments.
@@ -468,10 +469,15 @@ def read_1d(path: str, *, nucleus: str | None = None, field=None, sfo1: float | 
     controls, as for every other FID. ``autophase=False`` (the default) leaves
     a simulated FID as it is: its phase is whatever the .tcl script made it.
 
+    ``raw`` / ``title`` : an already-parsed ``load_raw``-style dict and a name
+    for it, used by the text-table importer (:mod:`opennmr.io.tables`) so a
+    FID read from CSV/XY/JCAMP-DX goes through this same pipeline.
+
     Extra keyword arguments (the other vendors' reader options) are ignored,
     so a caller with one set of options can use any reader."""
-    raw = load_raw(path, kind=kind, time_unit=time_unit, sw=sw, element=element)
-    title = os.path.basename(path)
+    if raw is None:
+        raw = load_raw(path, kind=kind, time_unit=time_unit, sw=sw, element=element)
+    title = title or os.path.basename(path)
     if raw["NELEM"] > 1:
         title += f" [{raw['element'] + 1}/{raw['NELEM']}]"
     observe, b0 = resolve_frequency(nucleus, field, sfo1)

@@ -106,7 +106,7 @@ class CpBuildupPanel(QWidget):
         self.spectra_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.spectra_table.setMinimumHeight(140)
         self.spectra_table.setToolTip("Tick the spectra of the series and type each one's "
-                                      "contact time in µs -- or read them from a parameter below.")
+                                      "contact time in µs – or read them from a parameter below.")
         self.spectra_table.itemChanged.connect(self._on_item_changed)
         v.addWidget(self.spectra_table)
         # Explicit user request, 2026-10-17.
@@ -228,7 +228,7 @@ class CpBuildupPanel(QWidget):
         for key, model in cpb.MODELS.items():
             self.model_combo.addItem(model["name"], key)
         self.model_combo.setToolTip(
-            "Classical I–S (eq 10): rise with T_IS, decay with the protons' T1ρ -- the usual "
+            "Classical I–S (eq 10): rise with T_IS, decay with the protons' T1ρ – the usual "
             "choice. Simple rise (eq 11): no decay seen. Eq 9: the S spins' T1ρ too. Two "
             "components: two sites (or rates) in one region. I–I*–S (eq 28): protonated "
             "carbons under MAS (fast transfer within C–H, then spin diffusion; λ = ½ for CH, "

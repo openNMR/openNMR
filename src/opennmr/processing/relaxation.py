@@ -366,7 +366,7 @@ def evaluate_expression(expression: str, constants: dict | None = None) -> dict:
 
     text = (expression or "").strip()
     if not text:
-        raise ValueError("Enter a factor -- a number, or an expression in this experiment's parameters.")
+        raise ValueError("Enter a factor – a number, or an expression in this experiment's parameters.")
     try:
         expr = sympy.sympify(text, evaluate=True)
     except (sympy.SympifyError, TypeError, SyntaxError) as exc:
@@ -571,7 +571,7 @@ UNCERTAINTY_KINDS = {
         "short": "1σ (from residual scatter)",
         "long": (
             "1σ, from the scatter of the data about the fitted curve, rescaled by the reduced "
-            "chi-squared (absolute_sigma=False). Assumes the model is correct -- any systematic "
+            "chi-squared (absolute_sigma=False). Assumes the model is correct – any systematic "
             "misfit is absorbed into this number as if it were noise, making it optimistic."
         ),
     },
@@ -748,7 +748,7 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
     free_names = [p for p in param_names if p not in fixed]
 
     if not free_names:
-        raise ValueError("Every parameter is fixed -- nothing to fit.")
+        raise ValueError("Every parameter is fixed – nothing to fit.")
 
     p0_full = spec["p0"](t, y) if p0 is None else list(p0)
     lo_full, hi_full = spec["bounds"](t, y) if bounds is None else bounds
@@ -969,7 +969,7 @@ def fit_relaxation_global(datasets, model: str = "exponential_decay", shared=(),
     shared_free = [name for name in shared if name not in fixed]
     local_free = [name for name in param_names if name not in fixed and name not in shared]
     if not shared_free and not local_free:
-        raise ValueError("Every parameter is fixed -- nothing to fit.")
+        raise ValueError("Every parameter is fixed – nothing to fit.")
 
     # Defaults come from the pooled data: a per-dataset default would
     # give each curve a different starting point for a parameter they
@@ -1140,7 +1140,7 @@ def _prepare_global_datasets(datasets, labels) -> list[dict]:
                 t, y, y_err = items
             else:
                 raise ValueError(
-                    f"dataset {i} has {len(items)} elements -- expected (t, y) or (t, y, y_err)."
+                    f"dataset {i} has {len(items)} elements – expected (t, y) or (t, y, y_err)."
                 )
             label = None
         t = np.asarray(t, dtype=float)
@@ -1343,7 +1343,7 @@ def curve_fit_parameters_to_csv(results) -> str:
 
     results = list(results or [])
     if not results:
-        raise ValueError("No curve fit to export -- run Fit Curve first.")
+        raise ValueError("No curve fit to export – run Fit Curve first.")
 
     names: list[str] = []
     for result in results:
@@ -1444,7 +1444,7 @@ def curve_fit_to_csv(results, x_label: str = "x", x_scale: float = 1.0,
 
     results = list(results or [])
     if not results:
-        raise ValueError("No curve fit to export -- run Fit Curve first.")
+        raise ValueError("No curve fit to export – run Fit Curve first.")
 
     preamble = ""
     if include_parameters:
@@ -2125,7 +2125,7 @@ def _get_delays(fits, vdlist):
 
     if vdlist is None:
         raise ValueError(
-            "vdlist is required -- pass the dict from "
+            "vdlist is required – pass the dict from "
             "opennmr.io.bruker.read_vdlist(), or an array of delays "
             "(seconds) indexed by 1-based F1 slice index."
         )
@@ -2150,7 +2150,7 @@ def _get_delays(fits, vdlist):
     if missing:
         raise ValueError(
             f"The value list has {len(vdlist_seconds)} entries but this fit "
-            f"covers slice {max(missing)} -- {len(missing)} slice(s) have no "
+            f"covers slice {max(missing)} – {len(missing)} slice(s) have no "
             f"value. A longer list would be fine (the surplus is ignored); a "
             f"shorter one cannot be fitted. Limit the analysis to the first "
             f"{len(vdlist_seconds)} slices, or use a list that covers them all."
@@ -2251,13 +2251,13 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
         raise ValueError("No fitted slices available.")
 
     # A lineshape-model series (notebook.series_fitting: CSA, quadrupolar
-    # or CSA, Quad & J-coupling sites applied to every slice) carries fitted
+    # or Solid-state NMR sites applied to every slice) carries fitted
     # areas and amplitudes like a peak fit, under its own keys.
     model_fit = bool(fits[0].get("model_fit"))
     fitted_slices = "popt" in fits[0] or model_fit
     if value_source in ("area", "amplitude") and not fitted_slices:
         raise ValueError(
-            f"value_source={value_source!r} needs peaks fitted with NMR2D_fit_slices -- "
+            f"value_source={value_source!r} needs peaks fitted with NMR2D_fit_slices – "
             f"these slices came from NMR2D_integrate_slices, which measures a region "
             f"without fitting a lineshape to it. Use value_source='region', or fit the "
             f"peaks first."
@@ -2348,3 +2348,18 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
             print_relaxation_report(fit_result)
 
     return (results, series) if return_series else results
+
+
+def start_step_values(start: float, step: float, multiplier: float, n: int) -> np.ndarray:
+    """``n`` values beginning at ``start``, each step ``multiplier`` times the last.
+
+    ``multiplier`` = 1 gives equal steps (``start + k*step``). Otherwise the
+    k-th value is ``start + step*(m**k - 1)/(m - 1)``, so ``start=0.1``,
+    ``step=0.1``, ``m=2`` gives 0.1, 0.2, 0.4, 0.8, ... ``multiplier`` may
+    be any positive number, not only a whole one."""
+    if multiplier <= 0:
+        raise ValueError("The step multiplier must be positive.")
+    k = np.arange(int(n), dtype=float)
+    if abs(multiplier - 1.0) < 1e-12:
+        return start + step * k
+    return start + step * (multiplier ** k - 1.0) / (multiplier - 1.0)

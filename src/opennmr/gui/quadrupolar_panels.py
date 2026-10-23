@@ -249,7 +249,7 @@ class QuadrupolarFitPanel(QWidget):
         self.results_table.setToolTip(
             "Fitted values with 1σ uncertainties. P_Q = C_Q·√(1+η_Q²/3); CT c.o.g. is the "
             "central transition's centre of gravity (δiso plus its isotropic quadrupolar "
-            "shift) -- both are well determined even when C_Q and δiso are correlated.\n\n"
+            "shift) – both are well determined even when C_Q and δiso are correlated.\n\n"
             "Right-click to copy the table or the full report.")
         self.results_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.results_table.customContextMenuRequested.connect(self._on_results_menu)
@@ -264,8 +264,8 @@ class QuadrupolarFitPanel(QWidget):
         self.use_fitted_button.setEnabled(False)
         self.use_fitted_button.clicked.connect(self.use_fitted_as_start)
         self.send_button = QPushButton(self.SEND_TEXT)
-        self.send_button.setToolTip("Open a fitted site -- the one selected in the results "
-                                    "table, else the first -- in the simulator, with the fit's "
+        self.send_button.setToolTip("Open a fitted site – the one selected in the results "
+                                    "table, else the first – in the simulator, with the fit's "
                                     "field, spinning, transitions and level of theory.")
         self.send_button.setEnabled(False)
         self.send_button.clicked.connect(self._on_send)
@@ -430,7 +430,7 @@ class QuadrupolarFitPanel(QWidget):
     def _bounds_dialog(self, row) -> None:
         bounds, fixed = self._constraints(row)
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Bounds / fixed parameters -- site {row + 1}")
+        dialog.setWindowTitle(f"Bounds / fixed parameters – site {row + 1}")
         form = QFormLayout(dialog)
         edits, checks = {}, {}
         for name, label in self.PARAM_LABELS.items():
@@ -510,7 +510,7 @@ class QuadrupolarFitPanel(QWidget):
     def _settings(self):
         spin = self.spin()
         if spin is None:
-            raise ValueError("Choose the observed nucleus (e.g. 27Al) -- it sets the spin I.")
+            raise ValueError("Choose the observed nucleus (e.g. 27Al) – it sets the spin I.")
         if spin < 1:
             raise ValueError(f"{self.nucleus_combo.currentText()} (I = {spin:g}) has no "
                              "quadrupole moment.")

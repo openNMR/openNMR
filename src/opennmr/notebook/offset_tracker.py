@@ -474,7 +474,7 @@ def pattern_spectrum(series: dict, style: str = "lineshape", n_points: int = 409
 def _style_error(style) -> str:
     text = f"style must be one of {STYLES}, got {style!r}"
     if style == "triangles":
-        text += " ('triangles' was replaced by 'lineshape' on 2026-10-18)"
+        text += " ('triangles' is now called 'lineshape')"
     return text
 
 

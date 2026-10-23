@@ -13,7 +13,7 @@ by :mod:`opennmr.notebook.dft_calibration` (one reference: slope −1). The
 sample's element picks its calibration, so ¹H can use L-alanine while
 ²³Na uses NaCl in the same sample. Calibrations can be saved and reused.
 
-It *is* a Simulate ▸ CSA, Quad & J-coupling panel with an import box on top:
+It *is* a Simulate ▸ Solid-state NMR panel with an import box on top:
 the imported sites land in its site list, where they can be edited, and its
 own field, regime, MAS, transitions, level of theory and axis -- and its
 Simulate, plot, Keep and Send to Fit -- do the rest. The maths is
@@ -49,7 +49,7 @@ G0_HELP = (
 
 #: The line shown under it (the user's wording); the rest is its tooltip.
 G0_SHORT = ("Included: the long-range contribution to the shielding (bulk susceptibility), as "
-            "in crystalline materials. Excluded: omitted -- for molecules. Every VASP file; a "
+            "in crystalline materials. Excluded: omitted – for molecules. Every VASP file; a "
             "CASTEP .magres always includes it.")
 
 # Reference table columns.
@@ -350,7 +350,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self.dft_frame_combo.addItem("Cartesian (x, y, z of the file)", "cartesian")
         self.dft_frame_combo.setToolTip(
             "Cell: the standard setting (a along x, b in the xy plane), with a, b, c drawn. "
-            "Cartesian: the calculation's own x, y, z -- the only choice for a calculation "
+            "Cartesian: the calculation's own x, y, z – the only choice for a calculation "
             "without a cell.")
         form.addRow("Frame:", self.dft_frame_combo)
         self.dft_tensor_style_combo = QComboBox()
@@ -470,7 +470,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
                        | {os.path.basename(c["path"]) for c in codes if c.get("g0") == "fixed"})
         if fixed:
             return ["G=0 is excluded for VASP files only: " + ", ".join(fixed)
-                    + " (CASTEP) keep theirs -- a .magres holds only the total σ -- so they are "
+                    + " (CASTEP) keep theirs – a .magres holds only the total σ – so they are "
                     "not on the same scale as the VASP files."]
         return []
 

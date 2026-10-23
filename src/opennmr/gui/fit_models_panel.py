@@ -104,7 +104,7 @@ class FitModelsPanel(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setToolTip(
             "k: free parameters. ΔAIC / ΔBIC: from the best of the ticked models, when they were "
-            "fitted to the same points -- lower is better; a ΔBIC over 6 is strong, over 10 very "
+            "fitted to the same points – lower is better; a ΔBIC over 6 is strong, over 10 very "
             "strong evidence against a model (Kass & Raftery 1995). R² always favours more sites; "
             "the criteria charge for them.\n\nDouble-click to show a fit; right-click for more.")
         self.table.cellDoubleClicked.connect(lambda row, _c: self._on_show(row))
@@ -120,7 +120,7 @@ class FitModelsPanel(QWidget):
         self.restore_button = QPushButton(RESTORE_TEXT)
         self.restore_button.setToolTip(
             "Re-plot this fit and put its settings and result back in the fit panel that made "
-            "it (making it the current fit), then open that panel at “What's next?” -- what "
+            "it (making it the current fit), then open that panel at “What's next?” – what "
             "the fit tells you and what to try next.")
         self.restore_button.clicked.connect(lambda: self._on_restore(self.table.currentRow()))
         for b in (self.show_button, self.restore_button):
@@ -149,7 +149,7 @@ class FitModelsPanel(QWidget):
         self.compare_button = QPushButton("Compare Ticked")
         self.compare_button.setToolTip(
             "Each ticked fit into Open experiments (reused if already there) and onto the "
-            "Compare view -- stacked, a row per fit, or superimposed -- with ΔAIC/ΔBIC in the "
+            "Compare view – stacked, a row per fit, or superimposed – with ΔAIC/ΔBIC in the "
             "table. Right-click an entry in Compare ▸ Fit Display… for its components, colours "
             "and residual; Plot Style recolours each fit.")
         self.compare_button.clicked.connect(self.compare)
@@ -319,7 +319,7 @@ class FitModelsPanel(QWidget):
                if next((m for m in self._rows if m["id"] == i), {}).get("kind") != "curve"]
         if not ids:
             QMessageBox.information(self, "Send to Open Experiments",
-                                    "Tick (or select) a kept spectrum fit first -- a curve fit "
+                                    "Tick (or select) a kept spectrum fit first – a curve fit "
                                     "has no spectrum to list.")
             return
         for model_id in ids:

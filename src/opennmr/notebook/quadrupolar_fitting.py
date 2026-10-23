@@ -459,7 +459,7 @@ def _edge_warnings(x_sorted, mask, params, n_sites, x_ref, sim_kwargs, baseline_
         beyond = max(w_lo - lo, hi - w_hi, 0.0)
         if beyond > 0.02 * max(hi - lo, 1e-9):
             out.append(f"Site {s + 1}: its fitted pattern spans {hi:.4g} to {lo:.4g} ppm, beyond "
-                       f"the fit window ({w_hi:.4g} to {w_lo:.4g} ppm) -- it is clipped, and the "
+                       f"the fit window ({w_hi:.4g} to {w_lo:.4g} ppm) – it is clipped, and the "
                        "baseline (estimated from the spectrum's ends) may be sitting on it. "
                        "Widen the window/spectrum, or fit the baseline (fit_baseline=True).")
     base = params[_N * n_sites] + params[_N * n_sites + 1] * (x_sorted - x_ref)
@@ -488,17 +488,17 @@ def _physics_warnings(popt, pcov_free, is_free, labels, I, larmor_Hz, mas_Hz, tr
     for s, label in enumerate(labels):
         cq = popt[s * _N + 1]
         if is_free[s * _N + 1] and cq < 0.02:
-            warnings.append(f"{label}: C_Q fitted to ~0 -- the lineshape is not resolving a "
+            warnings.append(f"{label}: C_Q fitted to ~0 – the lineshape is not resolving a "
                             "quadrupolar splitting; the broadening is doing the work.")
         nu_q = 3 * cq * 1e6 / (2 * I * (2 * I - 1))
         if order != "exact" and nu_q > 0.1 * larmor_Hz:
             warnings.append(f"{label}: nu_Q is {nu_q / larmor_Hz:.0%} of the Larmor frequency; "
-                            "perturbation theory is no longer reliable -- refit with the exact model.")
+                            "perturbation theory is no longer reliable – refit with the exact model.")
         i_d, i_c = s * _N, s * _N + 1
         if is_free[i_d] and is_free[i_c] and pcov[i_d, i_d] > 0 and pcov[i_c, i_c] > 0:
             r = pcov[i_d, i_c] / np.sqrt(pcov[i_d, i_d] * pcov[i_c, i_c])
             if abs(r) > 0.95:
-                warnings.append(f"{label}: d_iso and C_Q are {abs(r):.0%} correlated -- quote "
+                warnings.append(f"{label}: d_iso and C_Q are {abs(r):.0%} correlated – quote "
                                 "the CT centre of gravity and P_Q, or add a second field.")
     return warnings
 
@@ -589,7 +589,7 @@ def check_quad_bound_hits(popt, pcov_full, is_free, fit_info):
             at_lower = np.isfinite(lower[i]) and popt[i] - err <= lower[i]
             if at_upper and at_lower:
                 # +/- 1 sigma covers the whole range: undetermined, not "on a bound".
-                warnings.append(f"{label}: {name} is not determined by the data -- its 1σ "
+                warnings.append(f"{label}: {name} is not determined by the data – its 1σ "
                                 f"uncertainty spans its whole range ({lower[i]:g} to "
                                 f"{upper[i]:g}); fix it, or add data that constrain it")
             elif at_upper:

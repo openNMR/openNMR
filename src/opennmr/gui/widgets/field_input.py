@@ -77,7 +77,7 @@ def proton_frequency_box(field_spin, parent=None) -> TypedDoubleSpinBox:
     box.setRange(0.0, _gamma_1h() * field_spin.maximum() / 1e6)
     box.setSingleStep(1.0)
     box.setSuffix(" MHz ¹H")
-    box.setToolTip("The same magnet as its ¹H frequency -- how spectrometers are usually "
+    box.setToolTip("The same magnet as its ¹H frequency – how spectrometers are usually "
                    "named (400 MHz = 9.3946 T). Type either this or the field.")
     state = {"busy": False}
 
@@ -197,7 +197,7 @@ def link_field(form, larmor_spin, nucleus, nucleus_changed_signal=None, default_
     field_spin.setSingleStep(0.1)
     field_spin.setSuffix(" T")
     field_spin.setToolTip(
-        "The magnet's field, B0 -- or type its ¹H frequency in the box beside it. The Larmor "
+        "The magnet's field, B0 – or type its ¹H frequency in the box beside it. The Larmor "
         "frequency below follows from it and the nucleus (9.3946 T is a '400 MHz' "
         "spectrometer).")
     row = QWidget()
@@ -217,7 +217,7 @@ def link_field(form, larmor_spin, nucleus, nucleus_changed_signal=None, default_
     larmor_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
     larmor_spin.setToolTip(
         "The observed nucleus's Larmor frequency, calculated from the nucleus and the field "
-        "above (γ/2π × B0). Set by a selected spectrum's SFO1 where there is one -- the field "
+        "above (γ/2π × B0). Set by a selected spectrum's SFO1 where there is one – the field "
         "then follows.")
 
     link = FieldLink(field_spin, larmor_spin, nucleus, parent=row)

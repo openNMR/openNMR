@@ -381,7 +381,7 @@ def fit_cp_buildup(t_us, y, model: str = "is", start: dict | None = None,
         if n in free and params[n] > 3 * float(np.max(t)):
             warnings.append(f"{PARAMETERS[n][0]} = {params[n]:.4g} µs is longer than the "
                             "longest contact time × 3: the decay is barely sampled, so it is "
-                            "uncertain -- add longer contact times.")
+                            "uncertain – add longer contact times.")
     if t_max is None and model != "rise":
         warnings.append("The fitted curve has not turned over within the contact times: the "
                         "maximum (and T1ρ) lie beyond the data.")

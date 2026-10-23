@@ -10,7 +10,7 @@ One function for every kind of fit openNMR makes:
 * isotropic peak fits -- a 1D fit or one slice of
   :func:`opennmr.processing.fitting.NMR2D_fit_slices` (``popt``, ``pcov``,
   ``is_free``, ``peak_defs``);
-* CSA, Quad & J-coupling fits (:func:`opennmr.notebook.combined_fitting.fit_combined`);
+* Solid-state NMR fits (:func:`opennmr.notebook.combined_fitting.fit_combined`);
 * multi-spectrum fits (:func:`opennmr.notebook.multi_fitting.fit_multi`): the
   joint refinement's covariance, across every spectrum, or one spectrum's
   own fit in sequential mode.
@@ -42,7 +42,7 @@ ANNOTATE_UP_TO = 12
 
 _GREEK = {"beta": r"\beta", "tau": r"\tau", "tau_c": r"\tau_\mathrm{c}"}
 
-#: Spectral-fit parameter names (CSA, Quad & J-coupling, multi-spectrum) as
+#: Spectral-fit parameter names (Solid-state NMR, multi-spectrum) as
 #: symbols: italic quantity, upright subscripts (IUPAC).
 SPECTRAL_SYMBOLS = {
     "delta_iso": r"$\delta_\mathrm{iso}$",
@@ -175,6 +175,15 @@ def _isotropic_input(fit: dict) -> dict:
                 groups.append(k)
                 index.append(i)
             i += 1
+    # The J couplings of multiplets sit after every peak, before the baseline.
+    for k, peak in enumerate(fit["peak_defs"], start=1):
+        for j in range(len(peak.get("couplings") or ())):
+            if i < is_free.size and is_free[i]:
+                names.append(f"Peak {k}: J{j + 1}")
+                labels.append(r"$\mathit{J}_{%d%s}$" % (k, "" if len(peak["couplings"]) == 1 else f",{j + 1}"))
+                groups.append(k)
+                index.append(i)
+            i += 1
     n_free = int(is_free.sum())
     if pcov.shape == (is_free.size, is_free.size):
         sub = pcov[np.ix_(index, index)]
@@ -226,7 +235,7 @@ def plot_correlation_matrix(fit, figure=None, ax=None, triangle="lower", annotat
 
     ``fit`` : any fit :func:`correlation_input` takes -- a relaxation or
     diffusion curve fit, an isotropic peak fit (1D or one slice), a
-    CSA, Quad & J-coupling fit, or :func:`multi_fit_correlation` of a
+    Solid-state NMR fit, or :func:`multi_fit_correlation` of a
     multi-spectrum one.
     ``figure`` / ``ax`` : draw into this figure (cleared) or these axes;
     otherwise a new figure.
