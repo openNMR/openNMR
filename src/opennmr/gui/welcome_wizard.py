@@ -23,6 +23,30 @@ from .widgets.typed_spinbox import TypedDoubleSpinBox, TypedSpinBox
 
 WEBSITE_URL = "https://opennmr.github.io/"
 
+#: "Type of work" -> (label, what it is for, the Settings ▸ Sections shown
+#: keys that work does not use). Explicit user request, 2026-10-24: ticking
+#: several removes only what *every* ticked type leaves out.
+WORK_TYPES = {
+    "solution": ("Solution-state only",
+                 "Liquids: 1D/2D, integration, J-coupling, relaxation and diffusion.",
+                 ("pnmr", "dnp", "czjzek", "cp_buildup", "offset_tracker", "batch_pseudo2d",
+                  "bpp", "exchange", "advanced")),
+    "solid": ("Solid-state only (CSA, quadrupolar, J-coupling)",
+              "Powders and MAS: tensors, quadrupolar lineshapes, Czjzek, CP build-up.",
+              ("pnmr", "dnp", "enmr", "imaging")),
+    "dnp": ("DNP NMR", "Hyperpolarised experiments and their enhancements.",
+            ("pnmr", "enmr", "imaging")),
+    "pnmr": ("Paramagnetic NMR", "Paramagnetic shifts, pNMR bond pathways and Curie-type fits.",
+             ("dnp", "enmr", "imaging")),
+}
+
+
+def sections_to_remove(work_types) -> set[str]:
+    """The section keys left out by *all* of the chosen work types (their
+    intersection); nothing for no choice."""
+    chosen = [set(WORK_TYPES[k][2]) for k in work_types if k in WORK_TYPES]
+    return set.intersection(*chosen) if chosen else set()
+
 
 def matplotlib_to_hex(color) -> str:
     import matplotlib.colors
@@ -88,9 +112,10 @@ class WelcomeWizard(QDialog):
         buttons.addWidget(self.next_button)
         outer.addLayout(buttons)
 
-        for build in (self._welcome_page, self._appearance_page, self._plots_page,
+        for build in (self._welcome_page, self._work_type_page, self._appearance_page, self._plots_page,
                       self._layout_page, self._data_page, self._done_page):
             self.stack.addWidget(build())
+        self._initial_sections = {k: b.isChecked() for k, b in self.section_checks.items()}
         self._update_buttons()
 
     # ---- pages -----------------------------------------------------------
@@ -110,6 +135,48 @@ class WelcomeWizard(QDialog):
         layout.addWidget(link)
         layout.addStretch(1)
         return page
+
+    def _work_type_page(self) -> QWidget:
+        page, layout = _page(
+            "Type of work: set-up style",
+            "Tick the kind of NMR you do and openNMR pre-selects the sections you will not need "
+            "on the Layout page. Tick more than one and only sections that none of your kinds "
+            "of work use are removed. You can still change every choice on the Layout page, and "
+            "nothing is deleted: anything hidden comes back by ticking it in Settings.")
+        self.work_type_checks: dict[str, QCheckBox] = {}
+        for key, (label, blurb, _removed) in WORK_TYPES.items():
+            box = QCheckBox(label)
+            box.setToolTip(blurb)
+            box.toggled.connect(self._on_work_type_changed)
+            layout.addWidget(box)
+            note = QLabel(blurb)
+            note.setIndent(24)
+            note.setWordWrap(True)
+            layout.addWidget(note)
+            self.work_type_checks[key] = box
+        self.work_type_summary = QLabel("")
+        self.work_type_summary.setWordWrap(True)
+        layout.addWidget(self.work_type_summary)
+        layout.addStretch(1)
+        return page
+
+    def selected_work_types(self) -> list[str]:
+        return [k for k, box in self.work_type_checks.items() if box.isChecked()]
+
+    def _on_work_type_changed(self, _checked: bool = False) -> None:
+        """Tick the Layout page to match: sections the chosen work leaves
+        out are unticked, every other one ticked. With nothing chosen the
+        Layout page goes back to what Settings has now."""
+        chosen = self.selected_work_types()
+        removed = sections_to_remove(chosen)
+        for key, box in self.section_checks.items():
+            box.setChecked(False if key in removed else
+                           (True if chosen else self._initial_sections.get(key, True)))
+        w = self.window_
+        names = [w.OPTIONAL_SECTIONS[k][0].split(" (")[0] for k in w.OPTIONAL_SECTIONS if k in removed]
+        self.work_type_summary.setText(
+            ("Will be removed: " + ", ".join(names) + ".") if names else
+            ("No section is left out by all of these." if chosen else ""))
 
     def _appearance_page(self) -> QWidget:
         w = self.window_

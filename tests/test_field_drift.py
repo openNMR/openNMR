@@ -212,3 +212,22 @@ def test_drift_survives_a_reprocess_of_the_rows(qapp):
     sp.data, sp.data_imag = np.real(shifted), np.imag(shifted)
     assert _spread_hz(sp) < 0.15
     window.close()
+
+
+def test_a_region_too_narrow_for_the_drift_is_flagged():
+    sp = _series(np.linspace(0, 6.0, N_ROWS))          # 6 Hz = 0.015 ppm of travel
+    track = fd.track_peak(sp, (4.99, 5.005))
+    assert track["at_edge"].any()
+    assert "Widen" in fd.edge_warning(track)
+    assert not fd.track_peak(sp, (4.9, 5.1))["at_edge"].any()
+    assert fd.edge_warning(fd.track_peak(sp, (4.9, 5.1))) == ""
+
+
+def test_suggest_region_grows_only_to_hold_the_peak():
+    sp = _series(np.linspace(0, 6.0, N_ROWS))
+    lo, hi = fd.suggest_region(sp, (4.99, 5.005))
+    assert lo <= 4.99 and hi >= 5.0 + 6.0 / SFO - 1e-6
+    assert hi < 5.2                                     # not grown wildly
+    assert not fd.track_peak(sp, (lo, hi))["at_edge"].any()
+    # a region that already holds the peak is left alone
+    assert fd.suggest_region(sp, (4.9, 5.1)) == (4.9, 5.1)

@@ -296,3 +296,57 @@ def test_a_molecular_file_forces_the_cartesian_frame(qapp, said, tmp_path):
     assert panel.calculate(simulate=False)
     assert panel.show_tensors()
     _ = D
+
+
+# ---- solution / solid and motional averaging (2026-10-24) --------------------------------
+
+def _methyl_paths(tmp_path):
+    def rz(deg):
+        t = np.radians(deg)
+        return np.array([[np.cos(t), -np.sin(t), 0], [np.sin(t), np.cos(t), 0], [0, 0, 1.0]])
+    atoms = [("H", i + 1, (np.cos(np.radians(120 * i)), np.sin(np.radians(120 * i)), 0.0),
+              _tensor((24.0, 28.0, 36.0), rz(120 * i)), None) for i in range(3)]
+    atoms.append(("H", 4, (5.0, 5.0, 5.0), np.diag([20.0, 20.0, 20.0]), None))
+    sample = write_magres(tmp_path / "ch3.magres", atoms, lattice=None)
+    ref = write_magres(tmp_path / "href.magres", [("H", 1, (0, 0, 0), np.eye(3) * 30.0, None)])
+    return {"sample": sample, "ref": ref, "lib": str(tmp_path / "lib.json")}
+
+
+def test_state_and_averaging_controls(qapp, said, tmp_path):  # noqa: F811
+    paths = _methyl_paths(tmp_path)
+    window = MainWindow()
+    panel = window.dft_sim_panel
+    panel.library_path = paths["lib"]
+    panel.dft_sample_edit.setText(paths["sample"])
+    assert panel.read_files(quiet=True)
+    panel.dft_element_combo.setCurrentText("H")
+    assert panel.add_reference_file(paths["ref"], element="H") == 1
+    panel.set_experimental_shift(0, 0.0)
+    assert panel.dft_state_combo.currentData() == "solid"
+    assert panel.average_selected(["H1"]) is False                      # one site: told so
+    assert panel.average_selected(["H1", "H2", "H3"]) is True
+    assert panel.dft_average_list.count() == 1
+    assert panel.average_selected(["H3", "H4"]) is False                # H3 already grouped
+    assert panel.calculate(simulate=False)
+    labels = [r["label"] for r in panel.model["atoms"]]
+    assert labels == ["H1–H3", "H4"]
+    assert panel.model["atoms"][0]["eta"] == pytest.approx(0.0, abs=1e-9)
+    assert "python" in panel.dft_python().lower() or "average=" in panel.dft_python()
+    assert "average=[['H1', 'H2', 'H3']]" in panel.dft_python()
+    # solution: isotropic only, CSA switches disabled
+    panel.dft_state_combo.setCurrentIndex(panel.dft_state_combo.findData("solution"))
+    assert not panel.dft_include_csa_check.isEnabled()
+    assert panel.calculate(simulate=False)
+    assert panel.model["state"] == "solution"
+    assert all(r["aniso"] is None for r in panel.model["atoms"])
+    assert "state='solution'" in panel.dft_python()
+    # state survives get/set
+    saved = panel.get_state()
+    assert saved["dft"]["state"] == "solution" and saved["dft"]["average"] == [["H1", "H2", "H3"]]
+    panel.remove_average_group(0)
+    assert panel.dft_average_list.count() == 0
+    panel.set_state(saved)
+    assert panel.dft_state_combo.currentData() == "solution"
+    assert panel.average_groups == [["H1", "H2", "H3"]]
+    assert said == [("information", "Select at least two sites in the site list to average."),
+                    ("information", "H3 is already in a group; remove that group first.")]

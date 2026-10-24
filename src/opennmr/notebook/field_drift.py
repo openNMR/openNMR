@@ -91,7 +91,7 @@ def track_peak(spectrum, region_ppm: tuple[float, float], method: str = "peak",
     kept = spectrum.metadata.raw.get(ORIGINAL_KEY) if original else None
     data = np.asarray(kept[0] if kept is not None else spectrum.data, dtype=float)
     selected = np.arange(data.shape[0]) if rows is None else np.asarray(list(rows), dtype=int)
-    out_hz, out_ppm, out_i = [], [], []
+    out_hz, out_ppm, out_i, out_edge = [], [], [], []
     for r in selected:
         y = data[r]
         mag = np.abs(y[idx])
@@ -114,8 +114,52 @@ def track_peak(spectrum, region_ppm: tuple[float, float], method: str = "peak",
         out_hz.append(hz_pos)
         out_ppm.append(ppm_pos)
         out_i.append(float(abs(y[k])))
+        # The tallest point of the region lying on its edge means the peak
+        # is (partly) outside it: what is then followed is the window, not
+        # the peak.
+        out_edge.append(bool(k <= idx[0] + 1 or k >= idx[-1] - 1))
     return {"row": selected.astype(float), "hz": np.asarray(out_hz), "ppm": np.asarray(out_ppm),
-            "intensity": np.asarray(out_i), "method": method, "region_ppm": (lo, hi)}
+            "intensity": np.asarray(out_i), "method": method, "region_ppm": (lo, hi),
+            "at_edge": np.asarray(out_edge, dtype=bool)}
+
+
+def edge_warning(track: dict) -> str:
+    """A sentence for the user if the followed peak sits on the edge of its
+    region in some slices (so the region is too narrow), else ``""``."""
+    edge = np.asarray(track.get("at_edge", []), dtype=bool)
+    if not edge.any():
+        return ""
+    lo, hi = track["region_ppm"]
+    return (f"In {int(edge.sum())} of {edge.size} slices the tallest point is at the edge of "
+            f"{lo:.3f}-{hi:.3f} ppm, so the peak has left the region and the positions are wrong. "
+            f"Widen the region (Widen Region) so it holds the peak in every slice.")
+
+
+def suggest_region(spectrum, region_ppm: tuple[float, float], method: str = "peak",
+                   original: bool = True, max_steps: int = 8) -> tuple[float, float]:
+    """Widen ``region_ppm`` on the side(s) where the followed peak runs into
+    its edge, until the peak is inside in every slice (or ``max_steps``
+    widenings of half the width). Only the sides that need it grow, so a
+    neighbouring peak is not taken in needlessly."""
+    lo, hi = sorted(float(v) for v in region_ppm)
+    ppm = np.asarray(spectrum.axes[-1].ppm, dtype=float)
+    full = (float(ppm.min()), float(ppm.max()))
+    for _ in range(max_steps):
+        track = track_peak(spectrum, (lo, hi), method=method, original=original)
+        edge = np.asarray(track["at_edge"], dtype=bool)
+        if not edge.any():
+            break
+        step = 0.5 * (hi - lo)
+        mid = 0.5 * (lo + hi)
+        positions = track["ppm"][edge]
+        grew = False
+        if np.any(positions > mid) and hi < full[1]:
+            hi, grew = min(hi + step, full[1]), True
+        if np.any(positions <= mid) and lo > full[0]:
+            lo, grew = max(lo - step, full[0]), True
+        if not grew:
+            break
+    return lo, hi
 
 
 # ----------------------------------------------------------------------

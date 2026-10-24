@@ -69,7 +69,7 @@ def test_help_menu_reopens_it_and_links_to_the_website(qapp, monkeypatch):  # no
 def test_pages_and_buttons(qapp):  # noqa: F811
     window = MainWindow()
     wizard = WelcomeWizard(window)
-    assert wizard.page_count == 6 and wizard.current_page() == 0
+    assert wizard.page_count == 7 and wizard.current_page() == 0
     assert not wizard.back_button.isEnabled()
     assert wizard.next_button.text() == "Next"
     for _ in range(wizard.page_count - 1):
@@ -173,3 +173,56 @@ def test_remove_region_removes_every_selected_row(qapp):  # noqa: F811
                QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
     window.remove_region_button.click()
     assert window.region_table.rowCount() == 2
+
+
+# ---- type of work (2026-10-24) -----------------------------------------------------------
+
+def test_work_type_page_is_second(qapp):  # noqa: F811
+    window = MainWindow()
+    wizard = WelcomeWizard(window)
+    wizard.go_next()
+    assert wizard.current_page() == 1
+    assert set(wizard.work_type_checks) == {"solution", "solid", "dnp", "pnmr"}
+
+
+def test_intersection_of_chosen_work_types():
+    from opennmr.gui.welcome_wizard import sections_to_remove
+    assert sections_to_remove([]) == set()
+    assert sections_to_remove(["dnp"]) == {"pnmr", "enmr", "imaging"}
+    assert sections_to_remove(["solution", "solid"]) == {"pnmr", "dnp"}
+    assert sections_to_remove(["dnp", "pnmr"]) == {"enmr", "imaging"}
+    assert sections_to_remove(["solution", "dnp"]) == {"pnmr"}
+
+
+def test_choosing_work_types_sets_the_layout_page_and_can_be_overridden(qapp):  # noqa: F811
+    window = MainWindow()
+    wizard = WelcomeWizard(window)
+    wizard.work_type_checks["solution"].setChecked(True)
+    off = {k for k, b in wizard.section_checks.items() if not b.isChecked()}
+    assert off == {"pnmr", "dnp", "czjzek", "cp_buildup", "offset_tracker", "batch_pseudo2d",
+                   "bpp", "exchange", "advanced"}
+    wizard.work_type_checks["solid"].setChecked(True)
+    off = {k for k, b in wizard.section_checks.items() if not b.isChecked()}
+    assert off == {"pnmr", "dnp"}
+    wizard.section_checks["enmr"].setChecked(False)         # still the user's call
+    while wizard.current_page() < wizard.page_count - 1:
+        wizard.go_next()
+    wizard.go_next()
+    assert not window.section_shown_checkboxes["pnmr"].isChecked()
+    assert not window.section_shown_checkboxes["enmr"].isChecked()
+    assert window.section_shown_checkboxes["czjzek"].isChecked()
+    # unticking every type returns the layout page to the starting state
+    wizard2 = WelcomeWizard(window)
+    before = {k: b.isChecked() for k, b in wizard2.section_checks.items()}
+    wizard2.work_type_checks["dnp"].setChecked(True)
+    wizard2.work_type_checks["dnp"].setChecked(False)
+    assert {k: b.isChecked() for k, b in wizard2.section_checks.items()} == before
+
+
+def test_skipping_after_choosing_a_work_type_changes_nothing(qapp):  # noqa: F811
+    window = MainWindow()
+    before = {k: b.isChecked() for k, b in window.section_shown_checkboxes.items()}
+    wizard = WelcomeWizard(window)
+    wizard.work_type_checks["pnmr"].setChecked(True)
+    wizard.skip()
+    assert {k: b.isChecked() for k, b in window.section_shown_checkboxes.items()} == before

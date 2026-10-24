@@ -117,12 +117,15 @@ class DriftCorrectionPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _build_track(self) -> QGroupBox:
-        box = QGroupBox("Measure along the slices (pseudo-2D, any vendor)")
+        box = QGroupBox("A. Follow one peak through the slices (pseudo-2D, any vendor)")
         form = QFormLayout(box)
         form.addRow(_wrapped(
-            "Follow one peak through the series, see how it drifts, fit a curve to that, and "
-            "shift every slice back by what the curve says. Works on the spectra themselves, so "
-            "it does not depend on the vendor."))
+            "Use this for a pseudo-2D (e.g. a PFG or kinetics series) whose peak wanders from "
+            "slice to slice. Follow one peak through the series, fit a curve to its positions, "
+            "and shift every slice back by what the curve says. The result is applied by "
+            "'Apply Drift Curve to Slices' below - sections B and C (linear start/end shifts, "
+            "after Najbauer and Andreas) are a separate, Bruker-style method and are not "
+            "needed for this."))
         region = QWidget()
         h = QHBoxLayout(region)
         h.setContentsMargins(0, 0, 0, 0)
@@ -146,7 +149,15 @@ class DriftCorrectionPanel(QWidget):
         self.track_button.setToolTip("Read the peak's position off every slice and plot it "
                                      "against the slice number, with the fitted curve.")
         self.track_button.clicked.connect(self._on_track_clicked)
-        form.addRow(self.track_button)
+        self.track_widen_button = QPushButton("Widen Region to Hold the Peak")
+        self.track_widen_button.setToolTip(
+            "Grow the region on the side where the peak runs into its edge, until the peak lies "
+            "inside it in every slice, then track again.")
+        self.track_widen_button.clicked.connect(self._on_widen_clicked)
+        row_t = QHBoxLayout()
+        row_t.addWidget(self.track_button)
+        row_t.addWidget(self.track_widen_button)
+        form.addRow(row_t)
 
         self.drift_model_combo = QComboBox()
         for key in fd.MODELS:
@@ -218,6 +229,7 @@ class DriftCorrectionPanel(QWidget):
         _index, spectrum = self._slice_spectrum()
         ok = spectrum is not None
         self.track_button.setEnabled(ok)
+        self.track_widen_button.setEnabled(ok)
         self.drift_apply_button.setEnabled(ok and self.fit is not None)
         self.drift_remove_button.setEnabled(bool(
             ok and spectrum.metadata.raw.get(fd.RECORD_KEY)))
@@ -261,6 +273,21 @@ class DriftCorrectionPanel(QWidget):
             return
         self._refit()
 
+    def _on_widen_clicked(self) -> None:
+        index, spectrum = self._slice_spectrum()
+        if spectrum is None:
+            self.track_label.setText("Select a pseudo-2D spectrum in Open experiments first.")
+            return
+        region = (self.track_lo_spin.value(), self.track_hi_spin.value())
+        try:
+            lo, hi = fd.suggest_region(spectrum, region, method=self.track_method_combo.currentData())
+        except ValueError as exc:
+            self.track_label.setText(f"Could not widen the region: {exc}")
+            return
+        self.track_lo_spin.setValue(lo)
+        self.track_hi_spin.setValue(hi)
+        self._on_track_clicked()
+
     def _refit(self) -> None:
         if self.track is None:
             self._sync_track_buttons()
@@ -282,7 +309,8 @@ class DriftCorrectionPanel(QWidget):
         self.track_label.setText(
             f"{fd.MODEL_LABELS[model]}: the peak moves {self.fit['fit'][-1] - self.fit['fit'][0]:+.3f} Hz "
             f"over {len(self.fit['x'])} slices; scatter about the curve {self.fit['rms']:.3f} Hz (rms). "
-            f"Slice shifts run from {shifts.min():+.3f} to {shifts.max():+.3f} Hz.")
+            f"Slice shifts run from {shifts.min():+.3f} to {shifts.max():+.3f} Hz."
+            + (" " + fd.edge_warning(self.track) if fd.edge_warning(self.track) else ""))
         self._show_plot()
         self._sync_track_buttons()
         self.changed.emit()
@@ -372,7 +400,7 @@ class DriftCorrectionPanel(QWidget):
         self.changed.emit()
 
     def _build_measure(self) -> QGroupBox:
-        box = QGroupBox("1. Measure the drift (optional)")
+        box = QGroupBox("B. Linear drift: measure from 1D spectra (optional)")
         form = QFormLayout(box)
         form.addRow(_wrapped("From 1D spectra of the detected nucleus recorded just before and "
                              "just after the nD experiment, on the same peak."))
@@ -419,7 +447,7 @@ class DriftCorrectionPanel(QWidget):
         return box
 
     def _build_apply(self) -> QGroupBox:
-        box = QGroupBox("3. Apply")
+        box = QGroupBox("C. Apply linear drift (Bruker 2D / pseudo-2D)")
         v = QVBoxLayout(box)
         self.target_label = _wrapped("")
         v.addWidget(self.target_label)

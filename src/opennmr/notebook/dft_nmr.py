@@ -837,6 +837,61 @@ def reference_shielding(ref_calc, element, labels=None) -> dict:
             "labels": [a["label"] for a in atoms], "values": values.tolist()}
 
 
+STATES = ("solid", "solution")
+
+
+def average_atoms(atoms, groups) -> tuple[list[dict], list[str]]:
+    """Fast-motion averaging of the tensors of exchanging atoms.
+
+    ``groups`` is a list of lists of labels, e.g. ``[["H1", "H2", "H3"]]``
+    for a rotating methyl group. Each group's shielding and EFG tensors
+    are averaged element by element in the calculation's common Cartesian
+    frame -- the limit in which the motion (a jump or rotation among sites
+    that the molecule visits) is fast on the time scale of the interaction
+    -- and the group becomes one atom with the mean position, whose
+    ``n_atoms`` is the group's size. Atoms in no group are unchanged.
+    Returns ``(atoms, notes)``. A label in two groups, a label that is not
+    among ``atoms`` or a group of fewer than two raise ``ValueError``."""
+    by_label = {a["label"]: a for a in atoms}
+    used: dict[str, int] = {}
+    notes = []
+    merged = {}
+    for gi, group in enumerate(groups or ()):
+        labels = [str(x) for x in group]
+        if len(labels) < 2:
+            raise ValueError("A group to average needs at least two sites.")
+        for lab in labels:
+            if lab not in by_label:
+                raise ValueError(f"{lab} is not one of the chosen sites, so it cannot be averaged.")
+            if lab in used:
+                raise ValueError(f"{lab} is in two averaging groups.")
+            used[lab] = gi
+        members = [by_label[lab] for lab in labels]
+        if any(m["sigma"] is None for m in members):
+            raise ValueError("Every site to average needs a shielding tensor.")
+        sigma = np.mean([symmetric(m["sigma"]) for m in members], axis=0)
+        efgs = [m["efg"] for m in members]
+        efg = (np.mean([symmetric(e) for e in efgs], axis=0)
+               if all(e is not None for e in efgs) else None)
+        if efg is None and any(e is not None for e in efgs):
+            notes.append(f"{_group_label(labels)}: some sites have no EFG, so the average has none.")
+        name = _group_label(labels)
+        merged[labels[0]] = {
+            **members[0], "label": name, "sigma": sigma, "efg": efg,
+            "position": np.mean([np.asarray(m["position"], dtype=float) for m in members], axis=0),
+            "members": labels, "n_atoms": len(labels)}
+        notes.append(f"{name}: tensors of {len(labels)} sites averaged (fast motion, common "
+                     "Cartesian frame).")
+    out = []
+    for a in atoms:
+        if a["label"] in used:
+            if a["label"] in merged:
+                out.append(merged[a["label"]])
+            continue
+        out.append({**a, "members": [a["label"]], "n_atoms": 1})
+    return out, notes
+
+
 def _merge_key(rec, tol):
     def q(v, step):
         return None if v is None else round(v / step)
@@ -848,7 +903,8 @@ def _merge_key(rec, tol):
 
 def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, delta_ref=0.0,
               sigma_ref=None, reference_labels=None, slope=1.0, fwhm=1.0,
-              include_csa=True, include_quadrupolar=True, merge=True, calibration=None) -> dict:
+              include_csa=True, include_quadrupolar=True, merge=True, calibration=None,
+              state="solid", average=None) -> dict:
     """Simulation sites from a DFT calculation.
 
     ``sample`` / ``reference`` : from :func:`read_calculation` (or paths).
@@ -870,6 +926,17 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
     0.1 kHz, 0.1°) become one site with their count as its amount -- the
     same lineshape, simulated once.
 
+    ``state`` : ``"solid"`` (default) uses the tensors in full; ``"solution"``
+    is a liquid, where fast isotropic tumbling averages every tensor to its
+    trace: only the isotropic shift is kept (no CSA, no quadrupolar
+    coupling), as the NMR of a liquid shows.
+    ``average`` : groups of site labels whose tensors are averaged before
+    anything else, to simulate a motion fast on the NMR time scale, such as
+    ``[["H1", "H2", "H3"]]`` for a rotating methyl group (see
+    :func:`average_atoms`). In a solid the averaged tensor is what is
+    simulated (a CH3 rotating about its axis gives an axial CSA); in a
+    solution only its isotropic shift matters, i.e. the mean shift.
+
     Returns ``{"sites", "site_dicts", "atoms", "nucleus", "reference",
     "notes"}``; each entry of ``atoms`` has the shift tensor (Cartesian,
     ppm), both CSA conventions, the EFG and C_Q, the Euler angles and
@@ -879,7 +946,12 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
         sample = read_calculation(sample)
     if isinstance(reference, (str, os.PathLike)):
         reference = read_calculation(reference)
+    if state not in STATES:
+        raise ValueError(f"state must be one of {STATES}.")
     atoms = select_atoms(sample, element, labels)
+    atoms, average_notes = average_atoms(atoms, average)
+    if state == "solution":
+        include_csa = include_quadrupolar = False
     elements = {a["species"] for a in atoms}
     if len(elements) > 1:
         raise ValueError("Choose sites of one element: one spectrum is one nucleus (got "
@@ -890,7 +962,10 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
         raise ValueError(f"{nucleus} is not an isotope of {element}.")
     spin = float(ch.find_isotope_info(nucleus)["spin"])
     Q = quadrupole_moment_barn(nucleus) if spin > 0.5 else None
-    notes = []
+    notes = list(average_notes)
+    if state == "solution":
+        notes.append("Solution: fast isotropic tumbling leaves only the isotropic shift of each "
+                     "site; CSA and quadrupolar couplings are not simulated.")
     cal = None
     if calibration is not None:
         from . import dft_calibration as dcal
@@ -959,6 +1034,11 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
         if use_quad and include_csa:
             rec["euler"], rec["efg_axes"] = relative_euler(csa["axes"], rec["efg_axes"],
                                                            return_frame=True)
+        rec["members"] = a.get("members", [a["label"]])
+        rec["n_atoms"] = int(a.get("n_atoms", 1))
+        if state == "solution":
+            for key in ("aniso", "eta", "anisotropy", "span", "skew", "C_Q", "eta_Q", "P_Q"):
+                rec[key] = None
         rec["iso_err"] = dcal.shift_uncertainty(cal, csa["iso"]) if cal is not None else None
         rec["uses_quadrupolar"] = bool(use_quad)
         rec["uses_csa"] = bool(include_csa)
@@ -983,7 +1063,8 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
     for members in groups.values():
         rec = members[0]
         label = rec["label"] if len(members) == 1 else _group_label([m["label"] for m in members])
-        site = ch.Site(nucleus, delta_iso=rec["iso"], label=label, amount=float(len(members)),
+        site = ch.Site(nucleus, delta_iso=rec["iso"], label=label,
+                       amount=float(sum(m["n_atoms"] for m in members)),
                        fwhm=float(fwhm))
         if include_csa and abs(rec["aniso"]) > 1e-9:
             site.add_csa(rec["aniso"], rec["eta"], convention="Haeberlen",
@@ -991,7 +1072,7 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
         if rec["uses_quadrupolar"] and abs(rec["C_Q"]) > 0:
             site.add_quadrupolar(rec["C_Q"], rec["eta_Q"])
         d = site.to_dict()
-        d["dft"] = {"atoms": [m["label"] for m in members], "file": os.path.basename(
+        d["dft"] = {"atoms": [lab for m in members for lab in m["members"]], "file": os.path.basename(
             sample["path"]), "code": sample["code"]}
         site_dicts.append(d)
         sites.append(site)
@@ -1004,6 +1085,7 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
                      "affect a high-field spectrum to first order.")
     return {"sites": sites, "site_dicts": site_dicts, "atoms": records, "nucleus": nucleus,
             "element": element, "reference": ref_info, "notes": notes + list(sample["notes"]),
+            "state": state, "average": [list(g) for g in average or ()],
             "sample": {"path": sample["path"], "code": sample["code"]}}
 
 

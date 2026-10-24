@@ -233,3 +233,22 @@ def test_sr_transfer_by_hand_and_a_mismatch_warning(qapp):  # noqa: F811
     window.sfo1_cal_spin.setValue(0.0)
     assert window._sr_transfer_result is None
     assert not window.sr_transfer_apply_button.isEnabled()
+
+
+def test_panel_warns_on_a_narrow_region_and_widen_fixes_it(qapp):  # noqa: F811
+    from test_field_drift import _series
+    window = MainWindow()
+    sp = _series(np.linspace(0, 6.0, 12))
+    _load_spectrum_directly(window, sp)
+    panel = window.drift_panel
+    panel.refresh()
+    panel.track_hi_spin.setValue(5.005)
+    panel.track_lo_spin.setValue(4.99)
+    panel._on_track_clicked()
+    assert "Widen" in panel.track_label.text()
+    panel.track_widen_button.click()
+    assert "Widen" not in panel.track_label.text()
+    assert panel.track_hi_spin.value() > 5.005
+    panel._on_apply_curve_clicked()
+    from opennmr.notebook import field_drift as fd
+    assert fd.track_peak(window.session.spectra[0], (4.9, 5.1))["hz"].max() - fd.track_peak(window.session.spectra[0], (4.9, 5.1))["hz"].min() < 1.0

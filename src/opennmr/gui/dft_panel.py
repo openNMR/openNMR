@@ -70,7 +70,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
     #: Not saved as plain widgets: the references are saved as points, the
     #: tables are rebuilt.
     _SITE_FIELDS = CombinedHamiltonianPanel._SITE_FIELDS + (
-        "dft_reference_table", "dft_result_table", "dft_saved_combo", "dft_add_element_combo")
+        "dft_reference_table", "dft_result_table", "dft_saved_combo", "dft_add_element_combo",
+        "dft_average_list", "dft_state_combo")
 
     def __init__(self, plot_spectrum, add_to_open, draw_sites=None, draw_tensors=None,
                  style=None, parent=None, send_to_fit=None, draw_orders=None,
@@ -84,6 +85,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self.library_path = library_path          # None: ~/.opennmr/dft_calibrations.json
         self.calcs = {"sample": None}
         self.ref_points: list[dict] = []
+        self.average_groups: list[list[str]] = []
         self.calibration_errors: dict[str, str] = {}
         self.model = None
         self.tensor_notes = []
@@ -150,6 +152,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         form.addRow("Observed isotope:", self.dft_isotope_combo)
         site_row = QHBoxLayout()
         self.dft_site_list = QListWidget()
+        self.dft_site_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.dft_site_list.setMaximumHeight(110)
         self.dft_site_list.setToolTip("Tick the sites to simulate (all of them: 'all Na').")
         site_row.addWidget(self.dft_site_list, 1)
@@ -179,6 +182,90 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         form.addRow("Broadening FWHM:", self.dft_fwhm_spin)
         v.addLayout(form)
         return box
+
+    def _build_state_box(self) -> QGroupBox:
+        """Solid or solution, and which sites a fast motion averages."""
+        box = QGroupBox("Sample state and motion")
+        v = QVBoxLayout(box)
+        form = QFormLayout()
+        self.dft_state_combo = QComboBox()
+        self.dft_state_combo.addItem("Solid – use the tensors in full", "solid")
+        self.dft_state_combo.addItem("Solution – average the tensors (isotropic shift only)",
+                                    "solution")
+        self.dft_state_combo.setToolTip(
+            "Solid: every site keeps its CSA and quadrupolar tensors, for a powder or single "
+            "crystal lineshape.\nSolution: fast tumbling averages each tensor to its trace, so "
+            "only the isotropic shift of each site remains (no anisotropy, no quadrupolar "
+            "coupling).")
+        self.dft_state_combo.currentIndexChanged.connect(lambda _i: self._on_state_changed())
+        form.addRow("Sample state:", self.dft_state_combo)
+        v.addLayout(form)
+        v.addWidget(QLabel(
+            "Fast motion (e.g. a rotating CH₃ or NH₃⁺): select the sites that exchange in the "
+            "site list above and average them. Their tensors are averaged in the calculation's "
+            "frame, so a solid gives the motionally averaged lineshape and a solution gives the "
+            "mean shift."))
+        self.dft_average_list = QListWidget()
+        self.dft_average_list.setMaximumHeight(70)
+        self.dft_average_list.setToolTip("Groups of sites averaged by a fast motion. Each group "
+                                         "is simulated as one site with the group's size as its "
+                                         "amount.")
+        v.addWidget(self.dft_average_list)
+        row = QHBoxLayout()
+        self.dft_average_button = QPushButton("Average Selected Sites")
+        self.dft_average_button.setToolTip("Average the sites selected (highlighted) in the "
+                                           "site list above into one group.")
+        self.dft_average_button.clicked.connect(lambda: self.average_selected())
+        self.dft_unaverage_button = QPushButton("Remove Group")
+        self.dft_unaverage_button.clicked.connect(lambda: self.remove_average_group())
+        row.addWidget(self.dft_average_button)
+        row.addWidget(self.dft_unaverage_button)
+        v.addLayout(row)
+        return box
+
+    # ---- motional averaging -----------------------------------------------------------
+
+    def _on_state_changed(self) -> None:
+        solution = self.dft_state_combo.currentData() == "solution"
+        for w in (self.dft_include_csa_check, self.dft_include_quad_check):
+            w.setEnabled(not solution)
+        self._sync_dft()
+
+    def _refresh_average_list(self) -> None:
+        self.dft_average_list.clear()
+        for group in self.average_groups:
+            self.dft_average_list.addItem(", ".join(group))
+
+    def average_selected(self, labels=None) -> bool:
+        """Group ``labels`` (default: the highlighted sites) for averaging."""
+        if labels is None:
+            labels = [item.text() for item in self.dft_site_list.selectedItems()]
+        labels = [str(x) for x in labels]
+        if len(labels) < 2:
+            QMessageBox.information(self, "Average sites",
+                                    "Select at least two sites in the site list to average.")
+            return False
+        taken = {lab for g in self.average_groups for lab in g}
+        clash = sorted(set(labels) & taken)
+        if clash:
+            QMessageBox.information(self, "Average sites",
+                                    f"{', '.join(clash)} is already in a group; remove that group first.")
+            return False
+        for i in range(self.dft_site_list.count()):
+            item = self.dft_site_list.item(i)
+            if item.text() in labels:
+                item.setCheckState(Qt.CheckState.Checked)
+        self.average_groups.append(labels)
+        self._refresh_average_list()
+        self._sync_dft()
+        return True
+
+    def remove_average_group(self, row: int | None = None) -> None:
+        row = self.dft_average_list.currentRow() if row is None else row
+        if 0 <= row < len(self.average_groups):
+            del self.average_groups[row]
+            self._refresh_average_list()
+        self._sync_dft()
 
     def _build_reference_box(self) -> QGroupBox:
         box = QGroupBox("Shift scale: reference compounds")
@@ -302,6 +389,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         typed.addRow(row)
         v.addLayout(typed)
 
+        v.addWidget(self._build_state_box())
         self.dft_calculate_button = QPushButton("Calculate Sites and Simulate")
         self.dft_calculate_button.setToolTip(
             "Work out every chosen site's parameters, put them in the site list below (replacing "
@@ -493,6 +581,9 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         element = self.dft_element_combo.currentText()
         self.dft_isotope_combo.clear()
         self.dft_site_list.clear()
+        if checked_labels is None:
+            self.average_groups = []
+            self._refresh_average_list()
         self._fill_add_element_combo()
         if not element or self.calcs["sample"] is None:
             self._sync_dft()
@@ -825,6 +916,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         if sample is not None and not periodic:
             self.dft_frame_combo.setCurrentIndex(1)
         self.dft_show_tensor_button.setEnabled(self.model is not None)
+        self.dft_average_button.setEnabled(have)
+        self.dft_unaverage_button.setEnabled(bool(self.average_groups))
 
     # ---- calculating ------------------------------------------------------------------
 
@@ -837,7 +930,10 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
                 "fwhm": self.dft_fwhm_spin.value(),
                 "include_csa": self.dft_include_csa_check.isChecked(),
                 "include_quadrupolar": self.dft_include_quad_check.isChecked(),
-                "merge": self.dft_merge_check.isChecked()}
+                "merge": self.dft_merge_check.isChecked(),
+                "state": self.dft_state_combo.currentData(),
+                "average": [[lab for lab in g if lab in labels] for g in self.average_groups
+                            if sum(lab in labels for lab in g) >= 2]}
 
     def calculate(self, simulate: bool = True) -> bool:
         if self.calcs["sample"] is None and not self.read_files(quiet=True):
@@ -971,6 +1067,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         state["dft"] = {"checked": self.checked_labels(),
                         "element": self.dft_element_combo.currentText(),
                         "isotope": self.dft_isotope_combo.currentText(),
+                        "state": self.dft_state_combo.currentData(),
+                        "average": [list(g) for g in self.average_groups],
                         "references": dcal._jsonable(self.ref_points)}
         refs = "; ".join(f"{p['name']} ({p['element']}, σ {p['sigma']:.3f}, δ_exp "
                          f"{p.get('delta_exp')})" for p in self.ref_points
@@ -1014,9 +1112,14 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
                     self.dft_element_combo.setCurrentIndex(index)
                     self.dft_element_combo.blockSignals(False)
                 self._on_element(checked_labels=set(dft.get("checked") or []) or None)
+                self.average_groups = [list(g) for g in dft.get("average") or []]
+                self._refresh_average_list()
                 index = self.dft_isotope_combo.findText(dft.get("isotope", ""))
                 if index >= 0:
                     self.dft_isotope_combo.setCurrentIndex(index)
         self._refit()
+        state_index = self.dft_state_combo.findData(dft.get("state", "solid"))
+        if state_index >= 0:
+            self.dft_state_combo.setCurrentIndex(state_index)
         self._sync_dft()
 

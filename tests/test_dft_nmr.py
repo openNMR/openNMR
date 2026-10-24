@@ -405,3 +405,75 @@ def test_real_files_orientation_and_merge():
     merged = D.dft_sites(os.path.join(DATA, "sample.magres"),
                          os.path.join(DATA, "ref_NaCl.magres"), element="Na", delta_ref=7.21)
     assert [s.amount for s in merged["sites"]] == [2.0, 2.0]
+
+
+# ---- motional averaging and solution (2026-10-24) --------------------------------------
+
+def _rz(deg):
+    t = np.radians(deg)
+    return np.array([[np.cos(t), -np.sin(t), 0], [np.sin(t), np.cos(t), 0], [0, 0, 1.0]])
+
+
+@pytest.fixture
+def methyl(tmp_path):
+    a, b, c = 24.0, 28.0, 36.0                       # shieldings (ppm) in each H's own frame
+    atoms = [("H", i + 1, (np.cos(np.radians(120 * i)), np.sin(np.radians(120 * i)), 0.0),
+              _tensor((a, b, c), _rz(120 * i)), None) for i in range(3)]
+    atoms.append(("H", 4, (5.0, 5.0, 5.0), np.diag([20.0, 20.0, 20.0]), None))
+    sample = write_magres(tmp_path / "ch3.magres", atoms, lattice=None)
+    return {"sample": sample, "abc": (a, b, c)}
+
+
+def test_methyl_rotation_gives_an_axial_average(methyl):
+    a, b, c = methyl["abc"]
+    free = D.dft_sites(methyl["sample"], None, element="H", labels=["H1", "H2", "H3"],
+                       sigma_ref=30.0, merge=False)
+    assert all(abs(r["eta"]) > 0.05 for r in free["atoms"])             # rigid: rhombic
+    model = D.dft_sites(methyl["sample"], None, element="H", labels=["H1", "H2", "H3"],
+                        sigma_ref=30.0, average=[["H1", "H2", "H3"]])
+    assert len(model["atoms"]) == 1 and model["atoms"][0]["label"] == "H1–H3"
+    rec = model["atoms"][0]
+    assert rec["eta"] == pytest.approx(0.0, abs=1e-9)                   # about the C3 axis
+    assert rec["iso"] == pytest.approx(30.0 - (a + b + c) / 3)
+    # the unique axis is the one along z: the unique principal value is 30 - c
+    uniq = 30.0 - c - rec["iso"]
+    assert rec["aniso"] == pytest.approx(uniq)
+    assert model["sites"][0].amount == 3.0
+    assert model["site_dicts"][0]["dft"]["atoms"] == ["H1", "H2", "H3"]
+    assert model["average"] == [["H1", "H2", "H3"]]
+    assert any("averaged" in n for n in model["notes"])
+
+
+def test_solution_keeps_only_the_isotropic_shift(methyl):
+    model = D.dft_sites(methyl["sample"], None, element="H", labels=["H1", "H2", "H3", "H4"],
+                        sigma_ref=30.0, state="solution", average=[["H1", "H2", "H3"]])
+    assert [r["label"] for r in model["atoms"]] == ["H1–H3", "H4"]
+    assert [r["iso"] for r in model["atoms"]] == pytest.approx([30.0 - 29.3333333, 10.0], abs=1e-5)
+    for rec in model["atoms"]:
+        assert rec["aniso"] is None and rec["C_Q"] is None
+    for site in model["sites"]:
+        assert not site.get("csa") and not site.get("quadrupolar")
+    assert [s.amount for s in model["sites"]] == [3.0, 1.0]
+    assert model["state"] == "solution"
+    assert D.table_rows(model)                                          # the table still builds
+
+
+def test_solution_without_averaging_is_just_isotropic(files):
+    model = D.dft_sites(files["sample"], files["reference"], element="Na", delta_ref=7.2,
+                        state="solution")
+    assert all(not s.get("csa") and not s.get("quadrupolar") for s in model["sites"])
+    solid = D.dft_sites(files["sample"], files["reference"], element="Na", delta_ref=7.2)
+    assert [r["iso"] for r in model["atoms"]] == pytest.approx([r["iso"] for r in solid["atoms"]])
+
+
+def test_averaging_errors(methyl):
+    with pytest.raises(ValueError, match="at least two"):
+        D.dft_sites(methyl["sample"], None, element="H", sigma_ref=30.0, average=[["H1"]])
+    with pytest.raises(ValueError, match="two averaging groups"):
+        D.dft_sites(methyl["sample"], None, element="H", sigma_ref=30.0,
+                    average=[["H1", "H2"], ["H2", "H3"]])
+    with pytest.raises(ValueError, match="not one of the chosen"):
+        D.dft_sites(methyl["sample"], None, element="H", labels=["H1", "H2"], sigma_ref=30.0,
+                    average=[["H1", "H3"]])
+    with pytest.raises(ValueError, match="state"):
+        D.dft_sites(methyl["sample"], None, element="H", sigma_ref=30.0, state="gas")
