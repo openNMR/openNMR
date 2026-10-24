@@ -33,10 +33,10 @@ from PySide6.QtWidgets import (
 )
 
 from ..notebook import dft_calibration as dcal
-from ..notebook import dft_nmr
+from ..notebook import crystal_nmr, dft_nmr
 from .combined_panels import CombinedHamiltonianPanel, _spin_box
 
-_FILE_FILTER = ("DFT output (*.magres OUTCAR* *.out *.log *.LOG);;All files (*)")
+_FILE_FILTER = ("DFT output (*.magres OUTCAR* *.out *.outp *.log *.LOG);;All files (*)")
 
 #: The help under the G=0 option (wording agreed with the user, 2026-10-07).
 G0_HELP = (
@@ -92,7 +92,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self._filling = False
         layout = self.layout()
         layout.insertWidget(1, self._build_import_box())
-        layout.insertWidget(2, self._build_reference_box())
+        layout.insertWidget(2, self._build_paramagnetic_box())
+        layout.insertWidget(3, self._build_reference_box())
         layout.insertWidget(layout.count() - 1, self._build_tensor_box())
         # The base panel starts with one empty site; a DFT panel starts
         # with none until something is imported.
@@ -108,7 +109,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
     def _file_row(self, attr, title):
         row = QHBoxLayout()
         edit = QLineEdit()
-        edit.setPlaceholderText("CASTEP .magres, VASP OUTCAR, ORCA .out or Gaussian .log")
+        edit.setPlaceholderText("CASTEP .magres, VASP OUTCAR, ORCA .out, Gaussian .log or CRYSTAL "
+                                "properties output")
         setattr(self, attr, edit)
         row.addWidget(edit, 1)
         button = QPushButton("Browse…")
@@ -182,6 +184,150 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         form.addRow("Broadening FWHM:", self.dft_fwhm_spin)
         v.addLayout(form)
         return box
+
+    def _build_paramagnetic_box(self) -> QGroupBox:
+        """The scaling of a CRYSTAL calculation's hyperfine interactions."""
+        box = QGroupBox("Paramagnetic shift scaling (CRYSTAL)")
+        self.dft_pm_box = box
+        v = QVBoxLayout(box)
+        intro = QLabel(
+            "A CRYSTAL calculation is the fully spin-polarised state; the NMR shift is its "
+            "Fermi contact and spin dipolar hyperfine interaction scaled by φ = ⟨S_z⟩/S at your "
+            "temperature and field: δ = (φ/2) A/ν₀. Give φ, or a susceptibility, or a Weiss "
+            "constant with the effective moment and spin. The orbital (diamagnetic) shift is "
+            "not in the calculation: add it below. Reference compounds are not used.")
+        intro.setWordWrap(True)
+        v.addWidget(intro)
+        form = QFormLayout()
+        self._pm_form = form
+        self.dft_pm_route_combo = QComboBox()
+        for key, text in (("curie_weiss", "Weiss constant θ, μ_eff and spin S"),
+                          ("susceptibility", "Magnetic susceptibility χ_M and spin S"),
+                          ("phi", "Scaling factor φ")):
+            self.dft_pm_route_combo.addItem(text, key)
+        self.dft_pm_route_combo.setToolTip("How φ is found; each needs the others on the "
+                                           "rows below it.")
+        form.addRow("Scaling from:", self.dft_pm_route_combo)
+        self.dft_pm_phi_spin = _spin_box(-100.0, 100.0, 0.02, 6, step=0.001,
+                                         tip="φ = ⟨S_z⟩/S at the field B0 below (φ ∝ B0).")
+        self.dft_pm_chi_spin = _spin_box(0.0, 1e6, 0.01, 6, step=0.001,
+                                         tip="Molar magnetic susceptibility of the sample at the "
+                                             "experiment's temperature (paramagnetic, positive).")
+        self.dft_pm_chi_units_combo = QComboBox()
+        self.dft_pm_chi_units_combo.addItem("cm³/mol (cgs, emu/mol)", "cm3/mol")
+        self.dft_pm_chi_units_combo.addItem("m³/mol (SI)", "m3/mol")
+        self.dft_pm_theta_spin = _spin_box(-1e5, 1e5, -50.0, 3, " K", step=1.0,
+                                           tip="Weiss constant θ: negative for antiferromagnets. "
+                                               "T − θ must be positive.")
+        self.dft_pm_mueff_spin = _spin_box(0.0, 100.0, 3.87, 4, " μB", step=0.01,
+                                           tip="Effective magnetic moment per formula unit.")
+        self.dft_pm_spin_spin = _spin_box(0.0, 20.0, 1.5, 3, step=0.5,
+                                          tip="Total spin quantum number S per formula unit.")
+        self.dft_pm_T_spin = _spin_box(1.0, 2000.0, 298.0, 2, " K", step=1.0,
+                                       tip="Sample temperature in the experiment.")
+        self.dft_pm_B0_spin = _spin_box(0.001, 100.0, 11.7, 4, " T", step=0.1,
+                                        tip="Magnetic field. The Curie–Weiss shift does not depend "
+                                            "on it; a typed φ or a susceptibility belongs to it.")
+        self.dft_pm_use_field_button = QPushButton("From Larmor frequency")
+        self.dft_pm_use_field_button.setToolTip(
+            "Set B0 from the Larmor frequency and nucleus of the simulation settings.")
+        self.dft_pm_use_field_button.clicked.connect(lambda: self._pm_field_from_larmor())
+        self.dft_pm_g_spin = _spin_box(1.0, 3.0, 2.0, 5, step=0.001,
+                                       tip="Electron g factor used in φ (2.0 unless you know "
+                                           "better).")
+        self.dft_pm_components_combo = QComboBox()
+        for key, text in (("both", "Fermi contact + spin dipolar"), ("contact", "Fermi contact only"),
+                          ("dipolar", "Spin dipolar only")):
+            self.dft_pm_components_combo.addItem(text, key)
+        self.dft_pm_orbital_spin = _spin_box(-1e5, 1e5, 0.0, 3, " ppm", step=1.0,
+                                             tip="Orbital (diamagnetic) shift added to every "
+                                                 "site, e.g. the shift of a diamagnetic analogue.")
+        self._pm_rows = {
+            "phi": [self.dft_pm_phi_spin],
+            "susceptibility": [self.dft_pm_chi_spin, self.dft_pm_chi_units_combo,
+                               self.dft_pm_spin_spin, self.dft_pm_g_spin],
+            "curie_weiss": [self.dft_pm_theta_spin, self.dft_pm_mueff_spin,
+                            self.dft_pm_spin_spin, self.dft_pm_T_spin, self.dft_pm_g_spin]}
+        form.addRow("φ:", self.dft_pm_phi_spin)
+        form.addRow("χ_M:", self.dft_pm_chi_spin)
+        form.addRow("χ_M units:", self.dft_pm_chi_units_combo)
+        form.addRow("Weiss constant θ:", self.dft_pm_theta_spin)
+        form.addRow("Effective moment μ_eff:", self.dft_pm_mueff_spin)
+        form.addRow("Spin S:", self.dft_pm_spin_spin)
+        form.addRow("Temperature T:", self.dft_pm_T_spin)
+        form.addRow("Field B0:", self.dft_pm_B0_spin)
+        form.addRow("", self.dft_pm_use_field_button)
+        form.addRow("Electron g:", self.dft_pm_g_spin)
+        form.addRow("Include:", self.dft_pm_components_combo)
+        form.addRow("Orbital shift:", self.dft_pm_orbital_spin)
+        v.addLayout(form)
+        self.dft_pm_phi_label = QLabel("")
+        self.dft_pm_phi_label.setWordWrap(True)
+        self.dft_pm_phi_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        v.addWidget(self.dft_pm_phi_label)
+        self.dft_pm_route_combo.currentIndexChanged.connect(lambda _i: self._on_pm_changed())
+        for w in (self.dft_pm_phi_spin, self.dft_pm_chi_spin, self.dft_pm_theta_spin,
+                  self.dft_pm_mueff_spin, self.dft_pm_spin_spin, self.dft_pm_T_spin,
+                  self.dft_pm_B0_spin, self.dft_pm_g_spin, self.dft_pm_orbital_spin):
+            w.editingFinished.connect(self._on_pm_changed)
+        for w in (self.dft_pm_chi_units_combo, self.dft_pm_components_combo):
+            w.currentIndexChanged.connect(lambda _i: self._on_pm_changed())
+        self._sync_pm_rows()
+        box.setVisible(False)
+        return box
+
+    def _sync_pm_rows(self) -> None:
+        route = self.dft_pm_route_combo.currentData()
+        visible = {id(w) for w in self._pm_rows[route]}
+        for ws in self._pm_rows.values():
+            for w in ws:
+                self._pm_form.setRowVisible(w, id(w) in visible)
+        self._pm_form.setRowVisible(self.dft_pm_use_field_button, True)
+
+    def paramagnetic_arguments(self) -> dict:
+        """``paramagnetic=`` for :func:`dft_nmr.dft_sites` from the controls."""
+        route = self.dft_pm_route_combo.currentData()
+        args = {"B0": self.dft_pm_B0_spin.value(),
+                "components": self.dft_pm_components_combo.currentData()}
+        if route == "phi":
+            args["phi"] = self.dft_pm_phi_spin.value()
+        elif route == "susceptibility":
+            args.update(chi=self.dft_pm_chi_spin.value(),
+                        chi_units=self.dft_pm_chi_units_combo.currentData(),
+                        spin=self.dft_pm_spin_spin.value(), g=self.dft_pm_g_spin.value())
+        else:
+            args.update(theta=self.dft_pm_theta_spin.value(), mu_eff=self.dft_pm_mueff_spin.value(),
+                        spin=self.dft_pm_spin_spin.value(), T=self.dft_pm_T_spin.value(),
+                        g=self.dft_pm_g_spin.value())
+        return args
+
+    def _on_pm_changed(self) -> None:
+        self._sync_pm_rows()
+        self._update_pm_label()
+        if self.model is not None and self._is_crystal():
+            self.calculate()
+
+    def _update_pm_label(self) -> None:
+        try:
+            args = {k: v for k, v in self.paramagnetic_arguments().items() if k != "components"}
+            self.dft_pm_phi_label.setText(crystal_nmr.magnetic_scaling(**args)["text"])
+        except ValueError as exc:
+            self.dft_pm_phi_label.setText(f"φ cannot be found: {exc}")
+
+    def _pm_field_from_larmor(self) -> None:
+        from ..notebook import dnp
+        try:
+            nucleus = self.nucleus_combo.currentText().strip()
+            self.dft_pm_B0_spin.setValue(float(dnp.field_from_frequency(
+                self.larmor_spin.value() * 1e6, nucleus)))
+        except (ValueError, KeyError, TypeError) as exc:
+            QMessageBox.warning(self, "Field", f"Could not get B0 from the Larmor frequency: {exc}")
+            return
+        self._on_pm_changed()
+
+    def _is_crystal(self) -> bool:
+        sample = self.calcs.get("sample")
+        return sample is not None and sample.get("code") == "CRYSTAL"
 
     def _build_state_box(self) -> QGroupBox:
         """Solid or solution, and which sites a fast motion averages."""
@@ -498,6 +644,9 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
 
     @staticmethod
     def _describe_calc(key, c) -> str:
+        if c.get("code") == "CRYSTAL":
+            return (f"{key}: {crystal_nmr.crystal_summary(c)} "
+                    + dft_nmr.describe_method(c.get("method")) + ".")
         n_sigma = sum(a["sigma"] is not None for a in c["atoms"])
         n_efg = sum(a["efg"] is not None for a in c["atoms"])
         g0 = {"included": "; G=0 included", "excluded": "; G=0 excluded",
@@ -613,7 +762,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         isotopes = dft_nmr.nmr_isotopes(element)
         self.dft_isotope_combo.addItems(isotopes)
         for atom in self.calcs["sample"]["atoms"]:
-            if atom["species"] != element or atom["sigma"] is None:
+            if atom["species"] != element or (atom["sigma"] is None and not self._is_crystal()):
                 continue
             item = QListWidgetItem(atom["label"])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -938,6 +1087,9 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         if sample is not None and not periodic:
             self.dft_frame_combo.setCurrentIndex(1)
         self.dft_show_tensor_button.setEnabled(self.model is not None)
+        self.dft_pm_box.setVisible(self._is_crystal())
+        if self._is_crystal():
+            self._update_pm_label()
         self.dft_average_button.setEnabled(have or self.model is not None)
         self.dft_unaverage_button.setEnabled(bool(self.average_groups))
 
@@ -963,8 +1115,13 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
             return False
         try:
             args = self.import_arguments()
-            cal = self.current_calibration()
-            model = dft_nmr.dft_sites(self.calcs["sample"], calibration=cal, **args)
+            if self._is_crystal():
+                model = dft_nmr.dft_sites(self.calcs["sample"],
+                                          paramagnetic=self.paramagnetic_arguments(),
+                                          orbital_shift=self.dft_pm_orbital_spin.value(), **args)
+            else:
+                cal = self.current_calibration()
+                model = dft_nmr.dft_sites(self.calcs["sample"], calibration=cal, **args)
         except (ValueError, KeyError) as exc:
             QMessageBox.warning(self, "DFT import", str(exc))
             return False
@@ -1017,6 +1174,13 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         element = args["element"]
         g0 = self.dft_g0_check.isChecked()
         head = "from opennmr.notebook import dft_nmr, dft_calibration as dc\n"
+        if self._is_crystal():
+            kwargs = ", ".join(f"{k}={v!r}" for k, v in args.items() if v is not None)
+            return ("from opennmr.notebook import dft_nmr\n"
+                    f"sample = dft_nmr.read_calculation({self.dft_sample_edit.text().strip()!r})\n"
+                    f"model = dft_nmr.dft_sites(sample, paramagnetic={self.paramagnetic_arguments()!r}, "
+                    f"orbital_shift={self.dft_pm_orbital_spin.value()!r}, {kwargs})\n"
+                    "print(dft_nmr.format_table(model))\n")
         if self.dft_sigma_override_check.isChecked():
             cal_code = (f"cal = dc.manual_calibration({element!r}, "
                         f"{self.dft_sigma_ref_spin.value()!r}, {self.dft_delta_ref_spin.value()!r},"
@@ -1125,6 +1289,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
             except (OSError, ValueError, KeyError):
                 pass
         self._fill_reference_table()
+        self._sync_pm_rows()
         if self.dft_sample_edit.text().strip() and os.path.exists(
                 self.dft_sample_edit.text().strip()):
             if self.read_files(quiet=True):

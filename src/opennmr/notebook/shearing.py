@@ -138,6 +138,14 @@ EXPERIMENTS = {
            "(hops between the three magic-angle orientations) and the isotropic shift is "
            "not, so F1 holds the isotropic shift; shear parallel to t1 removes it from F2, "
            "which then holds the anisotropic pattern about zero",
+    "shifting_p": "Shifting-p echo (static, e.g. 2H paramagnetic; Walder 2015, Aleksis 2019): the "
+                  "shift refocuses on the ridge t2 = t1 and the first-order quadrupolar "
+                  "interaction at t2 = 0; shear parallel to t1 puts the shift in F1 and the "
+                  "quadrupolar pattern in F2",
+    "shifting_d": "Shifting-d echo, also the double/quadruple adiabatic versions (static, e.g. "
+                  "2H paramagnetic; Walder 2015, Aleksis 2019): the shift refocuses at t2 = 0 "
+                  "and the first-order quadrupolar interaction on t2 = t1; shear parallel to "
+                  "t1 puts the quadrupolar pattern in F1 and the shift in F2",
     "custom_kappa": "Custom: give the shear ratios (and scaling) directly",
     "custom_coefficients": "Custom: give the pathway coefficients a1, a2 (and/or "
                            "b1, b2) and the chemical-shift coefficients",
@@ -549,6 +557,30 @@ def make_shear_plan(experiment: str = "mqmas", *, spin: float | None = None,
                      "refocused in it. If your sequence lets the isotropic shift evolve for "
                      "only a fraction f of each increment, use custom_coefficients with "
                      "b = cs = (f, 1). If the pattern comes out mirrored, use f1_sign = -1.")
+    elif exp in ("shifting_p", "shifting_d"):
+        # Walder et al., J. Chem. Phys. 142 (2015) 014201 and Aleksis et al.,
+        # Solid State NMR 101 (2019) 51: two symmetry pathways, the shift
+        # (p_I) and the first-order quadrupolar (d_I) interaction. In the
+        # p-echo experiment the p_I echo is at t2 = t1 and the d_I echo at
+        # t2 = 0, so p_I has the (t1, t2) coefficients (-1, 1) and d_I (0, 1);
+        # the d-echo experiment swaps them. A unit shear parallel to t1 then
+        # leaves the (-1, 1) component in F1 only.
+        if exp == "shifting_p":
+            cs_c, b_c = (-1.0, 1.0), (-1.0, 1.0)
+        else:
+            cs_c, b_c = (0.0, 1.0), (-1.0, 1.0)
+            if convention is None:
+                convention = "none"
+        notes.append(("Shifting-p: F1 holds the paramagnetic shift (referenced as an ordinary "
+                      "F1) and F2 the first-order quadrupolar pattern about zero, in Hz. "
+                      if exp == "shifting_p" else
+                      "Shifting-d: F1 holds the first-order quadrupolar pattern about zero "
+                      "(Hz, unreferenced) and F2 the paramagnetic shift. ")
+                     + "The t2 origin must be the end of the last pulse (acquire the whole "
+                     "echo, remove the digital-filter group delay, no echo alignment) and t1 "
+                     "must be the real evolution time of each increment. Adiabatic "
+                     "(double/quadruple SHAP) d-echo data share this geometry. If the "
+                     "correlation looks mirrored in F1, use f1_sign = -1.")
     elif exp in ("jres", "pass"):
         cs_c, b_c = (0.0, 1.0), (1.0, 1.0)
         if convention is None:
@@ -624,6 +656,11 @@ def make_shear_plan(experiment: str = "mqmas", *, spin: float | None = None,
                      experiment=exp, f1_sign=f1_sign, spin=spin, label=label, notes=notes,
                      convention=convention if isinstance(convention, str) else "custom")
     plan.scale_f1 = _f1_scale(convention, plan.cs_after[0], k_t2)
+    if exp == "shifting_d" and convention == "none":
+        # F1 holds the quadrupolar component, not the shift: its sign (not
+        # the shift's, which is absent from F1) decides the axis direction,
+        # so that F1 reads the quadrupolar frequency with its own sign.
+        plan.scale_f1 = -1.0 if b_c[0] - k_t2 * b_c[1] < 0 else 1.0
     c2 = plan.cs_after[1]
     plan.scale_f2 = (-1.0 if c2 < 0 else 1.0) * abs(float(scale_f2 or 1.0))
     return plan

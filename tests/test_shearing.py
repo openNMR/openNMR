@@ -674,3 +674,70 @@ def test_mat_puts_the_isotropic_shift_in_f1_and_the_pattern_in_f2():
         gap = np.abs(x - d) < 150
         assert f2[gap].max() < 0.3 * f2.max()
     assert "Sheared" in out.metadata.raw["shear"]["log"] or "Shear" in out.metadata.raw["shear"]["log"]
+
+
+# ---------------------------------------------------------------------------
+# Shifting-p / shifting-d echo (Walder 2015; Aleksis 2019)
+# ---------------------------------------------------------------------------
+
+def _shift_quad_crystallites(coef_shift, coef_quad):
+    """Crystallites with a paramagnetic shift p and a first-order quadrupolar
+    frequency q: phase = p * (c1 t1 + c2 t2) + q * (d1 t1 + d2 t2)."""
+    shifts = (3000.0, -2500.0)
+    quads = (-4000.0, 0.0, 6000.0)
+    cryst = [(coef_shift[0] * p + coef_quad[0] * q, coef_shift[1] * p + coef_quad[1] * q, 1.0)
+             for p in shifts for q in quads]
+    return shifts, quads, cryst
+
+
+def _centred_axes(out):
+    y = np.asarray(out.axes[0].hz) - 0.5 * (out.axes[0].hz[0] + out.axes[0].hz[-1])
+    x = np.asarray(out.axes[1].hz) - 0.5 * (out.axes[1].hz[0] + out.axes[1].hz[-1])
+    return y, x
+
+
+def test_shifting_echo_plans_swap_the_two_interactions():
+    p, d = sh.make_shear_plan("shifting_p"), sh.make_shear_plan("shifting_d")
+    assert {"shifting_p", "shifting_d"} <= set(sh.EXPERIMENTS)
+    # both shear parallel to t1 by one unit (Walder: kappa(t1) = 1, magnitude)
+    assert abs(p.kappa_t1) == abs(d.kappa_t1) == pytest.approx(1.0)
+    # p-echo: the shift ends up in F1 only, d-echo: in F2 only
+    assert p.cs_after == pytest.approx((-1.0, 0.0))
+    assert d.cs_after == pytest.approx((0.0, 1.0))
+    assert p.convention == "cs" and d.convention == "none"
+    assert any("quadrupolar" in n for n in p.notes) and any("quadrupolar" in n for n in d.notes)
+    # a mirrored correlation is fixed by f1_sign
+    assert sh.make_shear_plan("shifting_p", f1_sign=-1).kappa_t1 == pytest.approx(1.0)
+    assert p.kappa_t1 == pytest.approx(-1.0)
+
+
+def test_shifting_p_echo_separates_shift_in_f1_and_quadrupole_in_f2():
+    shifts, quads, cryst = _shift_quad_crystallites((-1.0, 1.0), (0.0, 1.0))
+    spec = make_2d(cryst, carrier_hz=(0.0, 0.0))
+    spec.metadata.nucleus = spec.metadata.nucleus_indirect = "2H"
+    out = sh.shear_2d(spec, sh.make_shear_plan("shifting_p"))
+    y, x = _centred_axes(out)
+    f1, f2 = np.abs(out.data).sum(axis=1), np.abs(out.data).sum(axis=0)
+    for p in shifts:                       # F1: one line per shift, whatever the quadrupolar frequency
+        assert f1[np.abs(y - p) < 300].max() > 4 * np.median(f1)
+    for q in quads:                        # F2: the quadrupolar pattern about zero
+        assert f2[np.abs(x - q) < 300].max() > 4 * np.median(f2)
+    # F1 carries no quadrupolar splitting: each shift line is single
+    for p in shifts:
+        assert f1[np.abs(y - (p + 4000.0)) < 300].max() < 0.3 * f1[np.abs(y - p) < 300].max()
+
+
+def test_shifting_d_echo_separates_quadrupole_in_f1_and_shift_in_f2():
+    shifts, quads, cryst = _shift_quad_crystallites((0.0, 1.0), (-1.0, 1.0))
+    spec = make_2d(cryst, carrier_hz=(0.0, 0.0))
+    spec.metadata.nucleus = spec.metadata.nucleus_indirect = "2H"
+    out = sh.shear_2d(spec, sh.make_shear_plan("shifting_d"))
+    y, x = _centred_axes(out)
+    f1, f2 = np.abs(out.data).sum(axis=1), np.abs(out.data).sum(axis=0)
+    for q in quads:
+        assert f1[np.abs(y - q) < 300].max() > 4 * np.median(f1)     # reads +q, not -q
+    for p in shifts:
+        assert f2[np.abs(x - p) < 300].max() > 4 * np.median(f2)
+    # the wrong convention (f1_sign = -1) shears the other way and no longer separates them
+    mirrored = sh.shear_2d(spec, sh.make_shear_plan("shifting_d", f1_sign=-1))
+    assert not np.allclose(np.abs(mirrored.data), np.abs(out.data), atol=1e-6 * np.abs(out.data).max())

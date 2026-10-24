@@ -633,12 +633,16 @@ def read_gaussian(path) -> dict:
 
 
 #: The codes :func:`read_calculation` recognises.
-SUPPORTED_CODES = ("CASTEP (.magres)", "VASP (OUTCAR)", "ORCA (.out)", "Gaussian (.log)")
+SUPPORTED_CODES = ("CASTEP (.magres)", "VASP (OUTCAR)", "ORCA (.out)", "Gaussian (.log)",
+                   "CRYSTAL (properties output: paramagnetic shifts and EFG)")
 
 
 def read_calculation(path, include_g0: bool = True) -> dict:
-    """A CASTEP ``.magres``, VASP ``OUTCAR``, ORCA output or Gaussian log,
-    recognised by content. ``include_g0`` applies to VASP only (the other
+    """A CASTEP ``.magres``, VASP ``OUTCAR``, ORCA output, Gaussian log or
+    CRYSTAL properties output (any extension), recognised by content.
+    A CRYSTAL calculation carries hyperfine and EFG data rather than a
+    shielding: give ``paramagnetic=`` to :func:`dft_sites` (see
+    :mod:`opennmr.notebook.crystal_nmr`). ``include_g0`` applies to VASP only (the other
     codes give a total σ that cannot be split, or have no G=0 term)."""
     with open(path, "r", errors="replace") as f:
         head = f.read(4000)
@@ -652,6 +656,9 @@ def read_calculation(path, include_g0: bool = True) -> dict:
         return read_orca(path)
     if "Gaussian, Inc." in more or "Entering Gaussian System" in more:
         return read_gaussian(path)
+    from . import crystal_nmr
+    if crystal_nmr.is_crystal(more):
+        return crystal_nmr.read_crystal(path)
     raise ValueError(f"{os.path.basename(str(path))}: not a calculation openNMR reads ("
                      + ", ".join(SUPPORTED_CODES) + ").")
 
@@ -904,7 +911,7 @@ def _merge_key(rec, tol):
 def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, delta_ref=0.0,
               sigma_ref=None, reference_labels=None, slope=1.0, fwhm=1.0,
               include_csa=True, include_quadrupolar=True, merge=True, calibration=None,
-              state="solid", average=None) -> dict:
+              state="solid", average=None, paramagnetic=None, orbital_shift=None) -> dict:
     """Simulation sites from a DFT calculation.
 
     ``sample`` / ``reference`` : from :func:`read_calculation` (or paths).
@@ -926,6 +933,15 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
     0.1 kHz, 0.1°) become one site with their count as its amount -- the
     same lineshape, simulated once.
 
+    ``paramagnetic`` : for a CRYSTAL calculation, how to scale its hyperfine
+    interactions to the sample's temperature and field: a dictionary with
+    ``phi`` (the scaling factor ⟨S_z⟩/S), or ``chi`` (molar susceptibility,
+    cm³/mol; ``chi_units="m3/mol"`` for SI) and ``spin``, or ``theta`` (Weiss
+    constant, K), ``mu_eff`` (μ_B) and ``spin``; plus ``T`` (K) and ``B0`` (T)
+    where needed, and ``components`` = "both" / "contact" / "dipolar". See
+    :func:`opennmr.notebook.crystal_nmr.magnetic_scaling`. The shifts are the
+    hyperfine ones; ``orbital_shift`` (ppm, default 0) is added to each, or
+    use ``delta_ref``.
     ``state`` : ``"solid"`` (default) uses the tensors in full; ``"solution"``
     is a liquid, where fast isotropic tumbling averages every tensor to its
     trace: only the isotropic shift is kept (no CSA, no quadrupolar
@@ -948,6 +964,24 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
         reference = read_calculation(reference)
     if state not in STATES:
         raise ValueError(f"state must be one of {STATES}.")
+    if sample.get("code") == "CRYSTAL":
+        from . import crystal_nmr
+        if paramagnetic is None:
+            raise ValueError("A CRYSTAL calculation holds hyperfine and EFG data, not a "
+                             "shielding: give paramagnetic={'phi': …} (the scaling factor), or "
+                             "{'chi': …, 'spin': …} (susceptibility), or {'theta': …, "
+                             "'mu_eff': …, 'spin': …} (Weiss constant, effective moment, spin), "
+                             "with T (K) and B0 (T).")
+        args = dict(paramagnetic)
+        components = args.pop("components", "both")
+        sample = crystal_nmr.apply_scaling(sample, crystal_nmr.magnetic_scaling(**args),
+                                           components=components)
+        if calibration is None and sigma_ref is None and reference is None:
+            sigma_ref = 0.0
+            delta_ref = float(delta_ref) + float(orbital_shift or 0.0)
+            slope = 1.0
+    elif paramagnetic is not None:
+        raise ValueError("paramagnetic= applies to CRYSTAL calculations only.")
     atoms = select_atoms(sample, element, labels)
     atoms, average_notes = average_atoms(atoms, average)
     if state == "solution":
@@ -1002,10 +1036,15 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
             notes.append(f"The reference is a {reference['code']} calculation and the sample a "
                          f"{sample['code']} one: shieldings from different codes, "
                          "pseudopotentials or functionals are not on one scale.")
+    elif sample.get("paramagnetic"):
+        ref_info.update(sigma_ref=float(sigma_ref), source="paramagnetic")
+        notes.append("Paramagnetic shifts: δ = δ_orbital + δ_Fermi contact + δ_spin dipolar, "
+                     f"with δ_orbital = {float(delta_ref):.4g} ppm (not part of the "
+                     "calculation; enter it as the reference shift).")
     else:
         ref_info.update(sigma_ref=float(sigma_ref), source="typed")
         notes.append(f"σ_ref = {float(sigma_ref):.4f} ppm, as typed.")
-    if float(delta_ref) == 0.0 and cal is None:
+    if float(delta_ref) == 0.0 and cal is None and not sample.get("paramagnetic"):
         notes.append("δ_ref is 0: shifts are relative to the reference compound itself, not "
                       "to your experimental scale. Enter the reference's measured shift.")
     records = []

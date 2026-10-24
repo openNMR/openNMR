@@ -377,3 +377,85 @@ def test_average_from_the_results_table_recalculates_at_once(qapp, said, tmp_pat
     panel.dft_average_list.setCurrentRow(0)
     panel.remove_average_group()
     assert [r["label"] for r in panel.model["atoms"]] == ["H1", "H2", "H3", "H4"]
+
+
+# ---------------------------------------------------------------------------
+# CRYSTAL: paramagnetic scaling (2026-10-24)
+# ---------------------------------------------------------------------------
+
+def test_crystal_file_shows_the_scaling_controls_and_gives_shifts_and_cq(qapp, said, tmp_path):  # noqa: F811
+    from test_crystal_nmr import crystal_text
+    path = tmp_path / "properties.outp"
+    path.write_text(crystal_text())
+    window = MainWindow()
+    panel = window.dft_sim_panel
+    panel.dft_sample_edit.setText(str(path))
+    assert panel.read_files(quiet=True), panel.dft_files_label.text()
+    assert "CRYSTAL" in panel.dft_files_label.text()
+    assert panel.dft_pm_box.isVisibleTo(panel)
+    panel.dft_element_combo.setCurrentText("Li")
+    assert panel.dft_site_list.count() == 2                  # the raw calculation has no σ yet
+    # three routes, each showing only its own rows
+    panel.dft_pm_route_combo.setCurrentIndex(panel.dft_pm_route_combo.findData("curie_weiss"))
+    panel.dft_pm_theta_spin.setValue(-300.0)
+    panel.dft_pm_mueff_spin.setValue(3.87)
+    panel.dft_pm_spin_spin.setValue(1.5)
+    panel.dft_pm_T_spin.setValue(318.0)
+    panel.dft_pm_B0_spin.setValue(11.7)
+    panel._on_pm_changed()
+    assert "0.0211" in panel.dft_pm_phi_label.text()
+    assert panel.calculate(simulate=False), said
+    model = panel.model
+    assert model["state"] == "solid" and model["atoms"][0]["C_Q"] is not None
+    assert model["atoms"][0]["iso"] > 0
+    first = model["atoms"][0]["iso"]
+    # the orbital shift and the contact-only choice recalculate at once
+    panel.dft_pm_orbital_spin.setValue(10.0)
+    panel._on_pm_changed()
+    assert panel.model["atoms"][0]["iso"] == pytest.approx(first + 10.0)
+    panel.dft_pm_components_combo.setCurrentIndex(panel.dft_pm_components_combo.findData("contact"))
+    assert panel.model["atoms"][0]["span"] == pytest.approx(0.0, abs=1e-9)
+    # the susceptibility route and a typed φ give a sensible, different message
+    panel.dft_pm_route_combo.setCurrentIndex(panel.dft_pm_route_combo.findData("susceptibility"))
+    panel.dft_pm_chi_spin.setValue(0.02)
+    panel._on_pm_changed()
+    assert "χ_M" in panel.dft_pm_phi_label.text()
+    panel.dft_pm_route_combo.setCurrentIndex(panel.dft_pm_route_combo.findData("phi"))
+    panel.dft_pm_phi_spin.setValue(0.0211622)
+    panel._on_pm_changed()
+    assert "given" in panel.dft_pm_phi_label.text()
+    # a Weiss constant above the temperature cannot give φ: said, not raised
+    panel.dft_pm_route_combo.setCurrentIndex(panel.dft_pm_route_combo.findData("curie_weiss"))
+    panel.dft_pm_theta_spin.setValue(400.0)
+    panel._on_pm_changed()
+    assert "cannot be found" in panel.dft_pm_phi_label.text()
+    # the import code reproduces the import
+    panel.dft_pm_theta_spin.setValue(-300.0)
+    panel._on_pm_changed()
+    code = panel.dft_python()
+    assert "paramagnetic=" in code and "orbital_shift=" in code
+    namespace = {}
+    exec(code, namespace)                                   # runs on the user's file
+    assert namespace["model"]["atoms"][0]["iso"] == pytest.approx(panel.model["atoms"][0]["iso"])
+    window.close()
+
+
+def test_crystal_scaling_survives_the_saved_state(qapp, said, tmp_path):  # noqa: F811
+    from test_crystal_nmr import crystal_text
+    path = tmp_path / "properties.out"
+    path.write_text(crystal_text())
+    window = MainWindow()
+    panel = window.dft_sim_panel
+    panel.dft_sample_edit.setText(str(path))
+    assert panel.read_files(quiet=True)
+    panel.dft_pm_route_combo.setCurrentIndex(panel.dft_pm_route_combo.findData("phi"))
+    panel.dft_pm_phi_spin.setValue(0.0123)
+    panel.dft_pm_orbital_spin.setValue(-4.0)
+    state = panel.get_state()
+    other = MainWindow().dft_sim_panel
+    other.set_state(state)
+    assert other.dft_pm_route_combo.currentData() == "phi"
+    assert other.dft_pm_phi_spin.value() == pytest.approx(0.0123)
+    assert other.dft_pm_orbital_spin.value() == pytest.approx(-4.0)
+    assert other.dft_pm_box.isVisibleTo(other)
+    window.close()

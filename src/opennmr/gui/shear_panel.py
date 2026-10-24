@@ -37,6 +37,8 @@ EXPERIMENT_CHOICES = [
     ("jres", "2D J-resolved, homonuclear (solution)"),
     ("pass", "2D PASS sideband separation (MAS)"),
     ("mat", "Magic-angle turning / hopping (MAT)"),
+    ("shifting_p", "Shifting-p echo (static, shift / quadrupole)"),
+    ("shifting_d", "Shifting-d echo, incl. adiabatic (static)"),
     ("custom_kappa", "Custom: shear ratios"),
     ("custom_coefficients", "Custom: pathway coefficients a, b"),
 ]
@@ -342,7 +344,7 @@ class ShearPanel(QWidget):
         exp = self.experiment()
         conv = self.convention_combo.currentData()
         convention = self.custom_scale_spin.value() if conv == "custom" else conv
-        if exp in ("jres", "pass") and conv == "cs":
+        if exp in ("jres", "pass", "shifting_d") and conv == "cs":
             convention = "none"
         kwargs = dict(f1_sign=int(self.f1_sign_combo.currentData()), convention=convention)
         if exp in ("mqmas", "stmas", "das"):
@@ -367,7 +369,7 @@ class ShearPanel(QWidget):
         F1 direction when a standard value matches."""
         if shear_source_problem(self._source):
             return None
-        direction = "t1" if self.experiment() in ("jres", "pass", "mat") else "t2"
+        direction = "t1" if self.experiment() in ("jres", "pass", "mat", "shifting_p", "shifting_d") else "t2"
         spin = float(self.spin_combo.currentData()) if self.experiment() in ("mqmas", "stmas", "das") else None
         try:
             scan = nb_shear.estimate_shear(self._source, direction=direction, spin=spin)
@@ -419,7 +421,8 @@ class ShearPanel(QWidget):
             return None
         plan = self._plan
         name = {"mqmas": "MQMAS", "stmas": "STMAS", "das": "DAS", "jres": "tilted",
-                "pass": "PASS", "mat": "MAT", }.get(plan.experiment, "sheared")
+                "pass": "PASS", "mat": "MAT", "shifting_p": "shifting-p",
+                "shifting_d": "shifting-d"}.get(plan.experiment, "sheared")
         label = f"Sheared ({name}) {self._source_label}".strip()
         log = result.metadata.raw["shear"]["log"]
         self._log(log)
