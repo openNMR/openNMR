@@ -350,3 +350,30 @@ def test_state_and_averaging_controls(qapp, said, tmp_path):  # noqa: F811
     assert panel.average_groups == [["H1", "H2", "H3"]]
     assert said == [("information", "Select at least two sites in the site list to average."),
                     ("information", "H3 is already in a group; remove that group first.")]
+
+
+def test_average_from_the_results_table_recalculates_at_once(qapp, said, tmp_path):  # noqa: F811
+    paths = _methyl_paths(tmp_path)
+    window = MainWindow()
+    panel = window.dft_sim_panel
+    panel.library_path = paths["lib"]
+    panel.dft_sample_edit.setText(paths["sample"])
+    assert panel.read_files(quiet=True)
+    panel.dft_element_combo.setCurrentText("H")
+    panel.dft_sigma_override_check.setChecked(True)          # a typed scale, no reference file
+    panel.dft_sigma_ref_spin.setValue(30.0)
+    assert panel.calculate(simulate=False)
+    assert [r["label"] for r in panel.model["atoms"]] == ["H1", "H2", "H3", "H4"]
+    panel.dft_result_table.selectRow(0)
+    panel.dft_result_table.selectRow(1)                       # replaces; extend with Ctrl below
+    from PySide6.QtCore import QItemSelectionModel
+    sel = panel.dft_result_table.selectionModel()
+    for r in (0, 1, 2):
+        sel.select(panel.dft_result_table.model().index(r, 0),
+                   QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+    assert panel.average_selected()
+    assert [r["label"] for r in panel.model["atoms"]] == ["H1–H3", "H4"]   # recalculated
+    assert panel.dft_result_table.rowCount() == 2
+    panel.dft_average_list.setCurrentRow(0)
+    panel.remove_average_group()
+    assert [r["label"] for r in panel.model["atoms"]] == ["H1", "H2", "H3", "H4"]

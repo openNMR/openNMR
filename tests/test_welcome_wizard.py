@@ -226,3 +226,30 @@ def test_skipping_after_choosing_a_work_type_changes_nothing(qapp):  # noqa: F81
     wizard.work_type_checks["pnmr"].setChecked(True)
     wizard.skip()
     assert {k: b.isChecked() for k, b in window.section_shown_checkboxes.items()} == before
+
+
+# ---- more colour themes (2026-10-24) ---------------------------------------------------
+
+def test_extra_themes_are_listed_and_apply(qapp):  # noqa: F811
+    from opennmr.gui import style
+    from PySide6.QtGui import QPalette
+    extras = ("solarized_light", "solarized_dark", "nord", "midnight", "sepia", "high_contrast")
+    assert set(extras) <= set(style.THEME_MODES)
+    assert all(m in style.THEME_LABELS for m in style.THEME_MODES)
+    assert style.resolve_mode("nord", qapp) == "dark" and style.resolve_mode("sepia", qapp) == "light"
+    seen = set()
+    for mode in extras:
+        style.apply_theme(mode, qapp)
+        pal = qapp.palette()
+        window = pal.color(QPalette.ColorRole.Window).name()
+        button = pal.color(QPalette.ColorRole.Button).name()
+        assert window != button                              # buttons stay offset from the panel
+        seen.add(window)
+    assert len(seen) == len(extras)
+    style.apply_theme("light", qapp)
+
+
+def test_wizard_offers_the_extra_themes(qapp):  # noqa: F811
+    window = MainWindow()
+    wizard = WelcomeWizard(window)
+    assert wizard.theme_combo.findData("nord") >= 0 and wizard.theme_combo.findData("sepia") >= 0

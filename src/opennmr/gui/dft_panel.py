@@ -201,10 +201,14 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         form.addRow("Sample state:", self.dft_state_combo)
         v.addLayout(form)
         v.addWidget(QLabel(
-            "Fast motion (e.g. a rotating CH₃ or NH₃⁺): select the sites that exchange in the "
-            "site list above and average them. Their tensors are averaged in the calculation's "
-            "frame, so a solid gives the motionally averaged lineshape and a solution gives the "
-            "mean shift."))
+            "Fast motion (e.g. a rotating CH₃ or NH₃⁺): select the sites that exchange – "
+            "rows of the table of sites below (click, Ctrl-click or Shift-click), or names in "
+            "the Sites list at the top – and press Average Selected Sites. Their tensors are "
+            "averaged in the calculation's frame, so a solid gives the motionally averaged "
+            "lineshape and a solution gives the mean shift. The sites are recalculated at once."))
+        self.dft_average_hint = QLabel("No sites averaged.")
+        self.dft_average_hint.setStyleSheet("color: palette(mid);")
+        v.addWidget(self.dft_average_hint)
         self.dft_average_list = QListWidget()
         self.dft_average_list.setMaximumHeight(70)
         self.dft_average_list.setToolTip("Groups of sites averaged by a fast motion. Each group "
@@ -230,16 +234,24 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         for w in (self.dft_include_csa_check, self.dft_include_quad_check):
             w.setEnabled(not solution)
         self._sync_dft()
+        if self.model is not None:
+            self.calculate()
 
     def _refresh_average_list(self) -> None:
         self.dft_average_list.clear()
         for group in self.average_groups:
             self.dft_average_list.addItem(", ".join(group))
+        self.dft_average_hint.setVisible(not self.average_groups)
 
     def average_selected(self, labels=None) -> bool:
         """Group ``labels`` (default: the highlighted sites) for averaging."""
         if labels is None:
             labels = [item.text() for item in self.dft_site_list.selectedItems()]
+            rows = sorted({i.row() for i in self.dft_result_table.selectedIndexes()})
+            if self.model is not None:
+                labels += [self.model["atoms"][r]["label"] for r in rows
+                           if r < len(self.model["atoms"])]
+            labels = list(dict.fromkeys(labels))
         labels = [str(x) for x in labels]
         if len(labels) < 2:
             QMessageBox.information(self, "Average sites",
@@ -258,13 +270,21 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self.average_groups.append(labels)
         self._refresh_average_list()
         self._sync_dft()
+        self._recalculate_if_shown()
         return True
+
+    def _recalculate_if_shown(self) -> None:
+        """Sites already on screen are recalculated so a change to the
+        averaging shows at once."""
+        if self.model is not None:
+            self.calculate()
 
     def remove_average_group(self, row: int | None = None) -> None:
         row = self.dft_average_list.currentRow() if row is None else row
         if 0 <= row < len(self.average_groups):
             del self.average_groups[row]
             self._refresh_average_list()
+            self._recalculate_if_shown()
         self._sync_dft()
 
     def _build_reference_box(self) -> QGroupBox:
@@ -402,6 +422,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self.dft_result_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents)
         self.dft_result_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.dft_result_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.dft_result_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.dft_result_table.verticalHeader().setVisible(False)
         self.dft_result_table.setMaximumHeight(200)
         self.dft_result_table.setToolTip(
@@ -916,7 +938,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         if sample is not None and not periodic:
             self.dft_frame_combo.setCurrentIndex(1)
         self.dft_show_tensor_button.setEnabled(self.model is not None)
-        self.dft_average_button.setEnabled(have)
+        self.dft_average_button.setEnabled(have or self.model is not None)
         self.dft_unaverage_button.setEnabled(bool(self.average_groups))
 
     # ---- calculating ------------------------------------------------------------------

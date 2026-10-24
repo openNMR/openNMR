@@ -35,7 +35,8 @@ EXPERIMENT_CHOICES = [
     ("stmas", "STMAS (quadrupolar, MAS)"),
     ("das", "DAS (quadrupolar, two angles)"),
     ("jres", "2D J-resolved, homonuclear (solution)"),
-    ("pass", "2D PASS / MAT sideband separation (MAS)"),
+    ("pass", "2D PASS sideband separation (MAS)"),
+    ("mat", "Magic-angle turning / hopping (MAT)"),
     ("custom_kappa", "Custom: shear ratios"),
     ("custom_coefficients", "Custom: pathway coefficients a, b"),
 ]
@@ -366,7 +367,7 @@ class ShearPanel(QWidget):
         F1 direction when a standard value matches."""
         if shear_source_problem(self._source):
             return None
-        direction = "t1" if self.experiment() in ("jres", "pass") else "t2"
+        direction = "t1" if self.experiment() in ("jres", "pass", "mat") else "t2"
         spin = float(self.spin_combo.currentData()) if self.experiment() in ("mqmas", "stmas", "das") else None
         try:
             scan = nb_shear.estimate_shear(self._source, direction=direction, spin=spin)
@@ -418,7 +419,7 @@ class ShearPanel(QWidget):
             return None
         plan = self._plan
         name = {"mqmas": "MQMAS", "stmas": "STMAS", "das": "DAS", "jres": "tilted",
-                "pass": "PASS", }.get(plan.experiment, "sheared")
+                "pass": "PASS", "mat": "MAT", }.get(plan.experiment, "sheared")
         label = f"Sheared ({name}) {self._source_label}".strip()
         log = result.metadata.raw["shear"]["log"]
         self._log(log)

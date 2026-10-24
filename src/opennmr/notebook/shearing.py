@@ -131,8 +131,13 @@ EXPERIMENTS = {
            "optional second shear centres every F2 pattern on zero",
     "jres": "2D J-resolved, homonuclear (solution): the 45-degree tilt, shear "
             "parallel to t1 removes J from F2",
-    "pass": "2D PASS / MAT sideband separation (MAS): shear parallel to t1 moves "
-            "every sideband under its isotropic peak",
+    "pass": "2D PASS sideband separation (MAS, constant-time pulse timing in t1): shear "
+            "parallel to t1 moves every sideband under its isotropic peak; F1 holds the "
+            "sideband order x MAS rate, F2 the isotropic shift",
+    "mat": "Magic-angle turning / hopping (MAT): the anisotropy is refocused during t1 "
+           "(hops between the three magic-angle orientations) and the isotropic shift is "
+           "not, so F1 holds the isotropic shift; shear parallel to t1 removes it from F2, "
+           "which then holds the anisotropic pattern about zero",
     "custom_kappa": "Custom: give the shear ratios (and scaling) directly",
     "custom_coefficients": "Custom: give the pathway coefficients a1, a2 (and/or "
                            "b1, b2) and the chemical-shift coefficients",
@@ -527,13 +532,35 @@ def make_shear_plan(experiment: str = "mqmas", *, spin: float | None = None,
             notes.append(f"These angles do not refocus rank 2 and rank 4 at the same "
                          f"t2/t1 ratio ({-r2:.4g} vs {-r4:.4g}); after the shear the rank-2 "
                          "anisotropy is still in F1.")
+    elif exp == "mat":
+        # Grandinetti et al., Prog. NMR Spectrosc. 59 (2011) 121, Sec. 6:
+        # MAT is the discrete trajectory (magic-angle hopping, three
+        # equally spaced orientations on the magic cone) that averages a
+        # rank-2 anisotropy to zero. The isotropic shift (S.p_I) evolves
+        # through t1 and t2 alike (coefficients 1, 1); the anisotropic
+        # frequencies refocus within the t1 cycle and evolve in t2 only
+        # (0, 1) -- the opposite assignment to PASS, where the isotropic
+        # shift is the (0, 1) component and the sidebands (1, 1).
+        cs_c, b_c = (1.0, 1.0), (1.0, 1.0)
+        notes.append("MAT: F1 reports the isotropic shift (referenced like an ordinary "
+                     "F1) and F2 the anisotropic pattern centred on zero, i.e. the "
+                     "isotropic shift is taken out of F2. This assumes the isotropic shift "
+                     "evolves for the whole t1 increment and the anisotropy is fully "
+                     "refocused in it. If your sequence lets the isotropic shift evolve for "
+                     "only a fraction f of each increment, use custom_coefficients with "
+                     "b = cs = (f, 1). If the pattern comes out mirrored, use f1_sign = -1.")
     elif exp in ("jres", "pass"):
         cs_c, b_c = (0.0, 1.0), (1.0, 1.0)
         if convention is None:
             convention = "none"
         if exp == "pass":
-            notes.append("F1 holds the sideband order x MAS rate; if the sidebands move "
+            notes.append("PASS (Grandinetti et al. 2011, Sec. 3.4.3): F1 holds the sideband "
+                         "order x MAS rate, F2 the isotropic shift; if the sidebands move "
                          "away from (not onto) the isotropic peaks, use f1_sign = -1.")
+            notes.append("t1 is sampled N times per rotor period, so F1 repeats every "
+                         "N x MAS rate: sidebands of order beyond +-N/2 fold back in F1 and "
+                         "are then sheared by the wrong amount. Use N at least as large as "
+                         "the number of sidebands (5 pulse PASS: N = 8-16 typical).")
     elif exp == "custom_kappa":
         k_t2 = float(kappa_t2 or 0.0)
         k_t1 = float(kappa_t1 or 0.0)

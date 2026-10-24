@@ -47,8 +47,40 @@ RADIUS = 6
 CONTAINER_RADIUS = 8
 
 #: Selectable values for the Settings combo, in display order.
-THEME_MODES = ("system", "light", "dark")
-THEME_LABELS = {"system": "Follow system", "light": "Light", "dark": "Dark"}
+THEME_MODES = ("system", "light", "dark", "solarized_light", "solarized_dark", "nord",
+               "midnight", "sepia", "high_contrast")
+THEME_LABELS = {"system": "Follow system", "light": "Light", "dark": "Dark",
+                "solarized_light": "Solarized light", "solarized_dark": "Solarized dark",
+                "nord": "Nord (cool grey-blue)", "midnight": "Midnight (deep blue)",
+                "sepia": "Sepia (warm paper)", "high_contrast": "High contrast (black, yellow)"}
+
+#: The extra themes (explicit user request, 2026-10-24): name -> whether it
+#: is a dark one, and its colours. Light and dark are built in
+#: :func:`_palette`. Every theme keeps Button offset from Window and a
+#: mid-tone border, the property the stylesheet relies on.
+_EXTRA_THEMES = {
+    "solarized_light": dict(dark=False, window="#eee8d5", base="#fdf6e3", alt="#f5eedb",
+                            button="#fdf6e3", hover="#e1d9bf", text="#073642", disabled="#93a1a1",
+                            border="#93a1a1", shadow="#657b83", highlight="#268bd2",
+                            highlight_text="#ffffff"),
+    "solarized_dark": dict(dark=True, window="#002b36", base="#00212b", alt="#073642",
+                           button="#0b3d4a", hover="#14505f", text="#a7b5b6", disabled="#586e75",
+                           border="#4f6a73", shadow="#001a21", highlight="#268bd2",
+                           highlight_text="#ffffff"),
+    "nord": dict(dark=True, window="#2e3440", base="#272c36", alt="#3b4252", button="#434c5e",
+                 hover="#4c566a", text="#eceff4", disabled="#7b88a1", border="#667189",
+                 shadow="#1f232b", highlight="#5e81ac", highlight_text="#ffffff"),
+    "midnight": dict(dark=True, window="#0f1724", base="#0a101a", alt="#17223a", button="#1f2e4d",
+                     hover="#2a3d66", text="#dbe4f5", disabled="#6b7a99", border="#4a5d86",
+                     shadow="#05080e", highlight="#3d7de0", highlight_text="#ffffff"),
+    "sepia": dict(dark=False, window="#efe6d6", base="#fbf6ea", alt="#f4ecdc", button="#fbf6ea",
+                  hover="#e2d6bd", text="#3b3226", disabled="#9a8f7c", border="#a89878",
+                  shadow="#7a6e58", highlight="#a8602a", highlight_text="#ffffff"),
+    "high_contrast": dict(dark=True, window="#000000", base="#000000", alt="#161616",
+                          button="#1c1c1c", hover="#3a3a3a", text="#ffffff", disabled="#9a9a9a",
+                          border="#ffffff", shadow="#000000", highlight="#ffd400",
+                          highlight_text="#000000"),
+}
 
 #: Classes deliberately left native -- see this module's docstring.
 #: Listed rather than merely omitted so that a later edit adding one of
@@ -95,7 +127,7 @@ def remember_system_theme(app: QApplication | None = None) -> bool:
     return _SYSTEM_IS_DARK
 
 
-def _palette(dark: bool) -> QPalette:
+def _palette(dark) -> QPalette:
     """A palette with **Button deliberately offset from Window**, which
     is the whole reason this is built by hand rather than taken from
     the platform. Every other role is set too, so the two themes differ
@@ -108,7 +140,14 @@ def _palette(dark: bool) -> QPalette:
     # own, however the numbers are arranged. It is deliberately a
     # mid-grey in both themes -- distinct from "shadow", which stays
     # near-black for the sunken/frame roles Qt uses it for.
-    if dark:
+    extra = _EXTRA_THEMES.get(dark) if isinstance(dark, str) else None
+    if extra is not None:
+        window, base, alt = extra["window"], extra["base"], extra["alt"]
+        button, button_hover = extra["button"], extra["hover"]
+        text, disabled_text = extra["text"], extra["disabled"]
+        border, shadow = extra["border"], extra["shadow"]
+        highlight, highlight_text = extra["highlight"], extra["highlight_text"]
+    elif dark:
         window, base, alt = "#26262b", "#1b1b1f", "#33333a"
         button, button_hover = "#3f3f48", "#4c4c57"
         text, disabled_text = "#e6e6ea", "#787882"
@@ -166,6 +205,8 @@ def resolve_mode(mode: str, app: QApplication | None = None) -> str:
     """``"system"`` -> the concrete ``"light"``/``"dark"`` it means now."""
     if mode == "system":
         return "dark" if system_prefers_dark(app) else "light"
+    if mode in _EXTRA_THEMES:
+        return "dark" if _EXTRA_THEMES[mode]["dark"] else "light"
     return mode if mode in ("light", "dark") else "light"
 
 
@@ -306,7 +347,7 @@ def apply_theme(mode: str = "system", app: QApplication | None = None,
             pass
 
     # After setStyle, which resets the palette to the style's own.
-    app.setPalette(_palette(resolved == "dark"))
+    app.setPalette(_palette(mode if mode in _EXTRA_THEMES else resolved == "dark"))
     if not stylesheet:
         return resolved
 

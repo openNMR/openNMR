@@ -632,3 +632,45 @@ def test_split_t1_data_land_where_the_literature_says():
     right = np.abs(sh.shear_2d(spec, sh.make_shear_plan(
         "mqmas", spin=1.5, split_t1=True)).data).sum(axis=1)
     assert (proj > 0.5 * proj.max()).sum() > 3 * (right > 0.5 * right.max()).sum()
+
+
+# ---------------------------------------------------------------------------
+# MAT is not PASS (2026-10-24; Grandinetti et al. 2011, Secs. 3.4.3 and 6)
+# ---------------------------------------------------------------------------
+
+def test_mat_and_pass_assign_the_components_oppositely():
+    mat, pas = sh.make_shear_plan("mat"), sh.make_shear_plan("pass")
+    # the same unit shear parallel to t1 ...
+    assert mat.kappa_t1 == pas.kappa_t1 == pytest.approx(1.0)
+    # ... but MAT leaves the isotropic shift in F1 (and takes it out of F2); PASS the reverse
+    assert mat.cs_after == pytest.approx((1.0, 0.0))
+    assert pas.cs_after == pytest.approx((0.0, 1.0))
+    assert mat.convention == "cs" and pas.convention == "none"
+    assert mat.f1_cs_factor == pytest.approx(1.0)
+    assert any("anisotropic pattern" in n for n in mat.notes)
+    assert any("fold back" in n for n in pas.notes)         # PASS's F1 is periodic
+    assert "mat" in sh.EXPERIMENTS and "MAT" not in sh.EXPERIMENTS["pass"]
+    assert sh.make_shear_plan("mat", f1_sign=-1).kappa_t1 == pytest.approx(-1.0)
+
+
+def test_mat_puts_the_isotropic_shift_in_f1_and_the_pattern_in_f2():
+    iso = (3000.0, -2000.0)                       # isotropic shifts, Hz from the carrier
+    aniso = ((-1500.0, 1.0), (0.0, 2.0), (2500.0, 1.0))
+    cryst = [(d, d + a, w) for d in iso for a, w in aniso]     # iso in t1 and t2, aniso in t2
+    spec = make_2d(cryst, carrier_hz=(0.0, 0.0))
+    spec.metadata.nucleus = spec.metadata.nucleus_indirect = "1H"
+    out = sh.shear_2d(spec, sh.make_shear_plan("mat"))
+    y = np.asarray(out.axes[0].hz) - 0.5 * (out.axes[0].hz[0] + out.axes[0].hz[-1])
+    x = np.asarray(out.axes[1].hz) - 0.5 * (out.axes[1].hz[0] + out.axes[1].hz[-1])
+    f1 = np.abs(out.data).sum(axis=1)
+    f2 = np.abs(out.data).sum(axis=0)
+    for d in iso:                                  # one F1 line per isotropic shift
+        near = np.abs(y - d) < 300
+        assert f1[near].max() > 4 * np.median(f1)
+    for a, _w in aniso:                            # the same pattern at zero for both sites
+        near = np.abs(x - a) < 300
+        assert f2[near].max() > 4 * np.median(f2)
+    for d in iso:                                  # nothing left at the isotropic positions in F2
+        gap = np.abs(x - d) < 150
+        assert f2[gap].max() < 0.3 * f2.max()
+    assert "Sheared" in out.metadata.raw["shear"]["log"] or "Shear" in out.metadata.raw["shear"]["log"]
