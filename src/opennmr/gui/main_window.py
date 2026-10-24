@@ -138,8 +138,10 @@ from .simpson_fit_panel import SimpsonFitPanel
 from .export_dialog import ExportDialog
 from .dynamics_panels import ExchangeLineshapePanel, VTRelaxationPanel
 from .jcoupling_panels import (JCouplingFitPanel, JCouplingSimulationPanel, lock_to_spin_system,
-                               seed_spins_from_peaks)
-from .combined_section import CombinedModelSection
+                               seed_spins_from_peaks, SOLUTION_STRONG_BLURB,
+                               STRONG_COUPLING_BLURB)
+from .combined_section import (CombinedModelSection, SOLUTION_MODELS, SOLUTION_TIP,
+                               SpinSystemHost)
 from .batch_relaxation_panel import BatchRelaxationPanel
 from .dft_panel import DftSimulationPanel
 from .quadrupolar_panels import QuadrupolarFitPanel
@@ -1513,6 +1515,18 @@ class MainWindow(QMainWindow):
         plot_style_action.triggered.connect(self._on_plot_style_clicked)
         view_menu.addAction(plot_style_action)
 
+        # Ctrl+I (Cmd+I on macOS; Qt maps Ctrl) starts an inset: explicit
+        # user request, 2026-10-24. Region selection moved to Ctrl+Shift+I.
+        self.inset_menu_action = QAction("Draw &Inset", self)
+        self.inset_menu_action.setShortcut(QKeySequence("Ctrl+I"))
+        self.inset_menu_action.setToolTip(
+            "Magnify part of the plot: press, then drag a box over the region and a zoomed "
+            "copy is placed on the plot. Press again to cancel. Right-click the plot ▸ Inset… "
+            "for its position, axes, labels, typeface and lines.\n"
+            "Shortcut: Cmd/Ctrl+I.")
+        self.inset_menu_action.triggered.connect(lambda _c=False: self._toggle_inset_mode())
+        view_menu.addAction(self.inset_menu_action)
+
         view_menu.addSeparator()
         self.crosshair_menu_action = QAction("&Crosshair", self)
         self.crosshair_menu_action.setCheckable(True)
@@ -1634,7 +1648,8 @@ class MainWindow(QMainWindow):
         # One entry: a selected region is integrated at once (2026-10-16).
         self.select_region_menu_action = QAction("Select and Integrate &Regions from Plot", self)
         self.select_region_menu_action.setCheckable(True)
-        self.select_region_menu_action.setShortcut(QKeySequence("Ctrl+I"))
+        # Ctrl+I is the Inset tool's since 2026-10-24 (explicit user request).
+        self.select_region_menu_action.setShortcut(QKeySequence("Ctrl+Shift+I"))
         self.select_region_menu_action.toggled.connect(self.select_region_button.setChecked)
         self.select_region_button.toggled.connect(self.select_region_menu_action.setChecked)
         analysis_menu.addAction(self.select_region_menu_action)
@@ -2104,6 +2119,22 @@ class MainWindow(QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
         return dialog
+
+    def _toggle_inset_mode(self) -> None:
+        """Cmd/Ctrl+I: switch the Inset tool on for the plot on show (a drag
+        over the region then adds the inset), or off again if it is on."""
+        current = self.canvas_tabs.currentWidget()
+        canvas = current if isinstance(current, MplCanvas) else self.canvas
+        if canvas._inset_mode:
+            canvas.set_inset_mode(False)
+            self.statusBar().clearMessage()
+            return
+        if not canvas.insets_supported():
+            self.statusBar().showMessage("There is no plot here to put an inset on.", 5000)
+            return
+        canvas.set_inset_mode(True)
+        self.statusBar().showMessage(
+            "Inset: drag a box over the region to magnify. Cmd/Ctrl+I to cancel.", 8000)
 
     def _on_inset_added(self, index: int) -> None:
         self.statusBar().showMessage(
@@ -10727,8 +10758,10 @@ class MainWindow(QMainWindow):
             raise ValueError(f"No simulation panel called {key!r}.")
         section = sections[key]
         section.set_state(entry.get("inputs") or {})
-        if key in ("jcoupling", "combined"):
-            self.combined_sim_model.show_model("spin_system" if key == "jcoupling" else "peaks")
+        if key == "jcoupling":
+            self._show_spin_system_model("simulate")
+        elif key == "combined":
+            self.combined_sim_model.show_model("peaks")
         self._show_side_tab("Simulate")
         anchor = section.anchor()
         parent = anchor
@@ -15489,8 +15522,15 @@ class MainWindow(QMainWindow):
         self.fitting_status_label.setWordWrap(True)
         layout.addWidget(self.fitting_status_label)
 
-        layout.addWidget(CollapsibleSection(
-            "Solution NMR", content=self._build_peak_picking_subtab()))
+        # Solution NMR: peaks and first-order multiplets, or the exact
+        # strongly coupled spin system (roofing) -- the model chooser is
+        # added once the J panel exists, below.
+        self._solution_peaks_tab = self._build_peak_picking_subtab()
+        self._solution_fit_holder = QWidget()
+        QVBoxLayout(self._solution_fit_holder).setContentsMargins(0, 0, 0, 0)
+        self._solution_fit_section = CollapsibleSection(
+            "Solution NMR", content=self._solution_fit_holder)
+        layout.addWidget(self._solution_fit_section)
         # Region integration is built here, with the rest of the Fit
         # tile's widgets (builders after this one read them), but shown
         # on its own Integrate tile (explicit user request, 2026-10-16).
@@ -15556,9 +15596,21 @@ class MainWindow(QMainWindow):
             strong_coupling=lambda sites, nucleus, _mhz: self._open_strong_coupling(
                 "fit", sites, nucleus),
             get_alternatives=self._kept_fit_alternatives)
+        # The strongly coupled spin-system panel is one panel with one set
+        # of spins and fits, offered by Solution NMR and Solid-state NMR
+        # alike: it sits in whichever section chose it last.
+        self._fit_spin_host = SpinSystemHost(self.jcoupling_fit_panel, self)
+        solid_slot = self._fit_spin_host.add_slot(
+            "solid", "Solid-state NMR", STRONG_COUPLING_BLURB)
+        solution_slot = self._fit_spin_host.add_slot(
+            "solution", "Solution NMR", SOLUTION_STRONG_BLURB)
         self.combined_fit_model = CombinedModelSection(
             self._with_model_series_box(self.combined_fit_panel, "combined"),
-            self.jcoupling_fit_panel)
+            solid_slot, claim=lambda: self._fit_spin_host.show_in("solid"))
+        self.solution_fit_model = CombinedModelSection(
+            self._solution_peaks_tab, solution_slot, models=SOLUTION_MODELS,
+            tooltip=SOLUTION_TIP, claim=lambda: self._fit_spin_host.show_in("solution"))
+        self._solution_fit_holder.layout().addWidget(self.solution_fit_model)
         self._combined_fit_section = CollapsibleSection(
             "Solid-state NMR", content=self.combined_fit_model)
         layout.addWidget(self._combined_fit_section)
@@ -15872,6 +15924,10 @@ class MainWindow(QMainWindow):
         self._retired_sim_host = QWidget(tab)
         retired = QVBoxLayout(self._retired_sim_host)
         self._retired_sim_host.hide()
+        # Solution NMR heads the list (as it does in Fit): the exact
+        # strongly coupled spin system. Filled in below, once its panel exists.
+        self._solution_sim_section = CollapsibleSection("Solution NMR")
+        layout.addWidget(self._solution_sim_section)
         self.jcoupling_sim_panel = JCouplingSimulationPanel(
             plot_spectrum=lambda spectrum: self._on_panel_simulated("jcoupling", spectrum),
             add_to_open=self._add_derived_spectrum,
@@ -15910,8 +15966,22 @@ class MainWindow(QMainWindow):
                                                            style=self._simulation_style)
         self.combined_sim_panel.layout().addWidget(self.combined_tensor_controls)
         self.combined_sim_field_link = self._link_panel_field(self.combined_sim_panel)
-        self.combined_sim_model = CombinedModelSection(self.combined_sim_panel,
-                                                       self.jcoupling_sim_panel)
+        # One strongly coupled spin-system simulator, in Solution NMR or
+        # Solid-state NMR (see _fit_spin_host).
+        self._sim_spin_host = SpinSystemHost(self.jcoupling_sim_panel, self)
+        solid_sim_slot = self._sim_spin_host.add_slot(
+            "solid", "Solid-state NMR", STRONG_COUPLING_BLURB)
+        solution_sim_slot = self._sim_spin_host.add_slot(
+            "solution", "Solution NMR", SOLUTION_STRONG_BLURB)
+        self.combined_sim_model = CombinedModelSection(
+            self.combined_sim_panel, solid_sim_slot,
+            claim=lambda: self._sim_spin_host.show_in("solid"))
+        self._solution_sim_section.setContentWidget(solution_sim_slot)
+        # Opening Solution NMR brings the simulator there, unless Solid-state
+        # NMR is using it.
+        self._solution_sim_section.toggled.connect(
+            lambda opened: opened and self.combined_sim_model.model() != "spin_system"
+            and self._sim_spin_host.show_in("solution"))
         self._combined_sim_section = CollapsibleSection(
             "Solid-state NMR", content=self.combined_sim_model)
         layout.addWidget(self._combined_sim_section)
@@ -16715,11 +16785,34 @@ class MainWindow(QMainWindow):
             "Your peaks are the spins below: type the J values between them in the J table."
             if seeded else ""))
 
+    def _show_spin_system_model(self, where: str, like: str | None = None) -> None:
+        """Show the strongly coupled spin-system model of Fit (``where`` =
+        "fit") or Simulate: in the section that has the panel now, or in
+        the one named ``like`` ("solution" / "solid") -- a transfer from
+        Solution NMR's simulator lands in Solution NMR's fit."""
+        host = self._fit_spin_host if where == "fit" else self._sim_spin_host
+        if like in host.slots:
+            host.show_in(like)
+        if where == "fit":
+            (self.solution_fit_model if host.owner == "solution"
+             else self.combined_fit_model).show_model("spin_system")
+        elif host.owner != "solution":      # Solution NMR's simulator has no chooser
+            self.combined_sim_model.show_model("spin_system")
+        self._expand_section_of(host.panel)
+
+    def _expand_section_of(self, widget) -> None:
+        parent = widget
+        while parent is not None and not isinstance(parent, CollapsibleSection):
+            parent = parent.parentWidget()
+        if parent is not None:
+            parent.setExpanded(True)
+
     def _send_jcoupling_simulation_to_fit(self, arguments: dict) -> None:
         notes = self.jcoupling_fit_panel.set_start_from_simulation(arguments)
-        self.combined_fit_model.show_model("spin_system")
+        self._show_spin_system_model("fit", like=self._sim_spin_host.owner)
         self._open_fit_section_of(self.jcoupling_fit_panel)
-        self._report_transfer("Simulated spin system set as the Fit ▸ Solid-state NMR (strongly coupled peaks) start",
+        section = "Solution NMR" if self._fit_spin_host.owner == "solution" else "Solid-state NMR"
+        self._report_transfer(f"Simulated spin system set as the Fit ▸ {section} (strongly coupled) start",
                               notes)
 
     def _send_combined_simulation_to_fit(self, site_dicts: list, settings: dict,
@@ -16802,16 +16895,16 @@ class MainWindow(QMainWindow):
 
     def _send_jcoupling_to_simulation(self, nucleus, larmor_Hz, sites, lineshape, eta) -> None:
         self.jcoupling_sim_panel.set_from_fit(nucleus, larmor_Hz, sites, lineshape, eta)
-        self.combined_sim_model.show_model("spin_system")
-        self._jcoupling_sim_section.setExpanded(True)
+        self._show_spin_system_model("simulate", like=self._fit_spin_host.owner)
+        self._expand_section_of(self.jcoupling_sim_panel)
         self._show_side_tab("Simulate")
 
     def _send_spin_system_to_simulation(self, nucleus, larmor_Hz, spins, couplings, fwhm_Hz,
                                         lineshape, eta) -> None:
         self.jcoupling_sim_panel.set_spin_system_from_fit(nucleus, larmor_Hz, spins, couplings,
                                                           fwhm_Hz, lineshape, eta)
-        self.combined_sim_model.show_model("spin_system")
-        self._jcoupling_sim_section.setExpanded(True)
+        self._show_spin_system_model("simulate", like=self._fit_spin_host.owner)
+        self._expand_section_of(self.jcoupling_sim_panel)
         self._show_side_tab("Simulate")
 
     def _show_simulated_spectrum(self, spectrum: NMRSpectrum) -> None:
@@ -17635,9 +17728,10 @@ class MainWindow(QMainWindow):
             raise ValueError(f"“{model['name']}” cannot be put back into a panel.")
         panel = self._fit_panels()[model["kind"]]
         panel.set_state(model.get("panel_inputs") or {})
-        if model["kind"] in ("jcoupling", "combined"):
-            self.combined_fit_model.show_model(
-                "spin_system" if model["kind"] == "jcoupling" else "peaks")
+        if model["kind"] == "jcoupling":
+            self._show_spin_system_model("fit")
+        elif model["kind"] == "combined":
+            self.combined_fit_model.show_model("peaks")
         panel.restore_result(model["panel_result"], self.session.spectra[index])
         if model["kind"] != "multi":   # a multi-spectrum fit is stored by _store_multi_fit
             self._store_fit(model["kind"], index)
@@ -22520,8 +22614,84 @@ class MainWindow(QMainWindow):
         self.integral_labels_decimals_spin.valueChanged.connect(
             lambda _v: self._sync_integral_labels())
         label_row.addWidget(self.integral_labels_decimals_spin)
+        self.integral_labels_symbol_check = QCheckBox("Show ∫ =")
+        self.integral_labels_symbol_check.setChecked(True)
+        self.integral_labels_symbol_check.setToolTip(
+            "Write each label as “∫ = 1.00”. Untick for the bare number.")
+        self.integral_labels_symbol_check.toggled.connect(lambda _on: self._sync_integral_labels())
+        label_row.addWidget(self.integral_labels_symbol_check)
         label_row.addStretch(1)
         region_layout.addLayout(label_row)
+
+        # How the label text looks: size, colour, typeface, weight, slant,
+        # height and angle (explicit user request, 2026-10-24).
+        style_form = QFormLayout()
+        style_form.setContentsMargins(0, 0, 0, 0)
+        self.integral_labels_size_spin = TypedSpinBox()
+        self.integral_labels_size_spin.setRange(0, 60)
+        self.integral_labels_size_spin.setSingleStep(1)
+        self.integral_labels_size_spin.setSpecialValueText("Match axes")
+        self.integral_labels_size_spin.setSuffix(" pt")
+        self.integral_labels_size_spin.setToolTip(
+            "Size of the integral labels. “Match axes” (the default) follows the tick labels.")
+        self.integral_labels_size_spin.valueChanged.connect(lambda _v: self._sync_integral_labels())
+        style_form.addRow("Label size:", self.integral_labels_size_spin)
+
+        self._integral_label_colour = "#000000"
+        self.integral_labels_colour_button = QPushButton()
+        self.integral_labels_colour_button.setToolTip("Colour of the integral labels.")
+        self.integral_labels_colour_button.clicked.connect(self._on_integral_label_colour_clicked)
+        self._refresh_integral_label_colour_button()
+        style_form.addRow("Label colour:", self.integral_labels_colour_button)
+
+        self.integral_labels_font_combo = QComboBox()
+        self.integral_labels_font_combo.addItem("Match plot", "")
+        for family in nb_fonts.GENERIC_FAMILIES:
+            self.integral_labels_font_combo.addItem(family, family)
+        self.integral_labels_font_combo.insertSeparator(self.integral_labels_font_combo.count())
+        for family in nb_fonts.available_fonts():
+            self.integral_labels_font_combo.addItem(family, family)
+        self.integral_labels_font_combo.setMaxVisibleItems(20)
+        self._narrow_combo(self.integral_labels_font_combo)
+        self.integral_labels_font_combo.setToolTip(
+            "Typeface of the integral labels. “Match plot” follows the plot's Font family. "
+            "A face without the ∫ sign falls back to DejaVu Sans for that character.")
+        self.integral_labels_font_combo.currentIndexChanged.connect(
+            lambda _i: self._sync_integral_labels())
+        style_form.addRow("Label font:", self.integral_labels_font_combo)
+
+        weight_row = QHBoxLayout()
+        self.integral_labels_bold_check = QCheckBox("Bold")
+        self.integral_labels_italic_check = QCheckBox("Italic")
+        for check in (self.integral_labels_bold_check, self.integral_labels_italic_check):
+            check.toggled.connect(lambda _on: self._sync_integral_labels())
+            weight_row.addWidget(check)
+        weight_row.addStretch(1)
+        style_form.addRow("Label style:", weight_row)
+
+        self.integral_labels_height_spin = QDoubleSpinBox()
+        self.integral_labels_height_spin.setRange(0.0, 60.0)
+        self.integral_labels_height_spin.setDecimals(1)
+        self.integral_labels_height_spin.setSingleStep(0.5)
+        self.integral_labels_height_spin.setValue(1.5)
+        self.integral_labels_height_spin.setSuffix(" %")
+        self.integral_labels_height_spin.setToolTip(
+            "Height of the labels above the bottom of the plot, as a percentage of its height.")
+        self.integral_labels_height_spin.valueChanged.connect(
+            lambda _v: self._sync_integral_labels())
+        style_form.addRow("Label height:", self.integral_labels_height_spin)
+
+        self.integral_labels_angle_spin = QDoubleSpinBox()
+        self.integral_labels_angle_spin.setRange(-90.0, 90.0)
+        self.integral_labels_angle_spin.setDecimals(0)
+        self.integral_labels_angle_spin.setSingleStep(15)
+        self.integral_labels_angle_spin.setSuffix("°")
+        self.integral_labels_angle_spin.setToolTip(
+            "Angle of the labels (90° reads upwards): useful when regions are close together.")
+        self.integral_labels_angle_spin.valueChanged.connect(
+            lambda _v: self._sync_integral_labels())
+        style_form.addRow("Label angle:", self.integral_labels_angle_spin)
+        region_layout.addLayout(style_form)
 
         self.region_table = QTableWidget(0, len(self._REGION_TABLE_COLUMNS))
         self.region_table.setHorizontalHeaderLabels(self._REGION_TABLE_COLUMNS)
@@ -22562,8 +22732,8 @@ class MainWindow(QMainWindow):
             "to the table and every region is integrated at once – the selected "
             "1D spectrum, or every slice of a pseudo-2D series. Typing, removing or "
             "finding regions re-integrates too.\n\n"
-            "Also Analysis ▸ Select and Integrate Regions from Plot (Ctrl+I; "
-            "Cmd+I on macOS)."
+            "Also Analysis ▸ Select and Integrate Regions from Plot (Ctrl+Shift+I; "
+            "Cmd+Shift+I on macOS)."
         )
         self.select_region_button.toggled.connect(self._on_select_region_toggled)
         region_layout.addWidget(self.select_region_button)
@@ -22948,6 +23118,33 @@ class MainWindow(QMainWindow):
             self._read_region_defs() if self._regions_tab_active() else [])
         self._sync_integral_labels()
 
+    def _on_integral_label_colour_clicked(self) -> None:
+        chosen = QColorDialog.getColor(QColor(self._integral_label_colour), self,
+                                       "Integral label colour")
+        if not chosen.isValid():
+            return
+        self._integral_label_colour = chosen.name()
+        self._refresh_integral_label_colour_button()
+        self._sync_integral_labels()
+
+    def _refresh_integral_label_colour_button(self) -> None:
+        colour = self._integral_label_colour
+        self.integral_labels_colour_button.setText(colour)
+        self.integral_labels_colour_button.setStyleSheet(
+            f"QPushButton {{ background-color: {colour}; color: "
+            f"{'white' if _is_dark_colour(colour) else 'black'}; }}")
+
+    def _integral_label_style(self) -> dict:
+        """The integral-label text style the Integrate tile's controls hold,
+        as :func:`add_integral_labels` takes it."""
+        return {"fontsize": self.integral_labels_size_spin.value() or None,
+                "color": self._integral_label_colour,
+                "family": self.integral_labels_font_combo.currentData() or None,
+                "bold": self.integral_labels_bold_check.isChecked(),
+                "italic": self.integral_labels_italic_check.isChecked(),
+                "rotation": self.integral_labels_angle_spin.value(),
+                "offset_axes": self.integral_labels_height_spin.value() / 100.0}
+
     def _sync_integral_labels(self) -> None:
         """Put the integral labels (Integrate ▸ Label integrals under the
         peaks) on the Spectrum plot, or take them off. They follow the region
@@ -22964,10 +23161,11 @@ class MainWindow(QMainWindow):
                 try:
                     items = integral_labels_module.integral_labels(
                         spectrum, regions, decimals=self.integral_labels_decimals_spin.value(),
-                        method=self.integration_method_combo.currentData() or "trapezoid")
+                        method=self.integration_method_combo.currentData() or "trapezoid",
+                        symbol=self.integral_labels_symbol_check.isChecked())
                 except Exception:  # noqa: BLE001 -- a region too narrow to integrate has no label
                     items = None
-        self.canvas.set_integral_labels(items)
+        self.canvas.set_integral_labels(items, **self._integral_label_style())
 
     def _regions_tab_active(self) -> bool:
         """Integration regions are shaded on the Integrate tile, where they

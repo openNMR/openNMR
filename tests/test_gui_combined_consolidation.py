@@ -46,7 +46,7 @@ def test_fit_and_simulate_offer_one_combined_entry_point(qapp):
         "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)", "SIMPSON spectrum",
             "Multi-spectrum", "Kept fit models"]
     assert _titles(window, window._simulations_tab_index) == [
-        "Solid-state NMR", "Czjzek distribution", "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
+        "Solution NMR", "Solid-state NMR", "Czjzek distribution", "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
         "Diffusion (PFG)", "Shaped pulse (Bloch)", "pNMR (CIF)", "SIMPSON import"]
     # The retired panels still exist (kept fits and saved states restore
     # through them), out of sight.
@@ -95,7 +95,8 @@ def test_j_interaction_offers_strong_coupling_in_fit(qapp):
     editor._on_treatment(combo.findData("strong"), panel)
     # The exact spin-system model, its spins the peaks; the J stays first order.
     assert window.combined_fit_model.model() == "spin_system"
-    assert window.combined_fit_model.stack.currentWidget() is window.jcoupling_fit_panel
+    assert window.combined_fit_model.stack.currentWidget() is window.combined_fit_model.spin_widget
+    assert window.combined_fit_model.spin_widget.holds_panel()
     spins = window.jcoupling_fit_panel.spin_editor.spins()
     assert [(s["label"], s["nuclide"], s["shift_ppm"]) for s in spins] == [
         ("A", "1H", pytest.approx(2.10)), ("B", "1H", pytest.approx(2.25))]

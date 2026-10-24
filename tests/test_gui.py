@@ -6100,7 +6100,7 @@ def test_main_window_region_selected_adds_a_row(qapp):
 
 def test_main_window_select_region_menu_action_syncs_with_button(qapp):
     window = MainWindow()
-    assert window.select_region_menu_action.shortcut().toString() in ("Ctrl+I", "⌘I")
+    assert window.select_region_menu_action.shortcut().toString() in ("Ctrl+Shift+I", "⌘⇧I")
 
     window.select_region_button.setChecked(True)
     assert window.select_region_menu_action.isChecked() is True
@@ -7021,8 +7021,7 @@ def test_spectral_fit_report_is_a_table_matching_the_peak_table(qapp):
 
 def test_spectral_fit_table_sits_in_the_isotropic_section(qapp):
     window = MainWindow()
-    isotropic = next(s for s in window.findChildren(CollapsibleSection)
-                     if s.title() == "Solution NMR")
+    isotropic = window._solution_fit_section      # Fit's (Simulate has a "Solution NMR" too)
     assert isotropic.isAncestorOf(window.spectral_fit_table)
     assert isotropic.isAncestorOf(window.spectral_fit_params_label)
 
@@ -7092,8 +7091,7 @@ def test_region_options_are_visible_in_the_isotropic_section_not_advanced(qapp):
     assert group.isAncestorOf(window.fit_within_regions_checkbox)
     assert group.isAncestorOf(window.amplitude_bound_regions_checkbox)
     assert not window.peak_advanced_content.isAncestorOf(group)
-    isotropic = next(s for s in window.findChildren(CollapsibleSection)
-                     if s.title() == "Solution NMR")
+    isotropic = window._solution_fit_section      # Fit's (Simulate has a "Solution NMR" too)
     assert isotropic.isAncestorOf(group)
 
 
@@ -15512,7 +15510,7 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     # Quadrupolar (test_gui_czjzek_display.py).
     # Since 2026-10-06 Solid-state NMR is the one interaction
     # simulator; the CSA and Quadrupolar ones are kept out of the menu.
-    assert [s.title() for s in sections] == ["Solid-state NMR", "Czjzek distribution",
+    assert [s.title() for s in sections] == ["Solution NMR", "Solid-state NMR", "Czjzek distribution",
                                              "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
                                              "Diffusion (PFG)", "Shaped pulse (Bloch)",
                                              "pNMR (CIF)", "SIMPSON import"]
@@ -16141,7 +16139,7 @@ def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
     page = window.side_tabs.widget(window._simulations_tab_index)
     titles = [s.title() for s in page.findChildren(CollapsibleSection)]
     # Solid-state NMR holds every interaction since 2026-10-06.
-    assert titles == ["Solid-state NMR", "Czjzek distribution",
+    assert titles == ["Solution NMR", "Solid-state NMR", "Czjzek distribution",
                       "DFT tensors (CASTEP, VASP, ORCA, Gaussian)", "Diffusion (PFG)",
                       "Shaped pulse (Bloch)", "pNMR (CIF)", "SIMPSON import"]
 

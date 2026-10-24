@@ -43,10 +43,11 @@ def test_sections_are_where_asked(qapp):  # noqa: F811
     # Integration moved to its own Integrate tile (2026-10-16).
     assert "Integration" not in fit
     assert fit.index("Solution NMR") + 1 == fit.index("Solid-state NMR")
-    assert _titles(window, "Simulate")[0] == "Solid-state NMR"
+    assert _titles(window, "Simulate")[:2] == ["Solution NMR", "Solid-state NMR"]
     for model, panel in ((window.combined_fit_model, window.jcoupling_fit_panel),
                          (window.combined_sim_model, window.jcoupling_sim_panel)):
-        assert model.spin_widget is panel and panel.spin_mode()
+        assert model.spin_widget.panel is panel and model.spin_widget.holds_panel()
+        assert panel.spin_mode()
 
 
 # --- the shared editor -------------------------------------------------------

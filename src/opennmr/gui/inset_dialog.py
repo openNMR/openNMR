@@ -19,7 +19,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QDoubleSpinBox, QFontComboBox, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QListWidget, QPushButton, QVBoxLayout, QWidget,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .widgets.typed_spinbox import TypedSpinBox
@@ -166,8 +166,22 @@ class InsetDialog(QDialog):
         axes_box = QGroupBox("Axes and frame")
         axes = QFormLayout(axes_box)
         self.show_axes_check = QCheckBox("Show the axes (ticks and numbers)")
-        self.show_axes_check.setToolTip("Off shows only the peaks – no ticks, no numbers.")
+        self.show_axes_check.setToolTip(
+            "Off shows only the peaks – no ticks, no numbers. A spectrum, curve or profile "
+            "inset shows the horizontal axis only (its vertical values are never shown); a 2D "
+            "contour inset shows both.")
         axes.addRow(self.show_axes_check)
+        # Axis labels, off unless asked for (explicit user request, 2026-10-24).
+        self.show_xlabel_check = QCheckBox("x-axis label")
+        self.xlabel_edit = QLineEdit()
+        self.xlabel_edit.setPlaceholderText("Same as the plot")
+        self.xlabel_edit.setToolTip("The text under the inset; empty copies the plot's own label.")
+        axes.addRow(self.show_xlabel_check, self.xlabel_edit)
+        self.show_ylabel_check = QCheckBox("y-axis label")
+        self.ylabel_edit = QLineEdit()
+        self.ylabel_edit.setPlaceholderText("Same as the plot")
+        self.ylabel_edit.setToolTip("The text beside the inset; empty copies the plot's own label.")
+        axes.addRow(self.show_ylabel_check, self.ylabel_edit)
         self.frame_check = QCheckBox("Frame around the inset")
         axes.addRow(self.frame_check)
         self.frame_colour = _ColourButton("0.2", self._on_edit)
@@ -224,8 +238,11 @@ class InsetDialog(QDialog):
         for widget in (self.corner_combo, self.connector_style_combo):
             widget.currentIndexChanged.connect(self._on_edit)
         for check in (self.auto_y_check, self.show_axes_check, self.frame_check, self.bold_check,
-                      self.italic_check, self.connectors_check, self.same_font_check):
+                      self.italic_check, self.connectors_check, self.same_font_check,
+                      self.show_xlabel_check, self.show_ylabel_check):
             check.toggled.connect(self._on_edit)
+        self.xlabel_edit.textEdited.connect(self._on_edit)
+        self.ylabel_edit.textEdited.connect(self._on_edit)
         self.font_combo.currentFontChanged.connect(self._on_edit)
         for widget in (self.x_from, self.x_to, self.y_from, self.y_to, self.floor_spin,
                        self.pos_x_spin, self.pos_y_spin, self.width_spin, self.height_spin,
@@ -382,6 +399,10 @@ class InsetDialog(QDialog):
             self.width_spin.setValue(round(float(spec["width"]) * 100))
             self.height_spin.setValue(round(float(spec["height"]) * 100))
             self.show_axes_check.setChecked(bool(spec["show_axes"]))
+            self.show_xlabel_check.setChecked(bool(spec["show_xlabel"]))
+            self.show_ylabel_check.setChecked(bool(spec["show_ylabel"]))
+            self.xlabel_edit.setText(spec["xlabel"] or "")
+            self.ylabel_edit.setText(spec["ylabel"] or "")
             self.frame_check.setChecked(bool(spec["frame"]))
             self.frame_colour.set_colour(str(spec["frame_colour"]))
             self.frame_width.setValue(float(spec["frame_width"]))
@@ -404,7 +425,11 @@ class InsetDialog(QDialog):
         custom = self.corner_combo.currentText() == "custom"
         self.custom_label.setEnabled(custom)
         self.custom_pair.setEnabled(custom)
-        axes_on = self.show_axes_check.isChecked()
+        self.xlabel_edit.setEnabled(self.show_xlabel_check.isChecked())
+        self.ylabel_edit.setEnabled(self.show_ylabel_check.isChecked())
+        # Text is drawn when the axes or either label is on.
+        axes_on = (self.show_axes_check.isChecked() or self.show_xlabel_check.isChecked()
+                   or self.show_ylabel_check.isChecked())
         for widget in (self.font_combo, self.same_font_check, self.font_size_spin,
                        self.bold_check, self.italic_check):
             widget.setEnabled(axes_on)
@@ -428,6 +453,10 @@ class InsetDialog(QDialog):
         spec["width"] = self.width_spin.value() / 100.0
         spec["height"] = self.height_spin.value() / 100.0
         spec["show_axes"] = self.show_axes_check.isChecked()
+        spec["show_xlabel"] = self.show_xlabel_check.isChecked()
+        spec["show_ylabel"] = self.show_ylabel_check.isChecked()
+        spec["xlabel"] = self.xlabel_edit.text() or None
+        spec["ylabel"] = self.ylabel_edit.text() or None
         spec["frame"] = self.frame_check.isChecked()
         spec["frame_colour"] = self.frame_colour.colour()
         spec["frame_width"] = self.frame_width.value()

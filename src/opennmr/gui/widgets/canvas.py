@@ -996,6 +996,7 @@ class MplCanvas(QWidget):
     #: Axes each time, invalidating any previously held patch objects).
     _REGION_PATCH_GID = "integration_region"
     _integral_label_items: list = []
+    _integral_label_style: dict = {}
 
     #: Tag on the not-yet-committed baseline overlay, so it can be
     #: found and replaced without keeping a reference that a figure
@@ -2034,23 +2035,30 @@ class MplCanvas(QWidget):
             span.set_gid(self._REGION_PATCH_GID)
         self.canvas.draw_idle()
 
-    def set_integral_labels(self, items) -> None:
+    def set_integral_labels(self, items, **style) -> None:
         """Write the integral of each region under its peak on the Spectrum
         plot (``items``: ``[(x, text), ...]``, from
         :mod:`opennmr.notebook.integral_labels`; ``None`` or empty removes
-        them). The items are kept, so a redraw of the plot puts them back."""
+        them). The items are kept, so a redraw of the plot puts them back.
+
+        ``style``: how the text looks -- ``fontsize`` (None: the tick-label
+        size), ``color``, ``family``, ``bold``, ``italic``, ``rotation`` and
+        ``offset_axes``, as :func:`add_integral_labels` takes them."""
         from ...notebook import peak_integral_labels as _labels
         self._integral_label_items = list(items or [])
+        self._integral_label_style = dict(style)
         ax = self.ax
         if ax is None or ax not in self.figure.axes:
             return
         _labels.remove_integral_labels(ax)
         if self._integral_label_items:
-            size = None
-            ticks = ax.xaxis.get_ticklabels()
-            if ticks:
-                size = ticks[0].get_fontsize()
-            _labels.add_integral_labels(ax, self._integral_label_items, fontsize=size)
+            options = dict(self._integral_label_style)
+            if not options.get("fontsize"):
+                options["fontsize"] = None
+                ticks = ax.xaxis.get_ticklabels()
+                if ticks:
+                    options["fontsize"] = ticks[0].get_fontsize()
+            _labels.add_integral_labels(ax, self._integral_label_items, **options)
         self.canvas.draw_idle()
 
     def set_highlight_regions(self, regions, key: str = "highlight") -> None:

@@ -16,6 +16,11 @@ order. Every other option is a key of ``nb.INSET_DEFAULTS``: position
 ``height``, ``show_axes``, ``frame``, ``connectors`` and their colour,
 width and style, ``family``, ``fontsize``, ``bold``, ``italic``.
 
+A 1D inset never shows y-values (``show_axes`` gives its x axis only); a 2D
+contour inset keeps both. The axis labels are off unless asked for:
+``show_xlabel=True`` / ``show_ylabel=True`` (the text is the plot's own, or
+``xlabel=`` / ``ylabel=``).
+
 For a 2D contour plot use ``opennmr.plotting.draw_insets`` (it re-contours
 the data in the region instead of copying lines).
 """

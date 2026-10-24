@@ -612,7 +612,7 @@ def draw_insets(parent_ax, spectra, insets, *, colours=None, factor=0.07, clevel
         if bounds[1] + bounds[3] / 2 < 0.5:
             ax.xaxis.tick_top()
         ax.set_facecolor(parent_ax.get_facecolor())
-        _generic_inset.restyle(ax, spec)
+        _generic_inset.restyle(ax, spec, parent_ax, bounds)
         if spec.get("mark_inset", True):
             parent_ax.indicate_inset_zoom(
                 ax, edgecolor=spec.get("connector_colour", spec.get("edgecolor", "0.35")),

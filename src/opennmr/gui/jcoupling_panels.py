@@ -1002,6 +1002,15 @@ STRONG_COUPLING_BLURB = (
     "to a peak in the peaks-with-interactions model.")
 
 
+#: The same panel's blurb when hosted in Solution NMR (Fit and Simulate),
+#: where strong coupling is the ordinary way to treat a roofed spectrum.
+SOLUTION_STRONG_BLURB = (
+    "Strongly coupled spin system: every spin's shift and the J values between them, solved "
+    "exactly (roofing, AB quartets, ABX, AA'BB', virtual coupling), up to about 12 spins. Use "
+    "this when J is comparable to the shift difference between multiplets; when every shift "
+    "difference is much larger than J, first-order peaks and multiplets are quicker.")
+
+
 def lock_to_spin_system(panel) -> None:
     """Show a J panel as the exact spin-system model only: its first-order
     mode is Solid-state NMR's J interaction now (explicit user request,

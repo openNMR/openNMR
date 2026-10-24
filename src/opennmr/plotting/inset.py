@@ -54,7 +54,12 @@ INSET_DEFAULTS: dict = {
     "height": 0.4,
     "margin": 0.03,
     # Appearance.
-    "show_axes": True,          # ticks and tick labels; off = the peaks only
+    "show_axes": True,          # ticks and tick labels; off = the peaks only. A line plot
+                                # (1D spectrum, curve) never shows y-values; a 2D contour does.
+    "show_xlabel": False,       # the x-axis label under the inset (off by default)
+    "show_ylabel": False,       # the y-axis label beside it (off by default)
+    "xlabel": None,             # the text; None copies the plot's own label
+    "ylabel": None,
     "frame": True,              # the box around the inset
     "frame_colour": "0.2",
     "frame_width": 0.8,
@@ -184,6 +189,40 @@ def _visible_y_range(parent_ax, xlim) -> tuple[float, float] | None:
     return low - pad, high + pad
 
 
+def _text_size(parent_ax, spec: dict) -> float:
+    """The inset's tick-label size: the spec's, else 3/4 of the plot's."""
+    if spec.get("fontsize"):
+        return float(spec["fontsize"])
+    reference = parent_ax.xaxis.get_ticklabels() if parent_ax is not None else []
+    base = float(reference[0].get_fontsize()) if reference else 10.0
+    return 0.75 * base
+
+
+def _apply_labels(ax, parent_ax, spec: dict, bounds=None) -> None:
+    """The x and y axis labels, when switched on: the spec's text, else the
+    plot's own, in the inset's typeface and on the side facing into the plot
+    (as the tick labels are). ``bounds`` is the inset's ``(x0, y0, w, h)``
+    when it is not the spec's."""
+    x0, y0, w, h = bounds if bounds is not None else inset_bounds(spec)
+    ax.xaxis.set_label_position("top" if y0 + h / 2 < 0.5 else "bottom")
+    ax.yaxis.set_label_position("left" if x0 + w / 2 > 0.5 else "right")
+    size = _text_size(parent_ax, spec)
+    for name, axis, setter in (("x", ax.xaxis, ax.set_xlabel), ("y", ax.yaxis, ax.set_ylabel)):
+        if not spec.get(f"show_{name}label"):
+            setter("")
+            continue
+        text = spec.get(f"{name}label")
+        if text is None and parent_ax is not None:
+            text = getattr(parent_ax, f"get_{name}label")()
+        setter(text or "")
+        label = axis.get_label()
+        label.set_fontsize(size)
+        if spec.get("family"):
+            label.set_fontfamily(spec["family"])
+        label.set_fontweight("bold" if spec.get("bold") else "normal")
+        label.set_fontstyle("italic" if spec.get("italic") else "normal")
+
+
 def _style_axes(ax, parent_ax, spec: dict) -> None:
     ax.patch.set_facecolor(spec["background"] or parent_ax.get_facecolor())
     for side in ("left", "right", "top", "bottom"):
@@ -193,13 +232,10 @@ def _style_axes(ax, parent_ax, spec: dict) -> None:
     if not spec["show_axes"]:
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.set_xlabel("")
-        ax.set_ylabel("")
+        _apply_labels(ax, parent_ax, spec)
         return
-    reference = parent_ax.xaxis.get_ticklabels()
-    base = float(reference[0].get_fontsize()) if reference else 10.0
-    size = float(spec["fontsize"]) if spec["fontsize"] else 0.75 * base
-    ax.tick_params(labelsize=size, direction=spec["tick_direction"], length=3, pad=2)
+    ax.tick_params(labelsize=_text_size(parent_ax, spec), direction=spec["tick_direction"],
+                   length=3, pad=2)
     # Tick labels on the side facing into the plot, so an inset in a
     # corner does not print over the parent's own labels.
     x0, y0, w, h = inset_bounds(spec)
@@ -209,6 +245,10 @@ def _style_axes(ax, parent_ax, spec: dict) -> None:
         ax.yaxis.tick_right()
     if y0 + h / 2 < 0.5:
         ax.xaxis.tick_top()
+    # A line plot has no y-values to read: the peaks' heights are
+    # relative, and a curve's are in the plot itself. (A 2D contour's
+    # F1 axis is a shift and keeps its numbers -- see restyle.)
+    ax.set_yticks([])
     # Font properties act on the tick-label objects, which exist only
     # once the ticks have been placed.
     weight = "bold" if spec["bold"] else "normal"
@@ -218,6 +258,7 @@ def _style_axes(ax, parent_ax, spec: dict) -> None:
             label.set_fontfamily(spec["family"])
         label.set_fontweight(weight)
         label.set_fontstyle(style)
+    _apply_labels(ax, parent_ax, spec)
 
 
 def _apply_fonts_late(ax, spec: dict) -> None:
@@ -335,17 +376,23 @@ def draw_insets(parent_ax, specs) -> list:
     return created
 
 
-def restyle(ax, spec: dict) -> None:
+def restyle(ax, spec: dict, parent_ax=None, bounds=None) -> None:
     """The appearance keys of ``spec`` (frame, axes on/off, typeface, tick
-    size) applied to an inset drawn elsewhere -- the 2D contour inset, whose
-    contents :func:`opennmr.plotting.twod.draw_insets` draws itself."""
+    size, axis labels) applied to an inset drawn elsewhere -- the 2D contour
+    inset, whose contents :func:`opennmr.plotting.twod.draw_insets` draws
+    itself. It keeps its y-values (F1 is a shift). ``parent_ax`` supplies
+    the axis-label text when the spec has none; ``bounds`` is the inset's
+    ``(x0, y0, w, h)`` in the parent."""
     for side in ("left", "right", "top", "bottom"):
         ax.spines[side].set_visible(bool(spec.get("frame", True)))
         ax.spines[side].set_edgecolor(spec.get("frame_colour", "0.2"))
         ax.spines[side].set_linewidth(float(spec.get("frame_width", 0.8)))
+    if bounds is None:
+        bounds = (0.55, 0.55, 0.4, 0.4)
     if not spec.get("show_axes", True):
         ax.set_xticks([])
         ax.set_yticks([])
+        _apply_labels(ax, parent_ax, spec, bounds)
         return
     if spec.get("fontsize"):
         ax.tick_params(labelsize=float(spec["fontsize"]))
@@ -357,3 +404,4 @@ def restyle(ax, spec: dict) -> None:
                 label.set_fontfamily(spec["family"])
             label.set_fontweight(weight)
             label.set_fontstyle(style)
+    _apply_labels(ax, parent_ax, spec, bounds)

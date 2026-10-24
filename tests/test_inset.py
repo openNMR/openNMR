@@ -337,3 +337,131 @@ def test_export_draws_the_inset_from_full_resolution_data(qapp):
     canvas.canvas.draw()
     assert len(canvas.ax.child_axes) == 1                    # and back to the live view
     window.close()
+
+
+# ---- y-values, axis labels and Ctrl/Cmd+I (explicit user request, 2026-10-24) ------
+
+def _labelled_plot():
+    fig, ax = _plot()
+    ax.set_xlabel("δ(¹H) / ppm")
+    ax.set_ylabel("Intensity")
+    return fig, ax
+
+
+def test_line_inset_never_shows_y_values():
+    fig, ax = _labelled_plot()
+    shown = ins.add_inset(ax, (5.2, 4.6), None, show_axes=True)
+    assert len(shown.get_xticks()) > 0                 # the x axis keeps its numbers
+    assert len(shown.get_yticks()) == 0
+    assert not any(t.get_text() for t in shown.get_yticklabels())
+    plt.close(fig)
+
+
+def test_axis_labels_are_off_by_default_and_optional():
+    fig, ax = _labelled_plot()
+    plain = ins.add_inset(ax, (5.2, 4.6), None)
+    assert plain.get_xlabel() == "" and plain.get_ylabel() == ""
+    both = ins.add_inset(ax, (5.2, 4.6), None, corner="lower left",
+                         show_xlabel=True, show_ylabel=True)
+    assert both.get_xlabel() == "δ(¹H) / ppm" and both.get_ylabel() == "Intensity"
+    own = ins.add_inset(ax, (5.2, 4.6), None, show_xlabel=True, xlabel="shift", show_ylabel=True,
+                        ylabel="signal", family="serif", bold=True, italic=True, fontsize=8)
+    assert own.get_xlabel() == "shift" and own.get_ylabel() == "signal"
+    label = own.xaxis.get_label()
+    assert label.get_fontsize() == 8 and label.get_fontweight() == "bold"
+    assert label.get_fontstyle() == "italic" and label.get_fontfamily() == ["serif"]
+    # Only the x label, only the y label.
+    only_x = ins.add_inset(ax, (5.2, 4.6), None, show_xlabel=True)
+    assert only_x.get_xlabel() and not only_x.get_ylabel()
+    # The labels are there with the axes off too.
+    bare = ins.add_inset(ax, (5.2, 4.6), None, show_axes=False, show_xlabel=True)
+    assert bare.get_xlabel() and len(bare.get_xticks()) == 0
+    # They sit on the side facing into the plot (an inset in a lower corner: on top).
+    assert both.xaxis.get_label_position() == "top"
+    assert own.xaxis.get_label_position() == "bottom"
+    fig.canvas.draw()
+    plt.close(fig)
+
+
+def test_2d_inset_keeps_its_y_values_and_takes_labels():
+    from opennmr.plotting import twod
+    fig, ax = plt.subplots()
+    # restyle is what a 2D contour inset goes through: the F1 numbers stay.
+    inset = ax.inset_axes((0.5, 0.5, 0.4, 0.4))
+    inset.plot([0, 1, 2], [0, 1, 4])
+    inset.set_ylim(0, 4)
+    ax.set_xlabel("F2 / ppm")
+    ax.set_ylabel("F1 / ppm")
+    ins.restyle(inset, {"show_axes": True, "show_xlabel": True, "show_ylabel": True},
+                ax, (0.5, 0.5, 0.4, 0.4))
+    fig.canvas.draw()
+    assert len(inset.get_yticks()) > 0 and any(t.get_text() for t in inset.get_yticklabels())
+    assert inset.get_xlabel() == "F2 / ppm" and inset.get_ylabel() == "F1 / ppm"
+    off = ax.inset_axes((0.1, 0.1, 0.3, 0.3))
+    ins.restyle(off, {"show_axes": True}, ax, (0.1, 0.1, 0.3, 0.3))
+    assert off.get_xlabel() == "" and off.get_ylabel() == ""
+    assert twod  # the contour inset calls restyle with the parent and its bounds
+    plt.close(fig)
+
+
+def test_notebook_inset_takes_label_options():
+    import opennmr.notebook as nb
+    fig, ax = _labelled_plot()
+    inset = nb.add_inset(ax, xlim=(5.2, 4.6), show_xlabel=True, show_ylabel=True)
+    assert inset.get_xlabel() and inset.get_ylabel()
+    assert not inset.get_yticks().size
+    assert {"show_xlabel", "show_ylabel", "xlabel", "ylabel"} <= set(nb.INSET_DEFAULTS)
+    plt.close(fig)
+
+
+def test_dialog_controls_axis_labels(qapp):
+    from opennmr.gui.main_window import MainWindow
+    window = MainWindow()
+    _load_spectrum_directly(window, _one_d())
+    canvas = window.canvas
+    canvas.ax.set_xlabel("δ / ppm")
+    canvas.add_inset_region((5.3, 4.7), (0.0, 1.0))
+    dialog = window._on_open_inset_dialog(canvas)
+    assert not dialog.show_xlabel_check.isChecked() and not dialog.show_ylabel_check.isChecked()
+    assert not dialog.xlabel_edit.isEnabled()
+    dialog.show_xlabel_check.setChecked(True)
+    assert dialog.xlabel_edit.isEnabled()
+    dialog.show_ylabel_check.setChecked(True)
+    dialog.ylabel_edit.setText("signal")
+    dialog.ylabel_edit.textEdited.emit("signal")
+    dialog.apply()
+    spec = canvas.inset_specs()[0]
+    assert spec["show_xlabel"] is True and spec["xlabel"] is None
+    assert spec["show_ylabel"] is True and spec["ylabel"] == "signal"
+    canvas.canvas.draw()
+    inset = canvas.ax.child_axes[0]
+    assert inset.get_xlabel() == canvas.ax.get_xlabel() and inset.get_ylabel() == "signal"
+    assert len(inset.get_yticks()) == 0
+    dialog.show_xlabel_check.setChecked(False)
+    dialog.apply()
+    canvas.canvas.draw()
+    assert canvas.ax.child_axes[0].get_xlabel() == ""
+    window.close()
+
+
+def test_cmd_i_starts_the_inset_tool(qapp):
+    from opennmr.gui.main_window import MainWindow
+    window = MainWindow()
+    assert window.inset_menu_action.shortcut().toString() in ("Ctrl+I", "⌘I")
+    # Region selection moved to Ctrl+Shift+I, so the two do not collide.
+    assert window.select_region_menu_action.shortcut() != window.inset_menu_action.shortcut()
+    # Each of the two keys belongs to one action only.
+    keys = [a.shortcut().toString() for a in window.findChildren(type(window.inset_menu_action))
+            if not a.shortcut().isEmpty()]
+    for key in (window.inset_menu_action.shortcut().toString(),
+                window.select_region_menu_action.shortcut().toString()):
+        assert keys.count(key) == 1
+    _load_spectrum_directly(window, _one_d())
+    canvas = window.canvas
+    window.canvas_tabs.setCurrentWidget(canvas)
+    assert not canvas._inset_mode
+    window.inset_menu_action.trigger()
+    assert canvas._inset_mode
+    window.inset_menu_action.trigger()                  # again: cancels
+    assert not canvas._inset_mode
+    window.close()
