@@ -251,6 +251,17 @@ class ShearPanel(QWidget):
         self.sideband_check = QCheckBox("Mark expected sideband positions in the preview")
         self.sideband_check.setChecked(True)
         opt_form.addRow(self.sideband_check)
+        self.proj_mode_combo = QComboBox()
+        self.proj_mode_combo.addItem("Maximum (positive)", "max")
+        self.proj_mode_combo.addItem("Sum (exact shear invariants)", "sum")
+        self.proj_mode_combo.setToolTip(
+            "How the preview's projections are built. A shear parallel to t1 "
+            "leaves the F1 *sum* projection exactly unchanged (and changes F2); "
+            "one parallel to t2 does the reverse. The maximum projection is "
+            "shown by default because it is what the main plot uses, but it "
+            "also moves slightly.")
+        self.proj_mode_combo.currentIndexChanged.connect(lambda _i: self._redraw_last())
+        opt_form.addRow("Preview projections:", self.proj_mode_combo)
         layout.addWidget(opt_box)
 
         self.plan_edit = QPlainTextEdit()
@@ -426,6 +437,10 @@ class ShearPanel(QWidget):
         label = f"Sheared ({name}) {self._source_label}".strip()
         log = result.metadata.raw["shear"]["log"]
         self._log(log)
+        self._log("Projections: a shear parallel to t1 cannot change the F1 (left) sum "
+                  "projection, only F2 (top); a shear parallel to t2 is the reverse. "
+                  "Both strips are recomputed from the sheared data.")
+        self._last_result = result
         self._draw(result)
         self.result_ready.emit(result, label, log)
         return result
@@ -512,11 +527,32 @@ class ShearPanel(QWidget):
             self._log(f"Warning: {w}")
         return result
 
+    def _redraw_last(self) -> None:
+        last = getattr(self, "_last_result", None)
+        if last is not None:
+            self._draw(last)
+
     def _draw(self, result) -> None:
+        self._last_result = result
         self.figure.clear()
-        ax = self.figure.add_subplot(111)
+        # Contour with its projections, recomputed from *this* result on
+        # every draw so a new shear is visibly a new projection. (A shear
+        # parallel to t1 cannot change the F1 sum projection and one
+        # parallel to t2 cannot change the F2 one -- that is the maths,
+        # not a stale plot; see the note logged by shear().)
+        grid = self.figure.add_gridspec(2, 2, width_ratios=[1, 5], height_ratios=[1, 5],
+                                        wspace=0.03, hspace=0.03)
+        ax = self.figure.add_subplot(grid[1, 1])
+        ax_top = self.figure.add_subplot(grid[0, 1], sharex=ax)
+        ax_left = self.figure.add_subplot(grid[1, 0], sharey=ax)
         data = result.data
         x, y = result.axes[1].ppm, result.axes[0].ppm
+        mode = np.sum if self.proj_mode_combo.currentData() == "sum" else np.max
+        ax_top.plot(x, mode(data, axis=0), color="k", lw=0.7)
+        ax_left.plot(mode(data, axis=1), y, color="k", lw=0.7)
+        for a in (ax_top, ax_left):
+            a.axis("off")
+        ax_left.invert_xaxis()
         top = float(np.max(data)) or 1.0
         levels = top * np.geomspace(0.03, 0.95, 12)
         ax.contour(x, y, data, levels=levels, linewidths=0.6, cmap="viridis")

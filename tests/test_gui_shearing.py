@@ -153,3 +153,25 @@ def test_split_t1_option(qapp):
     panel.experiment_combo.setCurrentIndex(panel.experiment_combo.findData("jres"))
     assert not panel.split_t1_check.isVisibleTo(panel)
     assert panel.plan().kappa_t1 == 1.0                       # split-t1 ignored off MQMAS/STMAS
+
+
+def test_preview_projections_follow_the_shear(qapp):
+    """The preview's strips are recomputed from the sheared data each draw."""
+    import numpy as np
+    from test_shearing import make_2d, two_site_mqmas
+    from opennmr.gui.shear_panel import ShearPanel
+    from opennmr.notebook import shearing as sh
+    panel = ShearPanel()
+    src = make_2d(two_site_mqmas()[0])
+    out = sh.shear_2d(src, sh.make_shear_plan("custom_kappa", kappa_t1=0.8, convention="none"))
+    panel._plan = sh.make_shear_plan("custom_kappa", kappa_t1=0.8, convention="none")
+    panel._draw(out)
+    top = panel.figure.axes[1] if len(panel.figure.axes) > 1 else None
+    lines = [d for a in panel.figure.axes if a.lines
+             for d in (a.lines[0].get_xdata(), a.lines[0].get_ydata())]
+    assert any(l.shape == (out.data.shape[1],) and np.allclose(l, np.max(out.data, axis=0)) for l in lines)
+    assert any(l.shape == (out.data.shape[0],) and np.allclose(l, np.max(out.data, axis=1)) for l in lines)
+    panel.proj_mode_combo.setCurrentIndex(1)
+    lines = [d for a in panel.figure.axes if a.lines
+             for d in (a.lines[0].get_xdata(), a.lines[0].get_ydata())]
+    assert any(l.shape == (out.data.shape[0],) and np.allclose(l, np.sum(out.data, axis=1)) for l in lines)
