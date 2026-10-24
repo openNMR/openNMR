@@ -175,3 +175,19 @@ def test_preview_projections_follow_the_shear(qapp):
     lines = [d for a in panel.figure.axes if a.lines
              for d in (a.lines[0].get_xdata(), a.lines[0].get_ydata())]
     assert any(l.shape == (out.data.shape[0],) and np.allclose(l, np.sum(out.data, axis=1)) for l in lines)
+
+
+def test_canvas_projection_mode_switches_between_max_and_sum(qapp):
+    from opennmr.gui.widgets.canvas import MplCanvas
+    spec = _mqmas()
+    c = MplCanvas()
+    c.show_spectrum(spec)
+    top = lambda: np.asarray(c._proj_axes["f2"].lines[0].get_ydata())
+    assert np.allclose(top(), np.max(spec.data, axis=0) + 0.02 * np.max(spec.data, axis=0).min())
+    c.set_projection_mode("sum")
+    s = np.sum(spec.data, axis=0)
+    assert np.allclose(top(), s + 0.02 * s.min())
+    c.set_projection_mode("max")
+    assert c.projection_mode() == "max"
+    with pytest.raises(ValueError):
+        c.set_projection_mode("mean")

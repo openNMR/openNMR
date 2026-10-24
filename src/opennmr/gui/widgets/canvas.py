@@ -1185,6 +1185,10 @@ class MplCanvas(QWidget):
         # plotting.twod.projection_line_kwargs takes it. Per canvas,
         # like the rest of Plot Style -- it carries over to the next 2D.
         self._projection_style: dict[str, dict] = {"f1": {}, "f2": {}}
+        # How the strips are computed from the 2D: "auto" (= maximum),
+        # "max" or "sum" -- plot_2d_contour's projection_mode. Per
+        # canvas, switched from the right-click menu.
+        self._projection_mode = "auto"
         # Per-2D axis-label overrides, {"f2"/"f1": {"text", "unit"}} --
         # per spectrum, since a label says what *that* spectrum's axis
         # is. Same keying as _external_projections.
@@ -2973,6 +2977,26 @@ class MplCanvas(QWidget):
         if self._contour_spectrum is not None:
             self._redraw_contour(preserve_view=True)
 
+    def _projection_mode_kwargs(self) -> dict:
+        return {"projection_mode": self._projection_mode}
+
+    def projection_mode(self) -> str:
+        """``"auto"``/``"max"``/``"sum"``: how the computed strips are built."""
+        return self._projection_mode
+
+    def set_projection_mode(self, mode: str) -> None:
+        """Build the computed projections as the maximum (``"max"``, what
+        ``"auto"`` means) or the sum (``"sum"``, which keeps the exact
+        shear invariants but cancels positive against negative lobes) and
+        redraw the current contour, keeping the zoom."""
+        if mode not in ("auto", "max", "sum"):
+            raise ValueError("projection mode must be 'auto', 'max' or 'sum'")
+        if mode == self._projection_mode:
+            return
+        self._projection_mode = mode
+        if self._contour_spectrum is not None:
+            self._redraw_contour(preserve_view=True, fresh_projections=("f1", "f2"))
+
     def _projection_style_kwargs(self) -> dict:
         style = {d: dict(v) for d, v in self._projection_style.items() if v}
         return {"projection_style": style} if style else {}
@@ -3589,6 +3613,7 @@ class MplCanvas(QWidget):
             **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
             colour_spectra=self._contour_colour, insets=self._contour_insets or None,
             **self._external_projection_kwargs(), **self._projection_style_kwargs(),
+                **self._projection_mode_kwargs(),
         )
         self._apply_current_axis_style()
         if preserve_view:
@@ -4653,6 +4678,13 @@ class MplCanvas(QWidget):
                 clear_slices_action = menu.addAction(
                     f"Clear Extracted Slices ({len(self._contour_slices)})"
                 )
+            proj_menu = menu.addMenu("Projections computed as")
+            for text, mode in (("Maximum (positive)", "max"), ("Sum", "sum")):
+                act = proj_menu.addAction(text)
+                act.setCheckable(True)
+                act.setChecked((self._projection_mode == "auto" and mode == "max")
+                               or self._projection_mode == mode)
+                act.triggered.connect(lambda _c=False, m=mode: self.set_projection_mode(m))
             labels_action = menu.addAction("Edit Axis Labels (F2 / F1)…")
             labels_action.setToolTip(
                 "Type your own label for either axis; the other keeps its own.")
@@ -6809,6 +6841,7 @@ class MplCanvas(QWidget):
                 **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
                 colour_spectra=self._contour_colour, insets=self._contour_insets or None,
                 **self._external_projection_kwargs(), **self._projection_style_kwargs(),
+                **self._projection_mode_kwargs(),
             )
             self._apply_current_axis_style()
         else:
