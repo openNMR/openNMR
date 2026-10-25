@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=openNMR
+Comment=Read, process, plot, simulate and fit NMR spectra
+Exec=openNMR %F
+Icon=openNMR
+Terminal=false
+Categories=Science;Chemistry;

@@ -1,0 +1,4 @@
+#!/bin/sh
+# AppImage entry point: run the PyInstaller app inside the image.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/lib/openNMR/openNMR" "$@"

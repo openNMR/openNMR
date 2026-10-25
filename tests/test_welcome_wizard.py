@@ -199,8 +199,8 @@ def test_choosing_work_types_sets_the_layout_page_and_can_be_overridden(qapp):  
     wizard = WelcomeWizard(window)
     wizard.work_type_checks["solution"].setChecked(True)
     off = {k for k, b in wizard.section_checks.items() if not b.isChecked()}
-    assert off == {"pnmr", "dnp", "czjzek", "cp_buildup", "offset_tracker", "batch_pseudo2d",
-                   "bpp", "exchange", "advanced"}
+    assert off == {"solid", "pnmr", "dnp", "czjzek", "cp_buildup", "offset_tracker",
+                   "batch_pseudo2d", "bpp", "exchange", "advanced"}
     wizard.work_type_checks["solid"].setChecked(True)
     off = {k for k, b in wizard.section_checks.items() if not b.isChecked()}
     assert off == {"pnmr", "dnp"}
@@ -253,3 +253,39 @@ def test_wizard_offers_the_extra_themes(qapp):  # noqa: F811
     window = MainWindow()
     wizard = WelcomeWizard(window)
     assert wizard.theme_combo.findData("nord") >= 0 and wizard.theme_combo.findData("sepia") >= 0
+
+
+def test_solution_and_solid_sections_can_be_removed_from_fit_and_simulate(qapp):  # noqa: F811
+    window = MainWindow()
+    for key, names in (("solution", ("_solution_fit_section", "_solution_sim_section")),
+                       ("solid", ("_combined_fit_section", "_combined_sim_section"))):
+        assert window.OPTIONAL_SECTIONS[key][1] == names
+        assert window.section_shown_checkboxes[key].isChecked()
+        window.section_shown_checkboxes[key].setChecked(False)
+        assert all(getattr(window, n).isHidden() for n in names)
+        window.section_shown_checkboxes[key].setChecked(True)
+        assert not any(getattr(window, n).isHidden() for n in names)
+
+
+def test_wizard_solution_only_removes_solid_and_solid_only_removes_solution(qapp):  # noqa: F811
+    from opennmr.gui.welcome_wizard import sections_to_remove
+    assert "solid" in sections_to_remove(["solution"]) and "solution" not in sections_to_remove(["solution"])
+    assert "solution" in sections_to_remove(["solid"]) and "solid" not in sections_to_remove(["solid"])
+    # Both kinds of work keep both.
+    assert not {"solution", "solid"} & sections_to_remove(["solution", "solid"])
+    window = MainWindow()
+    wizard = WelcomeWizard(window)
+    wizard.work_type_checks["solution"].setChecked(True)
+    while wizard.current_page() < wizard.page_count - 1:
+        wizard.go_next()
+    wizard.go_next()
+    assert window._combined_fit_section.isHidden() and window._combined_sim_section.isHidden()
+    assert not window._solution_fit_section.isHidden() and not window._solution_sim_section.isHidden()
+    window2 = MainWindow()
+    wizard2 = WelcomeWizard(window2)
+    wizard2.work_type_checks["solid"].setChecked(True)
+    while wizard2.current_page() < wizard2.page_count - 1:
+        wizard2.go_next()
+    wizard2.go_next()
+    assert window2._solution_fit_section.isHidden() and window2._solution_sim_section.isHidden()
+    assert not window2._combined_fit_section.isHidden()

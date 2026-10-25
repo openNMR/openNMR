@@ -7099,6 +7099,13 @@ class MainWindow(QMainWindow):
     #: Sections Settings ▸ Sections shown can hide: key -> (checkbox
     #: text, the CollapsibleSection attributes it covers).
     OPTIONAL_SECTIONS = {
+        # Explicit user request, 2026-10-24: the two basic kinds of NMR are
+        # removable too, and the Welcome wizard's "Solution-state only" /
+        # "Solid-state only" choices remove the other one.
+        "solution": ("Solution NMR (Fit and Simulate)",
+                     ("_solution_fit_section", "_solution_sim_section")),
+        "solid": ("Solid-state NMR (Fit and Simulate)",
+                  ("_combined_fit_section", "_combined_sim_section")),
         "pnmr": ("pNMR (Fit ▸ pNMR bond pathways and Simulate ▸ pNMR (CIF))",
                  ("_pnmr_fit_section", "_pnmr_sim_section")),
         # Explicit user request, 2026-10-23.

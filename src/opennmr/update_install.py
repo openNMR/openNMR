@@ -454,8 +454,10 @@ def run_pip(argv: list, on_line=None, timeout: float = 1800.0, cancelled=None) -
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", PIP_DISABLE_PIP_VERSION_CHECK="1")
     kwargs = {"creationflags": 0x08000000} if sys.platform.startswith("win") else {}
     try:
-        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                env=env, **kwargs)
+        # stdin=DEVNULL: pip never reads it, and an inherited terminal handle (Git Bash's
+        # pty on Windows) cannot be duplicated -- WinError 50 -- so Popen failed there.
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, env=env, **kwargs)
     except OSError as exc:
         return False, f"Could not run pip ({exc})."
     watchdog = threading.Timer(timeout, proc.kill)

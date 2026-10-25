@@ -24,6 +24,13 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESOURCES_DIR = os.path.join(REPO_ROOT, "src", "opennmr", "gui", "resources")
 LOGO_PNG = os.path.join(RESOURCES_DIR, "logo.png")
 ENTRY_POINT = os.path.join(REPO_ROOT, "packaging", "entrypoint.py")
+TOPSPIN_RESOURCES = os.path.join(REPO_ROOT, "src", "opennmr", "topspin", "resources")
+
+#: The app's name as users see it (the .exe, the .app, the Start-menu
+#: entry). Was "opennmr" until 2026-10-15; build.yml and
+#: make_installer.py look for this name in dist/.
+APP_NAME = "openNMR"
+BUNDLE_ID = "org.opennmr.openNMR"
 BUILD_DIR = os.path.join(REPO_ROOT, "build")
 DIST_DIR = os.path.join(REPO_ROOT, "dist")
 
@@ -102,9 +109,10 @@ def sync_qt_plugins(dist_dir: str, source_plugins: str) -> list[str]:
     PyInstaller keeps the real files in ``Contents/Frameworks`` and
     leaves symlinks to them under ``Contents/Resources``.
     ``shutil.rmtree`` refuses to run on a symlink ("Cannot call rmtree
-    on a symbolic link"), which broke the 0.3.0 macOS CI build. Each real
-    directory is synced once, so a link and its target are not handled
-    twice, and a dangling link is skipped."""
+    on a symbolic link"), which broke the 0.3.0 macOS CI build and a Mac
+    build again on 2026-10-24. Each real directory is synced once, so a
+    link and its target are not handled twice, and a dangling link is
+    skipped."""
     import shutil
 
     if not os.path.isdir(source_plugins):
@@ -125,24 +133,51 @@ def sync_qt_plugins(dist_dir: str, source_plugins: str) -> list[str]:
         print(f"Re-syncing Qt plugins: {bundled}"
               + (f" -> {target}" if target != os.path.abspath(bundled) else ""))
         shutil.rmtree(target)
-        shutil.copytree(source_plugins, target)
+        shutil.copytree(source_plugins, target, symlinks=True)
         synced.append(target)
     return synced
 
 
 def _resign_macos_app() -> None:
-    """Re-apply an ad-hoc signature to the ``.app`` after the plugin
-    swap: PyInstaller signed the bundle before ``_fix_qt_plugins`` changed
-    files inside it, and an invalid seal makes arm64 macOS kill the app."""
-    if not sys.platform.startswith("darwin"):
-        return
+    """Sign the .app again (ad hoc) after its files were changed: macOS
+    refuses to run a bundle whose contents no longer match its signature
+    (a hard "damaged" failure on Apple silicon, not the Gatekeeper prompt
+    a user can click through). A real Developer ID, if there ever is one,
+    replaces this step."""
     import subprocess
 
-    app = os.path.join(DIST_DIR, "opennmr.app")
+    app = os.path.join(DIST_DIR, f"{APP_NAME}.app")
     if os.path.isdir(app):
-        subprocess.run(
-            ["codesign", "--force", "--deep", "--sign", "-", app], check=False
-        )
+        print(f"Re-signing {app} (ad hoc)")
+        subprocess.run(["codesign", "--force", "--deep", "--sign", "-", app], check=True)
+
+
+def app_version() -> str:
+    """The version in pyproject.toml -- the one the installers are named
+    after and the update check compares."""
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10
+        import tomli as tomllib  # type: ignore[no-redef]
+    with open(os.path.join(REPO_ROOT, "pyproject.toml"), "rb") as handle:
+        return tomllib.load(handle)["project"]["version"]
+
+
+def _stamp_macos_version() -> None:
+    """Write the version into the .app's Info.plist (Finder's Get Info,
+    and macOS's own "is this newer" when replacing the app), which
+    PyInstaller's command line leaves at 0.0.0."""
+    plist_path = os.path.join(DIST_DIR, f"{APP_NAME}.app", "Contents", "Info.plist")
+    if not os.path.exists(plist_path):
+        return
+    import plistlib
+    with open(plist_path, "rb") as handle:
+        plist = plistlib.load(handle)
+    version = app_version()
+    plist.update({"CFBundleShortVersionString": version, "CFBundleVersion": version,
+                  "CFBundleDisplayName": APP_NAME, "NSHighResolutionCapable": True})
+    with open(plist_path, "wb") as handle:
+        plistlib.dump(plist, handle)
 
 
 def main() -> int:
@@ -159,7 +194,7 @@ def main() -> int:
 
     args = [
         ENTRY_POINT,
-        "--name", "opennmr",
+        "--name", APP_NAME,
         "--windowed",  # no console window -- this is a GUI app
         "--noconfirm",
         "--distpath", DIST_DIR,
@@ -182,6 +217,28 @@ def main() -> int:
         # The window logo and the toolbar icons are loaded from files
         # beside gui/, which PyInstaller does not collect on its own.
         "--add-data", f"{RESOURCES_DIR}{os.pathsep}opennmr/gui/resources",
+        # The TopSpin plugin template is a .py file read as data, which
+        # PyInstaller would otherwise only compile, not ship as a file.
+        "--add-data", f"{TOPSPIN_RESOURCES}{os.pathsep}opennmr/topspin/resources",
+        # opennmr's own version metadata: without it importlib.metadata
+        # finds nothing in the frozen app and _version.py silently falls
+        # back to its hard-coded string (and the update check compares
+        # against the wrong version). selftest's "version" step checks it.
+        "--copy-metadata", "opennmr",
+        # Every opennmr module, including ones only imported lazily
+        # inside functions (the GUI defers heavy imports for start-up
+        # time), which PyInstaller's static analysis can miss.
+        "--collect-submodules", "opennmr",
+        # pymatgen (Simulate/Fit > pNMR from a CIF) reads its periodic
+        # table and other tables from JSON/YAML files at import.
+        "--collect-data", "pymatgen",
+        # Never used by the app; keep them (and their size) out.
+        "--exclude-module", "tkinter",
+        "--exclude-module", "PyQt5",
+        "--exclude-module", "PySide2",
+        "--exclude-module", "pytest",
+        "--exclude-module", "nmrglue",
+        "--osx-bundle-identifier", BUNDLE_ID,
     ]
     icon = _make_icon()
     if icon:
@@ -190,7 +247,13 @@ def main() -> int:
     print(f"Building opennmr for {sys.platform}...")
     PyInstaller.__main__.run(args)
     _fix_qt_plugins()
-    _resign_macos_app()
+    _stamp_macos_version()
+    # LAST: every change to the bundle above (plugins, Info.plist) breaks
+    # its signature, and macOS then reports the app as "damaged" the
+    # moment it is downloaded (found on a real Mac: "invalid Info.plist
+    # (plist or signature have been modified)").
+    if sys.platform == "darwin":
+        _resign_macos_app()
     print(f"Done -- see {DIST_DIR}")
     return 0
 

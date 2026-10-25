@@ -1,8 +1,11 @@
+# Superseded by the `pypi` job in build.yml (one tag -> installers + PyPI +
+# GitHub Release, all gated on the installers passing). Kept as a manual
+# fallback: Actions tab > Publish to PyPI > Run workflow. It no longer runs
+# on a tag, which would publish the same version twice.
 name: Publish to PyPI
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
   build:

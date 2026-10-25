@@ -39,3 +39,10 @@ Claude outputs/
 /SCRIPT_openNMR_Tutorial_20261002.ipynb
 /SCRIPT_openNMR_Shearing_20261009.ipynb
 .claude_tmp/
+
+# Packaging build output and self-test results
+/build/
+/dist/
+/st-*/
+/selftest-*/
+/openNMR.zip
