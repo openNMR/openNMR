@@ -387,7 +387,7 @@ def NUC_label(NUC, x_unit='ppm', style='brackets', template=None):
     this module, but no longer a second implementation of its own: this
     and the GUI's axis labels were quietly drifting apart (this one had
     no ``style``/``slash`` option at all, and its mathtext wrapped the
-    element symbol outside \mathregular{}, unlike the GUI's).
+    element symbol outside \\mathregular{}, unlike the GUI's).
 
     NUC : str
         Nuclide as '#X', e.g. '17O', '27Al'. Should be read from Bruker

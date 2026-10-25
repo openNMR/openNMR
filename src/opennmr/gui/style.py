@@ -48,13 +48,17 @@ CONTAINER_RADIUS = 8
 
 #: Selectable values for the Settings combo, in display order.
 THEME_MODES = ("system", "light", "dark", "solarized_light", "solarized_dark", "nord",
-               "midnight", "sepia", "high_contrast")
+               "midnight", "sepia", "gruvbox_light", "gruvbox_dark", "dracula", "forest",
+               "high_contrast")
 THEME_LABELS = {"system": "Follow system", "light": "Light", "dark": "Dark",
                 "solarized_light": "Solarized light", "solarized_dark": "Solarized dark",
                 "nord": "Nord (cool grey-blue)", "midnight": "Midnight (deep blue)",
-                "sepia": "Sepia (warm paper)", "high_contrast": "High contrast (black, yellow)"}
+                "sepia": "Sepia (warm paper)", "gruvbox_light": "Gruvbox light (warm cream)",
+                "gruvbox_dark": "Gruvbox dark (warm charcoal)", "dracula": "Dracula (purple-grey)",
+                "forest": "Forest (deep green)",
+                "high_contrast": "High contrast (black, yellow)"}
 
-#: The extra themes (explicit user request, 2026-10-24): name -> whether it
+#: The extra themes (explicit user requests, 2026-10-24 and 2026-10-25): name -> whether it
 #: is a dark one, and its colours. Light and dark are built in
 #: :func:`_palette`. Every theme keeps Button offset from Window and a
 #: mid-tone border, the property the stylesheet relies on.
@@ -76,6 +80,20 @@ _EXTRA_THEMES = {
     "sepia": dict(dark=False, window="#efe6d6", base="#fbf6ea", alt="#f4ecdc", button="#fbf6ea",
                   hover="#e2d6bd", text="#3b3226", disabled="#9a8f7c", border="#a89878",
                   shadow="#7a6e58", highlight="#a8602a", highlight_text="#ffffff"),
+    "gruvbox_light": dict(dark=False, window="#ebdbb2", base="#fbf1c7", alt="#f2e5bc",
+                          button="#fbf1c7", hover="#d5c4a1", text="#3c3836", disabled="#928374",
+                          border="#a89984", shadow="#7c6f64", highlight="#076678",
+                          highlight_text="#ffffff"),
+    "gruvbox_dark": dict(dark=True, window="#282828", base="#1d2021", alt="#32302f",
+                         button="#3c3836", hover="#504945", text="#ebdbb2", disabled="#928374",
+                         border="#665c54", shadow="#141617", highlight="#d79921",
+                         highlight_text="#1d2021"),
+    "dracula": dict(dark=True, window="#282a36", base="#21222c", alt="#343746", button="#44475a",
+                    hover="#565a73", text="#f8f8f2", disabled="#8a92b8", border="#6272a4",
+                    shadow="#191a21", highlight="#bd93f9", highlight_text="#21222c"),
+    "forest": dict(dark=True, window="#1b2a22", base="#14201a", alt="#243a2e", button="#2c4638",
+                   hover="#3a5c48", text="#e3efe6", disabled="#8aa594", border="#5a7f68",
+                   shadow="#0b120e", highlight="#5fae7f", highlight_text="#0b120e"),
     "high_contrast": dict(dark=True, window="#000000", base="#000000", alt="#161616",
                           button="#1c1c1c", hover="#3a3a3a", text="#ffffff", disabled="#9a9a9a",
                           border="#ffffff", shadow="#000000", highlight="#ffd400",

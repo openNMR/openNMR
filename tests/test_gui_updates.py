@@ -25,7 +25,8 @@ def window(qapp):
 
 
 def _newer(version="9.9.9", url="https://dl/openNMR-setup.exe"):
-    info = update.UpdateInfo(version=version, url=url, notes="Faster fits.")
+    info = update.UpdateInfo(version=version, url=url, notes="Faster fits.",
+                             asset_name=url.rsplit("/", 1)[-1])      # a release with an installer attached
     return update.UpdateCheck("newer", "0.1.0", info=info, latest_version=version,
                               release_page="https://github.com/o/r/releases/tag/v9.9.9")
 

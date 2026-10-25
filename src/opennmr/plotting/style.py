@@ -457,7 +457,7 @@ def apply_default_font(font='Arial'):
     without ``font`` installed still gets *a* clean sans-serif rather
     than a warning and a silent substitution to matplotlib's own
     default) and for mathtext (``mathtext.rm``/``it``/``bf``, which
-    govern the actual glyphs behind every ``\mathregular{}`` in a
+    govern the actual glyphs behind every ``\\mathregular{}`` in a
     nuclide axis label -- see :func:`opennmr.core.registry.NUC_label`
     -- since those are never reachable through a per-``Text``-artist
     ``set_fontfamily()`` call).

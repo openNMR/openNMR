@@ -176,3 +176,17 @@ def test_the_install_button_is_off_while_installing(qapp, monkeypatch):
     panel.install_button.click()
     assert seen == [(False, False, False)]
     assert panel.install_button.isEnabled()                   # and back on afterwards
+
+
+def test_a_release_without_an_installer_is_not_installable(qapp, monkeypatch):
+    """A release that has only GitHub's source archives (no installer for this system) must
+    not show Install, and must say why -- it used to offer the source archive as the installer."""
+    panel, _ = _panel(qapp, monkeypatch)
+    info = update.UpdateInfo(version="9.9.9", url="https://github.com/o/r/releases/tag/v9.9.9",
+                             asset_name="")
+    panel.last_result = update.UpdateCheck("newer", "0.1.0", info=info, latest_version="9.9.9",
+                                           release_page="https://github.com/o/r/releases/tag/v9.9.9")
+    panel.check_now()
+    assert panel.install_button.isHidden() and panel.download_button.isHidden()
+    assert not panel.release_page_button.isHidden()
+    assert "no installer for your system" in panel.status_label.text()

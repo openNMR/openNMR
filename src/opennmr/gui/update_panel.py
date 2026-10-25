@@ -365,10 +365,19 @@ class UpdatesPanel(QWidget):
             text += update.update_instructions(self._kind, info.version, self.source())
             if upgrade_blocker:
                 text += f"\n({upgrade_blocker})"
+        no_installer = self._kind == "app" and not info.asset_name
+        if no_installer:
+            # The release exists but has nothing for this system attached (a source-code
+            # archive is never offered as an installer): say so and leave the release
+            # page as the way on.
+            text += ("\n\nThis release has no installer for your system attached yet, so openNMR "
+                     "cannot install it automatically. The release page lists what is available.")
         if notes:
             text += f"\n\nWhat's new:\n{notes}"
         self.status_label.setText(text)
-        if self._kind == "app":
+        if no_installer:
+            pass
+        elif self._kind == "app":
             self.install_button.setText(f"Install openNMR {info.version}")
             self.install_button.show()
             self.download_button.show()

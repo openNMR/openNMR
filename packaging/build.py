@@ -18,6 +18,8 @@ an MSI, a ``.deb``/AppImage) is a further, not-yet-built step -- see
 from __future__ import annotations
 
 import os
+import re
+import subprocess
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,6 +74,50 @@ def _make_icon() -> str | None:
     except Exception:  # noqa: BLE001 -- best-effort; fall through to no icon
         return None
     return None
+
+
+#: Library directories of the distribution itself. A libexpat found anywhere else (conda,
+#: a python.org build, pyenv) is private to the Python being frozen.
+SYSTEM_LIB_PREFIXES = ("/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/")
+
+
+def private_expat_from_ldd(ldd_output: str) -> str | None:
+    """The path of the ``libexpat`` that ``pyexpat`` resolved to in ``ldd`` output, when it is not
+    one of the distribution's own (``None`` for a system one, or when nothing was found).
+
+    PyInstaller leaves ``libexpat`` out of a Linux bundle as a "system" library, so a Python built
+    against a newer expat than the machine running the app (conda's, say, on Ubuntu 22.04) fails at
+    start-up: ``undefined symbol: XML_SetAllocTrackerActivationThreshold``. Bundling the library
+    the Python was actually linked against fixes that; a distribution's own expat is the one the
+    user's system already has, so it is left alone."""
+    match = re.search(r"^\s*libexpat\.so[.\d]*\s*=>\s*(\S+)", ldd_output, flags=re.MULTILINE)
+    if match is None:
+        return None
+    path = match.group(1)
+    if path.startswith(SYSTEM_LIB_PREFIXES) or not os.path.isabs(path):
+        return None
+    return path
+
+
+def _expat_args(platform: str | None = None, run=subprocess.run) -> list:
+    """``--add-binary`` arguments bundling a private ``libexpat`` (Linux only; see above)."""
+    platform = sys.platform if platform is None else platform
+    if not platform.startswith("linux"):
+        return []
+    import importlib.util
+    spec = importlib.util.find_spec("pyexpat")
+    origin = getattr(spec, "origin", None)
+    if not origin or not os.path.isfile(origin):
+        return []
+    try:
+        output = run(["ldd", origin], capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout
+    except OSError:
+        return []
+    path = private_expat_from_ldd(output)
+    if path is None:
+        return []
+    print(f"Bundling the Python's own libexpat: {path}")
+    return ["--add-binary", f"{os.path.realpath(path)}{os.pathsep}."]
 
 
 def _fix_qt_plugins() -> None:
@@ -240,6 +286,7 @@ def main() -> int:
         "--exclude-module", "nmrglue",
         "--osx-bundle-identifier", BUNDLE_ID,
     ]
+    args += _expat_args()
     icon = _make_icon()
     if icon:
         args += ["--icon", icon]
