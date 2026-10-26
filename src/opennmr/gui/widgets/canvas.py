@@ -448,13 +448,18 @@ class _Toolbar(NavigationToolbar2QT):
         rendering (see :meth:`MplCanvas.export_full_resolution`) --
         applies no matter how this is triggered (this toolbar's own
         Save icon, or programmatically, e.g. the File menu's Save
-        Figure As…), since both end up calling this same method."""
-        bound_save = super().save_figure
+        Figure As…), since both end up calling this same method.
+
+        Since 0.8.4 an :class:`MplCanvas` first shows a preview of the
+        figure exactly as it will be written (explicit user request:
+        "a preview that accurately reflects the position of the legend,
+        text size relative to the figure size"); see
+        :mod:`opennmr.gui.figure_preview_dialog`."""
         owner = self.parent()
         if isinstance(owner, MplCanvas):
-            owner.export_full_resolution(lambda: bound_save(*args))
-        else:
-            bound_save(*args)
+            owner.open_export_preview()
+            return
+        super().save_figure(*args)
 
 
 class _ProjectionStyleDialog(QDialog):
@@ -4427,6 +4432,10 @@ class MplCanvas(QWidget):
     #: drawn): a listener that depends on what is on show re-checks once
     #: the event loop is back (QTimer.singleShot(0, ...)).
     figureCleared = Signal()
+    #: ``(dpi, width_in, height_in)`` chosen in the Save Figure preview
+    #: with "Keep for later exports" ticked -- the main window copies it
+    #: into Plot Style ▸ Export so every canvas follows.
+    exportSettingsKept = Signal(float, float, float)
 
     #: Who drew the figure on show, for its right-click plot options
     #: (``register_plot_options``): set by the drawer after drawing,
@@ -5993,6 +6002,19 @@ class MplCanvas(QWidget):
         if values.get("axis_label_style") not in (None, "brackets", "slash"):
             values.pop("axis_label_style")
         self.set_style(**values)
+
+    #: Unit the Save Figure preview shows lengths in ("in" or "cm");
+    #: set by Settings ▸ Interface ▸ Export size in.
+    export_length_unit = "in"
+
+    def open_export_preview(self) -> str | None:
+        """File ▸ Save Figure As…: preview the figure as it will be
+        written, then save it. Returns the path written, or ``None``."""
+        from ..figure_preview_dialog import FigurePreviewDialog
+        dialog = FigurePreviewDialog(self, parent=self.window(), unit=self.export_length_unit)
+        dialog.settingsKept.connect(self.exportSettingsKept)
+        dialog.exec()
+        return dialog.saved_path
 
     def set_export_settings(self, *, dpi=None, fig_width=None, fig_height=None) -> None:
         """DPI/figure size (inches) for **exported** figures only --

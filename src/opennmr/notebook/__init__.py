@@ -79,6 +79,8 @@ from .relaxometry import find_integration_regions, correlation_matrix
 # DFT-calculated tensors (CASTEP .magres, VASP OUTCAR) -> sites (2026-10-06).
 from . import dft_nmr
 from .dft_nmr import read_calculation, dft_sites, simulate_dft, plot_dft_tensors
+from . import dft_structure
+from .dft_structure import plot_dft_structure
 from . import dft_calibration
 from .dft_calibration import fit_calibration, reference_point, plot_calibration
 from . import fit_correlation
@@ -394,6 +396,7 @@ __all__ = [
     "stretched_decay", "stretched_recovery", "RELAXATION_MODELS",
     "relaxometry", "find_integration_regions", "correlation_matrix",
     "dft_nmr", "read_calculation", "dft_sites", "simulate_dft", "plot_dft_tensors",
+    "dft_structure", "plot_dft_structure",
     "dft_calibration", "fit_calibration", "reference_point", "plot_calibration",
     "isotopes", "resolve_links", "frequency_ratio", "to_observed_ppm", "isotope_partners",
     "partner_factors",

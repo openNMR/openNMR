@@ -149,8 +149,9 @@ def _compare(window, spectra, labels):
 def test_compare_sections_in_order(window):
     page = window.side_tabs.widget(window._compare_tab_index)
     titles = [s.title() for s in page.findChildren(CollapsibleSection)]
-    # DNP moved to Apply ▸ DNP (2026-09-30).
-    assert titles == ["Spectrum Arithmetic"]
+    # DNP moved to Apply ▸ DNP (2026-09-30); the plot options went into a
+    # "Compare Controls" section in 0.8.4. Every section starts collapsed.
+    assert titles == ["Compare Controls", "Spectrum Arithmetic"]
     assert all(not s.isExpanded() for s in page.findChildren(CollapsibleSection))
 
 

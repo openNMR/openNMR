@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
@@ -33,7 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..notebook import dft_calibration as dcal
-from ..notebook import crystal_nmr, dft_nmr
+from ..notebook import crystal_nmr, dft_nmr, dft_structure
 from .combined_panels import CombinedHamiltonianPanel, _spin_box
 
 _FILE_FILTER = ("DFT output (*.magres OUTCAR* *.out *.outp *.log *.LOG);;All files (*)")
@@ -612,12 +613,64 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self.dft_tensor_style_combo = QComboBox()
         self.dft_tensor_style_combo.addItem("Ellipsoid and axes", "ellipsoid")
         self.dft_tensor_style_combo.addItem("Frequency surface", "surface")
+        # 0.8.4 (explicit user request): the tensors on the structure,
+        # centred on their atoms -- notebook.dft_structure.
+        self.dft_tensor_style_combo.addItem("On the structure", "structure")
+        self.dft_tensor_style_combo.setToolTip(
+            "On the structure: the cell (or molecule) with the tensors of the chosen site(s) "
+            "centred on their atoms, in the same frame, so their orientation relative to the "
+            "bonds is seen.")
         self.dft_tensor_style_combo.currentIndexChanged.connect(lambda _i: self._sync_dft())
         form.addRow("Show:", self.dft_tensor_style_combo)
         self.dft_relative_combo = QComboBox()
         self.dft_relative_combo.addItem("Anisotropic part (δ − δiso)", "iso")
         self.dft_relative_combo.addItem("Whole frequency (δ)", "zero")
         form.addRow("Frequency:", self.dft_relative_combo)
+        self.dft_structure_sites_combo = QComboBox()
+        self.dft_structure_sites_combo.addItem("This site", "one")
+        self.dft_structure_sites_combo.addItem("Every site in the table", "all")
+        self.dft_structure_sites_combo.setToolTip(
+            "Whose tensors to draw. All of them share one length scale, so their sizes "
+            "compare directly.")
+        form.addRow("Tensors of:", self.dft_structure_sites_combo)
+        self.dft_structure_tensor_combo = QComboBox()
+        for key, text in (("shift_aniso", "Shift anisotropy δ − δiso (ovaloid)"),
+                          ("shift", "Shift tensor δ (ellipsoid, |δii|)"),
+                          ("efg", "EFG (ovaloid)")):
+            self.dft_structure_tensor_combo.addItem(text, key)
+        self.dft_structure_tensor_combo.setToolTip(
+            "Ovaloid: in each direction n the distance |nᵀTn|, red where positive and blue "
+            "where negative – the only faithful glyph of a traceless tensor (the anisotropy, "
+            "the EFG). Ellipsoid: semi-axes |δ11|, |δ22|, |δ33|.")
+        form.addRow("Tensor:", self.dft_structure_tensor_combo)
+        self.dft_structure_region_combo = QComboBox()
+        self.dft_structure_region_combo.addItem("Unit cell (or whole molecule)", "cell")
+        self.dft_structure_region_combo.addItem("Atoms within a radius of the site(s)", "radius")
+        self.dft_structure_region_combo.currentIndexChanged.connect(lambda _i: self._sync_dft())
+        form.addRow("Atoms shown:", self.dft_structure_region_combo)
+        self.dft_structure_radius_spin = _spin_box(
+            1.0, 30.0, 5.0, 2, " Å", step=0.5,
+            tip="Every atom, periodic images included, within this distance of a chosen site.")
+        form.addRow("Radius:", self.dft_structure_radius_spin)
+        self.dft_structure_size_spin = _spin_box(
+            0.1, 10.0, 1.0, 2, " Å", step=0.1,
+            tip="Size of the largest tensor drawn (its largest extent); the rest to the same "
+                "scale.")
+        form.addRow("Tensor size:", self.dft_structure_size_spin)
+        self.dft_structure_bonds_check = QCheckBox("Draw bonds")
+        self.dft_structure_bonds_check.setChecked(True)
+        self.dft_structure_bonds_check.setToolTip(
+            "Between atoms closer than the tolerance × the sum of their covalent radii; never "
+            "between two metals. A guide to the eye only.")
+        self.dft_structure_bond_spin = _spin_box(
+            0.8, 1.6, 1.15, 2, " ×", step=0.05, tip="Bond tolerance (× sum of covalent radii).")
+        bond_row = QHBoxLayout()
+        bond_row.addWidget(self.dft_structure_bonds_check)
+        bond_row.addWidget(self.dft_structure_bond_spin)
+        form.addRow("Bonds:", bond_row)
+        self._structure_rows = (self.dft_structure_sites_combo, self.dft_structure_tensor_combo,
+                                self.dft_structure_region_combo, self.dft_structure_radius_spin,
+                                self.dft_structure_size_spin, bond_row)
         self._tensor_form = form
         self.dft_show_tensor_button = QPushButton("Show Tensors")
         self.dft_show_tensor_button.setToolTip(
@@ -1080,6 +1133,13 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self.dft_delete_calibration_button.setEnabled(has_saved)
         self._tensor_form.setRowVisible(self.dft_relative_combo,
                                         self.dft_tensor_style_combo.currentData() == "surface")
+        on_structure = self.dft_tensor_style_combo.currentData() == "structure"
+        for row in self._structure_rows:
+            self._tensor_form.setRowVisible(row, on_structure)
+        if on_structure:
+            self._tensor_form.setRowVisible(
+                self.dft_structure_radius_spin,
+                self.dft_structure_region_combo.currentData() == "radius")
         sample = self.calcs["sample"]
         periodic = sample is not None and sample.get("lattice") is not None
         cell_item = self.dft_frame_combo.model().item(0)
@@ -1213,9 +1273,48 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
                 return rec
         return self.model["atoms"][0]
 
+    def structure_arguments(self) -> dict:
+        """The "On the structure" options, as
+        :func:`opennmr.notebook.dft_structure.plot_dft_structure` takes them."""
+        return {"frame": self.dft_frame_combo.currentData(),
+                "tensor": self.dft_structure_tensor_combo.currentData(),
+                "region": self.dft_structure_region_combo.currentData(),
+                "radius": self.dft_structure_radius_spin.value(),
+                "tensor_size": self.dft_structure_size_spin.value(),
+                "bonds": self.dft_structure_bonds_check.isChecked(),
+                "bond_tolerance": self.dft_structure_bond_spin.value()}
+
+    def show_structure(self) -> bool:
+        """The structure with the chosen site's (or every site's) tensors."""
+        try:
+            records = ([self.tensor_record()]
+                       if self.dft_structure_sites_combo.currentData() == "one"
+                       else list(self.model["atoms"] if self.model else []))
+            if not records:
+                raise ValueError("Calculate the sites first.")
+            sample = self.calcs["sample"]
+            args = self.structure_arguments()
+            holder = {}
+
+            def draw(figure):
+                look = self._style() or {}
+                holder["notes"] = dft_structure.plot_dft_structure(
+                    sample, records, figure=figure,
+                    fontsize=float(look.get("labelsize") or 11.0),
+                    tensor_style=dict(look.get("tensor_style") or {}), **args)[1]
+            self._draw_tensors(draw)
+        except (ValueError, KeyError, np.linalg.LinAlgError) as exc:
+            self.dft_tensor_notes_label.setText(f"Cannot draw: {exc}")
+            return False
+        self.tensor_notes = holder.get("notes", [])
+        self.dft_tensor_notes_label.setText("\n".join(self.tensor_notes))
+        return True
+
     def show_tensors(self) -> bool:
         if self._draw_tensors is None:
             return False
+        if self.dft_tensor_style_combo.currentData() == "structure":
+            return self.show_structure()
         try:
             rec = self.tensor_record()
             frame = self.dft_frame_combo.currentData()

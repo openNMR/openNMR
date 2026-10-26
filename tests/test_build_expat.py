@@ -4,6 +4,8 @@ XML_SetAllocTrackerActivationThreshold``)."""
 import importlib.util
 import os
 
+import pytest
+
 _BUILD = os.path.join(os.path.dirname(__file__), "..", "packaging", "build.py")
 _spec = importlib.util.spec_from_file_location("opennmr_build_expat", _BUILD)
 build = importlib.util.module_from_spec(_spec)
@@ -33,6 +35,21 @@ def test_only_linux_gets_the_extra_binary():
     assert build._expat_args("win32") == [] and build._expat_args("darwin") == []
 
 
+def test_the_library_is_staged_under_its_soname_not_the_versioned_name(tmp_path):
+    """The bug that shipped a broken AppImage: the link's target (``libexpat.so.1.12.2``) was
+    bundled, leaving nothing called ``libexpat.so.1`` for pyexpat to find."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "libexpat.so.1.12.2").write_bytes(b"real library")
+    try:
+        os.symlink("libexpat.so.1.12.2", lib / "libexpat.so.1")
+    except OSError:                                          # Windows without symlink rights
+        pytest.skip("cannot create symlinks here")
+    staged = build.stage_expat(str(lib / "libexpat.so.1"), str(tmp_path / "stage"))
+    assert os.path.basename(staged) == "libexpat.so.1"
+    assert not os.path.islink(staged) and open(staged, "rb").read() == b"real library"
+
+
 def test_the_extra_binary_is_added_beside_the_executable(tmp_path):
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -41,9 +58,9 @@ def test_the_extra_binary_is_added_beside_the_executable(tmp_path):
     class Result:
         stdout = f"\tlibexpat.so.1 => {lib / 'libexpat.so.1'} (0x1)\n"
 
-    args = build._expat_args("linux", run=lambda *a, **k: Result())
+    args = build._expat_args("linux", run=lambda *a, **k: Result(), stage_dir=str(tmp_path / "stage"))
     if os.path.isfile(getattr(importlib.util.find_spec("pyexpat"), "origin", "") or ""):
         assert args[0] == "--add-binary" and args[1].endswith(os.pathsep + ".")
-        assert os.path.join("lib", "libexpat.so.1") in args[1].replace("/", os.sep)
+        assert os.path.isfile(tmp_path / "stage" / "libexpat.so.1")
     else:                                                    # a Python with a built-in pyexpat
         assert args == []

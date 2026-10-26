@@ -238,6 +238,12 @@ class _CompareArrowKeys(QObject):
         if event.type() != QEvent.Type.KeyPress:
             return False
         key = event.key()
+        window = self._window
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and obj is window.compare_list:
+            if window.compare_list.currentRow() < 0:
+                return False
+            window._on_remove_compare_clicked()
+            return True
         if key not in (Qt.Key.Key_Up, Qt.Key.Key_Down):
             return False
         if event.modifiers() & (Qt.KeyboardModifier.ShiftModifier
@@ -507,6 +513,11 @@ class MainWindow(QMainWindow):
         # Compare entries the user dragged in from Open experiments --
         # kept through selection-driven rebuilds of the Compare list.
         self._compare_pinned_entries: list[tuple[int, int | None]] = []
+        # Compare entries the user removed (Remove button, Delete key,
+        # right-click): kept out of selection-driven rebuilds until the
+        # spectrum is deselected in Open experiments (and so can come
+        # back by selecting it again) or dragged back in. 0.8.4.
+        self._compare_removed_entries: set[tuple[int, int | None]] = set()
         # Arial (falling back gracefully if it isn't installed), not
         # matplotlib's own DejaVu Sans -- explicit user request: "add
         # Arial as the default font, not the unpleasant matplotlib
@@ -999,6 +1010,7 @@ class MainWindow(QMainWindow):
             canvas.styleEditedFromMenu.connect(
                 lambda c=canvas: self._on_canvas_style_edited_from_menu(c))
             canvas.linesChanged.connect(lambda c=canvas: self._on_canvas_lines_changed(c))
+            canvas.exportSettingsKept.connect(self._on_export_settings_kept)
         # Before any tab is current, so _style_target_canvases falls
         # back to every canvas and the saved defaults land everywhere.
         self._apply_saved_style_defaults()
@@ -2534,14 +2546,19 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
+        # The list and the buttons that edit it stay on show; the plot
+        # options under them (layout, normalisation, 2D and panel options,
+        # Plot / Fit Curve) are one collapsible "Compare Controls" section
+        # (explicit user request, 0.8.4: "tidy this section"), collapsed
+        # like every other section when a panel opens.
+        compare_controls = QWidget()
+        controls_layout = QVBoxLayout(compare_controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
         compare_intro_label = QLabel(
-            "Ctrl/Cmd-click (or Shift-click) several 1D spectra in the "
-            "'Open experiments' list (bottom left) to start a comparison."
-            "For pseudo-2D spectra, the slices are filled in automatically, in order."
-            "You can select/deselect spectra to include/exclude spectra. Move Up/"
-            "Down to reorder the plot. Right-click for Plot (jump to "
-            "the Compare canvas tab) or Fit Curve (relaxation/"
-            "diffusion) across whichever experiments are checked here."
+            "Ctrl/Cmd-click (or Shift-click) several spectra in Open experiments, or drag "
+            "them here. A pseudo-2D fills in its slices. Untick to hide a spectrum; "
+            "Remove (or Delete) takes it out of the list. Layout, normalisation, Plot and "
+            "Fit Curve are under Compare Controls."
         )
         compare_intro_label.setWordWrap(True)
         layout.addWidget(compare_intro_label)
@@ -2607,6 +2624,17 @@ class MainWindow(QMainWindow):
         uncheck_all_button.clicked.connect(lambda: self._set_all_compare_checked(False))
         check_row.addWidget(check_all_button)
         check_row.addWidget(uncheck_all_button)
+        # Remove/Clear take entries out of the list entirely (explicit
+        # user request, 0.8.4), not just untick them.
+        self.compare_remove_button = QPushButton("Remove")
+        self.compare_remove_button.setToolTip(
+            "Take the highlighted spectrum out of the Compare list (also the Delete key). "
+            "It stays out until you deselect it in Open experiments and select it again, "
+            "or drag it back in.")
+        self.compare_remove_button.clicked.connect(self._on_remove_compare_clicked)
+        self.compare_clear_button = QPushButton("Clear")
+        self.compare_clear_button.setToolTip("Take every spectrum out of the Compare list.")
+        self.compare_clear_button.clicked.connect(self._on_clear_compare_clicked)
         layout.addLayout(check_row)
 
         reorder_row = QHBoxLayout()
@@ -2619,6 +2647,11 @@ class MainWindow(QMainWindow):
         reorder_row.addWidget(move_up_button)
         reorder_row.addWidget(move_down_button)
         layout.addLayout(reorder_row)
+
+        remove_row = QHBoxLayout()
+        remove_row.addWidget(self.compare_remove_button)
+        remove_row.addWidget(self.compare_clear_button)
+        layout.addLayout(remove_row)
 
         compare_form = QFormLayout()
 
@@ -2661,7 +2694,7 @@ class MainWindow(QMainWindow):
         self.compare_rg_check.toggled.connect(lambda _on: self._on_compare_controls_changed())
         compare_form.addRow("", self.compare_rg_check)
 
-        layout.addLayout(compare_form)
+        controls_layout.addLayout(compare_form)
 
         # 2D spectra: overlay or side by side, and insets (explicit user
         # request, bringing in the notebook's NMR2D_overlay_plot /
@@ -2672,7 +2705,7 @@ class MainWindow(QMainWindow):
         self.compare_2d_controls.link_toggled.connect(
             lambda on: self.compare_canvas.set_panels_linked(on))
         self.compare_2d_controls.setVisible(False)
-        layout.addWidget(self.compare_2d_controls)
+        controls_layout.addWidget(self.compare_2d_controls)
 
         # 1D spectra as separate panels (Layout ▸ Panels): linking, grid
         # columns and which panel each spectrum goes in.
@@ -2681,7 +2714,7 @@ class MainWindow(QMainWindow):
         self.compare_panels_controls.link_toggled.connect(
             lambda x, y: self.compare_canvas.set_spectrum_panels_linked(x, y))
         self.compare_panels_controls.setVisible(False)
-        layout.addWidget(self.compare_panels_controls)
+        controls_layout.addWidget(self.compare_panels_controls)
 
         compare_action_row = QHBoxLayout()
         compare_plot_button = QPushButton("Plot")
@@ -2705,7 +2738,10 @@ class MainWindow(QMainWindow):
         )
         compare_fit_curve_button.clicked.connect(self._on_fit_curve_compare_stack_action)
         compare_action_row.addWidget(compare_fit_curve_button)
-        layout.addLayout(compare_action_row)
+        controls_layout.addLayout(compare_action_row)
+        self._compare_controls_section = CollapsibleSection(
+            "Compare Controls", content=compare_controls, expanded=False)
+        layout.addWidget(self._compare_controls_section)
 
         # Spectrum arithmetic: the notebook's arithmetic.combine_spectra
         # with every option it takes -- a sign and factor per spectrum,
@@ -4072,6 +4108,7 @@ class MainWindow(QMainWindow):
         self._update_processing_preview_tab_visibility(None)
         self.compare_status_label.setText("Select at least two 1D spectra to compare.")
         self._compare_pinned_entries = []
+        self._compare_removed_entries = set()
         self.compare_list.clear()
         self._update_compare_tab_visibility()
         self.peak_table.setRowCount(0)
@@ -5833,6 +5870,13 @@ class MainWindow(QMainWindow):
         if chosen.isValid():
             self._set_custom_contour_colour(chosen.name())
 
+    def _on_export_settings_kept(self, dpi: float, width: float, height: float) -> None:
+        """The Save Figure preview's size/DPI, kept for later exports:
+        shown in Plot Style ▸ Export (which passes them on as usual)."""
+        self.output_dpi_spin.setValue(int(round(dpi)))
+        self.output_fig_width_spin.setValue(float(width))
+        self.output_fig_height_spin.setValue(float(height))
+
     def _on_output_export_settings_changed(self, *_args) -> None:
         kwargs = self._current_output_export_kwargs()
         for canvas in self._style_target_canvases():
@@ -7335,6 +7379,8 @@ class MainWindow(QMainWindow):
         unit = unit if unit in LengthSpinBox.UNITS else "in"
         for spin in (self.output_fig_width_spin, self.output_fig_height_spin):
             spin.set_unit(unit)
+        for canvas in self._all_canvases():
+            canvas.export_length_unit = unit       # the Save Figure preview
         if self.export_unit_combo.currentData() != unit:
             blocked = self.export_unit_combo.blockSignals(True)
             self.export_unit_combo.setCurrentIndex(self.export_unit_combo.findData(unit))
@@ -7517,7 +7563,12 @@ class MainWindow(QMainWindow):
         # shorter length.
         n = len(self.session)
         rows = [r for r in rows if 0 <= r < n]
-        entries = [(r, None) for r in rows]
+        # A removed whole spectrum stays out only while it is still
+        # selected in Open experiments: deselecting it forgets the
+        # removal, so selecting it again brings it back.
+        self._compare_removed_entries = {
+            e for e in self._compare_removed_entries if e[1] is not None or e[0] in rows}
+        entries = [(r, None) for r in rows if (r, None) not in self._compare_removed_entries]
         # Dragged-in entries are the user's own additions, not a
         # reflection of the selection: keep them (see
         # _on_experiments_dropped_on_compare).
@@ -7533,8 +7584,9 @@ class MainWindow(QMainWindow):
         n_slices = spectrum.data.shape[0]
         entries = [(row, slice_index) for slice_index in range(1, n_slices + 1)]
         # A fresh "look at this series" replaces the list, dragged-in
-        # entries included.
+        # entries included, and brings back any slices removed earlier.
         self._compare_pinned_entries = []
+        self._compare_removed_entries = set()
         self._rebuild_compare_list(entries, preserve_previous=False)
 
     def _rebuild_compare_list(self, entries: list[tuple[int, int | None]], preserve_previous: bool = True,
@@ -7734,6 +7786,7 @@ class MainWindow(QMainWindow):
         at = len(current) if at is None or not (0 <= at <= len(current)) else at
         order = current[:at] + new + current[at:]
         self._compare_pinned_entries += [e for e in new if e not in self._compare_pinned_entries]
+        self._compare_removed_entries.difference_update(new)
         self._rebuild_compare_list(order, order=order)
         self.statusBar().showMessage(
             f"Added {len(new)} entr{'y' if len(new) == 1 else 'ies'} to Compare.", 5000)
@@ -7752,6 +7805,9 @@ class MainWindow(QMainWindow):
             (r - 1 if r > removed else r, k)
             for r, k in self._compare_pinned_entries if r != removed
         ]
+        self._compare_removed_entries = {
+            (r - 1 if r > removed else r, k)
+            for r, k in self._compare_removed_entries if r != removed}
         # A projection made from the removed 1D (or belonging to the
         # removed 2D) goes with it rather than lingering on the plot
         # with nothing in the list to say where it came from.
@@ -7887,12 +7943,46 @@ class MainWindow(QMainWindow):
 
     def _remove_compare_entry(self, entry) -> None:
         """Drop one entry from the Compare list (and its pin)."""
-        self._compare_pinned_entries = [e for e in self._compare_pinned_entries if e != entry]
+        self._remove_compare_entries([entry])
+
+    def _remove_compare_entries(self, entries) -> None:
+        """Take ``entries`` out of the Compare list entirely -- not just
+        unticked: they stay out when the Open experiments selection
+        changes, until deselected there and selected again (or dragged
+        back in). Explicit user request, 0.8.4: "the option to entirely
+        remove a spectrum from the compare list box"."""
+        entries = [tuple(e) for e in entries if e is not None]
+        if not entries:
+            return
+        gone = set(entries)
+        self._compare_pinned_entries = [e for e in self._compare_pinned_entries if e not in gone]
+        self._compare_removed_entries |= gone
         order = [self.compare_list.item(i).data(Qt.ItemDataRole.UserRole)
                  for i in range(self.compare_list.count())]
-        order = [e for e in order if e != entry]
+        old_row = self.compare_list.currentRow()
+        order = [e for e in order if e not in gone]
         self._rebuild_compare_list(order, order=order)
+        # Keep a row highlighted near the one removed, so pressing Delete
+        # again removes the next one.
+        if order and old_row >= 0:
+            self.compare_list.setCurrentRow(min(old_row, len(order) - 1))
         self._refresh_compare_view_if_active(switch_tab=False)
+        self.statusBar().showMessage(
+            f"Removed {len(gone)} entr{'y' if len(gone) == 1 else 'ies'} from Compare.", 5000)
+
+    def _on_remove_compare_clicked(self) -> None:
+        """Compare ▸ Remove: the highlighted row(s) out of the list."""
+        items = self.compare_list.selectedItems()
+        if not items and self.compare_list.currentItem() is not None:
+            items = [self.compare_list.currentItem()]
+        self._remove_compare_entries(
+            [item.data(Qt.ItemDataRole.UserRole) for item in items])
+
+    def _on_clear_compare_clicked(self) -> None:
+        """Compare ▸ Clear: every entry out of the list."""
+        self._remove_compare_entries(
+            [self.compare_list.item(i).data(Qt.ItemDataRole.UserRole)
+             for i in range(self.compare_list.count())])
 
     def _on_fit_curve_compare_stack_action(self) -> None:
         stack = self._compare_checked_1d_stack()
@@ -16376,6 +16466,7 @@ class MainWindow(QMainWindow):
         superimposed, and Compare shown."""
         entries = [(r, None) for r in rows]
         self._compare_pinned_entries = list(entries)
+        self._compare_removed_entries.difference_update(entries)
         self._rebuild_compare_list(entries, preserve_previous=False)
         for i in range(self.compare_list.count()):
             self.compare_list.item(i).setCheckState(Qt.CheckState.Checked)

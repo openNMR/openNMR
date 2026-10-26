@@ -18,6 +18,7 @@ an MSI, a ``.deb``/AppImage) is a further, not-yet-built step -- see
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -94,12 +95,27 @@ def private_expat_from_ldd(ldd_output: str) -> str | None:
     if match is None:
         return None
     path = match.group(1)
-    if path.startswith(SYSTEM_LIB_PREFIXES) or not os.path.isabs(path):
+    # posixpath as well as os.path: ldd output is a POSIX path, and on
+    # Windows (Python 3.13+) os.path.isabs("/home/...") is False because the
+    # path has no drive -- which failed the tests there.
+    if path.startswith(SYSTEM_LIB_PREFIXES) or not (posixpath.isabs(path)
+                                                    or os.path.isabs(path)):
         return None
     return path
 
 
-def _expat_args(platform: str | None = None, run=subprocess.run) -> list:
+def stage_expat(path: str, stage_dir: str) -> str:
+    """Copy the library under the name ``ldd`` reported (its SONAME, ``libexpat.so.1``), not the
+    versioned file the link points at: ``pyexpat`` asks for the SONAME, and a bundle holding only
+    ``libexpat.so.1.12.2`` leaves the system's older copy to answer."""
+    import shutil
+    os.makedirs(stage_dir, exist_ok=True)
+    staged = os.path.join(stage_dir, os.path.basename(path))
+    shutil.copy2(os.path.realpath(path), staged)
+    return staged
+
+
+def _expat_args(platform: str | None = None, run=subprocess.run, stage_dir: str | None = None) -> list:
     """``--add-binary`` arguments bundling a private ``libexpat`` (Linux only; see above)."""
     platform = sys.platform if platform is None else platform
     if not platform.startswith("linux"):
@@ -116,8 +132,9 @@ def _expat_args(platform: str | None = None, run=subprocess.run) -> list:
     path = private_expat_from_ldd(output)
     if path is None:
         return []
-    print(f"Bundling the Python's own libexpat: {path}")
-    return ["--add-binary", f"{os.path.realpath(path)}{os.pathsep}."]
+    staged = stage_expat(path, stage_dir or os.path.join(BUILD_DIR, "expat"))
+    print(f"Bundling the Python's own libexpat: {path} -> {os.path.basename(staged)}")
+    return ["--add-binary", f"{staged}{os.pathsep}."]
 
 
 def _fix_qt_plugins() -> None:
