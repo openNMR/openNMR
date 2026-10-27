@@ -64,7 +64,11 @@ def test_label_text_style_in_the_notebook():
     assert t.get_fontfamily() == ["Times New Roman", "DejaVu Sans"]
     # Left alone, the text is ordinary: not bold, not italic, horizontal.
     plain = il.add_integral_labels(ax, [(1.0, "x")])[0]
-    assert plain.get_fontweight() == "normal" and plain.get_fontstyle() == "normal"
+    # "regular" and "normal" are the same weight (400); setup_plotting()
+    # sets rcParams' font.weight to "regular", so which one is reported
+    # depends on whether an earlier test in this process called it.
+    assert plain.get_fontweight() in ("normal", "regular", 400)
+    assert plain.get_fontstyle() == "normal"
     assert plain.get_rotation() == 0
     fig.canvas.draw()          # renders without a missing-glyph failure
     plt.close(fig)
@@ -104,7 +108,7 @@ def test_label_style_controls_restyle_the_text(qapp):
     window.integral_labels_check.setChecked(True)
     tick_size = window.canvas.ax.xaxis.get_ticklabels()[0].get_fontsize()
     assert _texts(window)[0].get_fontsize() == tick_size          # "Match axes"
-    assert _texts(window)[0].get_fontweight() == "normal"
+    assert _texts(window)[0].get_fontweight() in ("normal", "regular", 400)   # the same weight
     window.integral_labels_size_spin.setValue(14)
     window._integral_label_colour = "#cc0000"
     window.integral_labels_bold_check.setChecked(True)

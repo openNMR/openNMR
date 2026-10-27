@@ -13,6 +13,7 @@ from .accessibility import (
     ACCESSIBLE_QUALITATIVE_PALETTES, PALETTE_DISPLAY_NAMES,
 )
 from .labels import label_problem, safe_label, label_traces, set_legend_linewidth
+from .legend_place import LEGEND_POSITIONS, legend_placement, make_room_for_legend
 from . import lines
 from .lines import LINESTYLES, data_lines, apply_line_styles, normalise_linestyle, linestyle_name
 from .oned import plot_1d, plot_1d_stack, plot_1d_heatmap, safe_xlim
@@ -36,5 +37,6 @@ __all__ = [
     "plot_2d_contour", "multi_plot", "overlay_plot", "draw_insets", "inset_bounds", "crop_2d",
     "plot_1d_with_fit", "plot_2d_integrals", "plot_relaxation", "plot_dosy", "overlay_dosy",
     "plot_score_components",
+    "LEGEND_POSITIONS", "legend_placement", "make_room_for_legend",
     "LINESTYLES", "data_lines", "apply_line_styles", "normalise_linestyle", "linestyle_name",
 ]

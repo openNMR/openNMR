@@ -5048,13 +5048,50 @@ class MainWindow(QMainWindow):
         self.output_legend_checkbox.toggled.connect(self._on_output_legend_changed)
         style_form.addRow(self.output_legend_checkbox, section="Legend")
 
+        # Positions, columns and a custom place: user request (2026-10-27),
+        # "plot style options to be able to move the legend, or to make
+        # the legend multi-column" -- plotting.legend_placement, which the
+        # notebook functions use too.
+        from ..plotting.legend_place import LEGEND_POSITIONS
         self.output_legend_loc_combo = QComboBox()
-        self.output_legend_loc_combo.addItems([
-            "best", "upper right", "upper left", "lower left", "lower right", "center",
-        ])
+        self.output_legend_loc_combo.addItems(list(LEGEND_POSITIONS))
+        self.output_legend_loc_combo.setToolTip(
+            "Where the legend goes. \"outside right\": beside the plot, which is narrowed to "
+            "make room. \"custom\": its top-left corner at x, y below (fractions of the axes: "
+            "0, 1 is their top-left corner; beyond 0–1 is outside them, e.g. 0, 1.15 above).")
         self._narrow_combo(self.output_legend_loc_combo)
         self.output_legend_loc_combo.currentIndexChanged.connect(self._on_output_legend_changed)
         style_form.addRow("Legend position:", self.output_legend_loc_combo, section="Legend")
+
+        self.output_legend_columns_spin = TypedSpinBox()
+        self.output_legend_columns_spin.setRange(0, 12)
+        self.output_legend_columns_spin.setValue(0)
+        self.output_legend_columns_spin.setSpecialValueText("Auto")
+        self.output_legend_columns_spin.setToolTip(
+            "Columns of the legend. Auto: as the plot builds it (one column, or what that plot "
+            "chose).")
+        self.output_legend_columns_spin.valueChanged.connect(self._on_output_legend_changed)
+        style_form.addRow("Legend columns:", self.output_legend_columns_spin, section="Legend")
+
+        custom_row = QWidget()
+        custom_layout = QHBoxLayout(custom_row)
+        custom_layout.setContentsMargins(0, 0, 0, 0)
+        self.output_legend_x_spin = QDoubleSpinBox()
+        self.output_legend_y_spin = QDoubleSpinBox()
+        for spin, value, name in ((self.output_legend_x_spin, 1.02, "x"),
+                                  (self.output_legend_y_spin, 1.0, "y")):
+            spin.setRange(-1.0, 2.0)
+            spin.setSingleStep(0.02)
+            spin.setDecimals(2)
+            spin.setValue(value)
+            spin.setToolTip(f"The custom legend's top-left corner, {name} as a fraction of the "
+                            "axes (0–1 inside them).")
+            spin.valueChanged.connect(self._on_output_legend_changed)
+            custom_layout.addWidget(QLabel(name))
+            custom_layout.addWidget(spin)
+        custom_layout.addStretch(1)
+        style_form.addRow("Custom position:", custom_row, section="Legend")
+        self._sync_legend_place_controls()
 
         # --- Legend appearance ------------------------------------
         # Defaults: frameless, at the axis label size. Explicit user
@@ -5952,10 +5989,23 @@ class MainWindow(QMainWindow):
         colour = self._legend_facecolor
         self.legend_color_button.setText(colour if colour else "Legend background…")
 
+    def _legend_place_kwargs(self) -> dict:
+        """Plot Style ▸ Legend's position, columns and custom place."""
+        return {"legend_loc": self.output_legend_loc_combo.currentText(),
+                "legend_columns": self.output_legend_columns_spin.value(),
+                "legend_x": self.output_legend_x_spin.value(),
+                "legend_y": self.output_legend_y_spin.value()}
+
+    def _sync_legend_place_controls(self) -> None:
+        custom = self.output_legend_loc_combo.currentText() == "custom"
+        self.output_legend_x_spin.setEnabled(custom)
+        self.output_legend_y_spin.setEnabled(custom)
+
     def _on_output_legend_changed(self, *_args) -> None:
+        self._sync_legend_place_controls()
         for canvas in self._style_target_canvases():
             canvas.set_legend_visible(self.output_legend_checkbox.isChecked())
-            canvas.set_style(legend_loc=self.output_legend_loc_combo.currentText())
+            canvas.set_style(**self._legend_place_kwargs())
 
     def _refresh_style_scope_label(self) -> None:
         """Name the plot the controls are currently acting on -- "these
@@ -6008,6 +6058,9 @@ class MainWindow(QMainWindow):
             (self.output_legend_fontsize_spin, settings["legend_fontsize"] or 0),
             (self.output_legend_alpha_spin, settings["legend_framealpha"]),
             (self.output_legend_linewidth_spin, settings["legend_linewidth"] or 0.0),
+            (self.output_legend_columns_spin, int(settings.get("legend_columns") or 0)),
+            (self.output_legend_x_spin, float(settings.get("legend_x", 1.02))),
+            (self.output_legend_y_spin, float(settings.get("legend_y", 1.0))),
             (self.output_trace_label_slider, int(round(settings["trace_label_position"] * 100))),
             (self.output_trace_label_height_slider,
              int(round(settings.get("trace_label_height", 0.0) * 100))),
@@ -6062,6 +6115,7 @@ class MainWindow(QMainWindow):
         if loc >= 0:
             self.output_legend_loc_combo.setCurrentIndex(loc)
         self.output_legend_loc_combo.blockSignals(False)
+        self._sync_legend_place_controls()
         self.output_legend_checkbox.blockSignals(True)
         self.output_legend_checkbox.setChecked(bool(canvas._legend_visible))
         self.output_legend_checkbox.blockSignals(False)
@@ -6204,7 +6258,7 @@ class MainWindow(QMainWindow):
             canvas.set_style(**kwargs)
             canvas.set_export_settings(**export)
             canvas.set_legend_visible(self.output_legend_checkbox.isChecked())
-            canvas.set_style(legend_loc=self.output_legend_loc_combo.currentText())
+            canvas.set_style(**self._legend_place_kwargs())
         self.statusBar().showMessage("Plot style applied to every plot.", 5000)
 
     #: Where "Save as default" writes. Beside the probe gradient store,
@@ -6217,7 +6271,7 @@ class MainWindow(QMainWindow):
         starts from, for every plot."""
         payload = dict(self._current_output_style_kwargs())
         payload.update(self._current_output_export_kwargs())
-        payload["legend_loc"] = self.output_legend_loc_combo.currentText()
+        payload.update(self._legend_place_kwargs())
         try:
             os.makedirs(os.path.dirname(self._PLOT_STYLE_CONFIG_PATH), exist_ok=True)
             with open(self._PLOT_STYLE_CONFIG_PATH, "w", encoding="utf-8") as handle:
@@ -6249,7 +6303,10 @@ class MainWindow(QMainWindow):
                              (self.output_colorbar_gap_spin, "colorbar_gap"),
                              (self.output_dpi_spin, "dpi"),
                              (self.output_fig_width_spin, "fig_width"),
-                             (self.output_fig_height_spin, "fig_height")):
+                             (self.output_fig_height_spin, "fig_height"),
+                             (self.output_legend_columns_spin, "legend_columns"),
+                             (self.output_legend_x_spin, "legend_x"),
+                             (self.output_legend_y_spin, "legend_y")):
             if isinstance(saved.get(key), (int, float)):
                 widget.blockSignals(True)
                 widget.setValue(saved[key])
@@ -6401,7 +6458,7 @@ class MainWindow(QMainWindow):
         payload["contour_clevels"] = self.output_contour_levels_spin.value()
         payload["contour_level_mode"] = self.output_contour_mode_combo.currentData()
         payload["contour_power"] = self.output_contour_power_spin.value()
-        payload["legend_loc"] = self.output_legend_loc_combo.currentText()
+        payload.update(self._legend_place_kwargs())
         if targets and targets[0].style_settings().get("tensor_style"):
             payload["tensor_style"] = targets[0].style_settings()["tensor_style"]
         if len(targets) == 1:

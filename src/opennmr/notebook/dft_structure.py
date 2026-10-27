@@ -18,7 +18,10 @@ What is drawn
   into the cell, with the copies on the faces, edges and corners that
   belong there, and the cell's edges) or as a cluster
   (``region="radius"``: every atom, periodic images included, within
-  ``radius`` Å of an atom of interest). A molecule is shown whole (or
+  ``radius`` Å of an atom of interest), or as any block of cells in
+  fractional coordinates (``region="range"``, ``frac_range=((-0.2,
+  1.6), (0, 1), (0, 2))`` -- a supercell is ``((0, 2), (0, 2), (0,
+  1))``; user request, 2026-10-27). A molecule is shown whole (or
   within ``radius`` of the atoms of interest).
 * **Bonds** between atoms closer than ``bond_tolerance`` × the sum of
   their covalent radii (Cordero et al., Dalton Trans. 2008, 2832). Two
@@ -57,7 +60,7 @@ import numpy as np
 from .tensor_views import _finish_3d, _merge_style, _new_3d_axes, fit_3d_ticks
 
 __all__ = ["COVALENT_RADII", "ELEMENT_COLOURS", "structure_atoms", "find_bonds",
-           "tensor_glyph", "plot_dft_structure"]
+           "tensor_glyph", "plot_dft_structure", "frac_range_of", "MAX_ATOMS"]
 
 #: Covalent radii (Å), Cordero et al. 2008 (low-spin values for Mn, Fe, Co;
 #: sp³ C). Elements not listed fall back to 1.5 Å.
@@ -111,13 +114,48 @@ TENSOR_KINDS = {"shift": "shift tensor δ (ellipsoid, semi-axes |δii|)",
 
 _TOL = 1e-4          # fractional-coordinate tolerance for "on a cell face"
 
+#: The most atoms one picture draws: beyond this, finding the bonds and
+#: drawing them takes long enough to look like a hang, and the picture is
+#: unreadable anyway. Narrow the range (or the radius) instead.
+MAX_ATOMS = 3000
+
+#: Cell edges a picture can draw (``cell_edges``): every whole cell inside
+#: the region, the cell at the origin only, the outline of the fractional
+#: range, or none.
+CELL_EDGES = ("cells", "origin", "range", "none")
+
 
 def radius_of(species) -> float:
     return COVALENT_RADII.get(species, 1.5)
 
 
-def colour_of(species) -> str:
+def colour_of(species, overrides=None) -> str:
+    """The colour ``species`` is drawn in: ``overrides[species]`` when
+    given (Tensor Plot Style's element colours), its Jmol colour
+    otherwise, grey for an element without one."""
+    if overrides and overrides.get(species):
+        return overrides[species]
     return ELEMENT_COLOURS.get(species, "#A0A0A0")
+
+
+def frac_range_of(frac_range):
+    """``frac_range`` as a (3, 2) array of (from, to) fractional
+    coordinates along a, b, c, checked: each from < to, and no more
+    than 12 cells along any axis."""
+    try:
+        r = np.asarray(frac_range, dtype=float).reshape(3, 2)
+    except (TypeError, ValueError):
+        raise ValueError("frac_range must be three (from, to) pairs: ((a0, a1), (b0, b1), "
+                         "(c0, c1)).") from None
+    if not np.all(np.isfinite(r)):
+        raise ValueError("frac_range must be finite numbers.")
+    for (lo, hi), name in zip(r, "abc"):
+        if not hi > lo:
+            raise ValueError(f"The {name} range must run from a smaller to a larger value "
+                             f"(got {lo:g} to {hi:g}).")
+        if hi - lo > 12:
+            raise ValueError(f"The {name} range spans {hi - lo:g} cells; at most 12.")
+    return r
 
 
 def _lattice(calc):
@@ -132,7 +170,8 @@ def _wrap(frac):
     return frac
 
 
-def structure_atoms(calc, centres=None, region="cell", radius=6.0) -> list[dict]:
+def structure_atoms(calc, centres=None, region="cell", radius=6.0,
+                    frac_range=None) -> list[dict]:
     """The atoms to draw: ``[{"species", "label", "position" (Cartesian
     Å), "image" (the lattice translation, integers)}, ...]``.
 
@@ -140,7 +179,11 @@ def structure_atoms(calc, centres=None, region="cell", radius=6.0) -> list[dict]
     wrapped into it, plus its copies on the faces/edges/corners at
     fractional coordinate 1 (a molecule: every atom). ``"radius"``: every
     atom (periodic images included) within ``radius`` Å of one of the
-    Cartesian points ``centres``."""
+    Cartesian points ``centres``. ``"range"``: every atom (periodic
+    images included) whose fractional coordinates lie within
+    ``frac_range`` = ((a0, a1), (b0, b1), (c0, c1)), the ends included
+    (so ``((0, 2), (0, 2), (0, 1))`` is a 2 × 2 × 1 supercell with the
+    copies on its faces, as the unit cell has)."""
     atoms = calc.get("atoms") or []
     if not atoms:
         raise ValueError("This calculation has no atomic positions.")
@@ -164,8 +207,30 @@ def structure_atoms(calc, centres=None, region="cell", radius=6.0) -> list[dict]
                             "position": f @ lattice,
                             "image": tuple(int(v) for v in shift0 + np.array(extra))})
         return out
+    if region == "range":
+        if lattice is None:
+            raise ValueError("A fractional range needs a cell: this calculation is not "
+                             "periodic.")
+        r = frac_range_of(frac_range if frac_range is not None else ((0, 1),) * 3)
+        inv = np.linalg.inv(lattice)
+        lo, hi = r[:, 0] - _TOL, r[:, 1] + _TOL
+        steps = [range(int(np.floor(r[k, 0])) - 1, int(np.ceil(r[k, 1])) + 1) for k in range(3)]
+        shifts = np.array(list(itertools.product(*steps)), dtype=float)
+        for a in atoms:
+            frac0 = np.asarray(a["position"], dtype=float) @ inv
+            frac = _wrap(frac0)
+            shift0 = np.round(frac - frac0).astype(int)
+            cand = frac[None, :] + shifts
+            keep = np.all((cand >= lo) & (cand <= hi), axis=1)
+            for f, n in zip(cand[keep], shifts[keep]):
+                out.append({"species": a["species"], "label": a["label"],
+                            "position": f @ lattice,
+                            "image": tuple(int(v) for v in shift0 + n.astype(int))})
+                if len(out) > MAX_ATOMS:
+                    raise ValueError(f"More than {MAX_ATOMS} atoms in this range: narrow it.")
+        return out
     if region != "radius":
-        raise ValueError("region must be 'cell' or 'radius'.")
+        raise ValueError("region must be 'cell', 'range' or 'radius'.")
     centres = np.atleast_2d(np.asarray(centres if centres is not None else [], dtype=float))
     if centres.size == 0:
         raise ValueError("region='radius' needs the centres (the atoms of interest).")
@@ -191,6 +256,9 @@ def structure_atoms(calc, centres=None, region="cell", radius=6.0) -> list[dict]
                     seen.add(key)
                     out.append({"species": a["species"], "label": a["label"], "position": p,
                                 "image": key[1]})
+                    if len(out) > MAX_ATOMS:
+                        raise ValueError(f"More than {MAX_ATOMS} atoms within this radius: "
+                                         "make it smaller.")
     return out
 
 
@@ -258,8 +326,12 @@ def tensor_glyph(tensor, kind, scale, centre, n_theta=31, n_phi=61):
     return pts[0] + c[0], pts[1] + c[1], pts[2] + c[2], sign
 
 
-def _cell_edges(lattice):
-    corners = {c: np.array(c, dtype=float) @ lattice for c in itertools.product((0, 1), repeat=3)}
+def _cell_edges(lattice, origin=(0, 0, 0), size=(1, 1, 1)):
+    """The 12 edges of the parallelepiped from fractional ``origin`` with
+    sides ``size`` (in cells): one cell by default."""
+    origin, size = np.asarray(origin, dtype=float), np.asarray(size, dtype=float)
+    corners = {c: (origin + np.array(c, dtype=float) * size) @ lattice
+               for c in itertools.product((0, 1), repeat=3)}
     edges = []
     for c in corners:
         for k in range(3):
@@ -272,8 +344,10 @@ def _cell_edges(lattice):
 
 def plot_dft_structure(calc, records, frame="cell", tensor="shift_aniso", region="cell",
                        radius=6.0, tensor_size=1.0, bonds=True, bond_tolerance=1.15,
-                       atom_scale=1.0, labels=True, figure=None, fontsize=11.0,
-                       tensor_style=None):
+                       atom_scale=None, labels=True, figure=None, fontsize=11.0,
+                       tensor_style=None, frac_range=None, tensor_copies="one",
+                       cell_edges="cells", legend_loc="outside right", legend_columns=0,
+                       legend_xy=(1.02, 1.0)):
     """The structure of ``calc`` with the tensors of ``records`` (one
     :func:`opennmr.notebook.dft_nmr.dft_sites` atom record, or a list of
     them) centred on their atoms -- see the module docstring.
@@ -281,22 +355,47 @@ def plot_dft_structure(calc, records, frame="cell", tensor="shift_aniso", region
     ``frame`` : ``"cell"`` (periodic only; the standard setting, a along
     x, b in the xy plane, as :func:`dft_nmr.display_frame`) or
     ``"cartesian"`` (the file's own axes). ``tensor`` : ``"shift"``,
-    ``"shift_aniso"`` or ``"efg"``. ``region`` / ``radius`` : see
-    :func:`structure_atoms`. ``tensor_size`` : the largest tensor's
-    largest extent, Å. ``tensor_style`` : the colours (positive,
-    negative, ellipsoid), opacity, grid and view of
-    :data:`opennmr.notebook.tensor_views.TENSOR_STYLE_DEFAULTS`.
+    ``"shift_aniso"`` or ``"efg"``. ``region`` / ``radius`` /
+    ``frac_range`` : see :func:`structure_atoms` (``"cell"``,
+    ``"radius"`` or ``"range"``). ``tensor_size`` : the largest tensor's
+    largest extent, Å.
+
+    ``tensor_copies`` (``region="range"``) : ``"one"`` -- each tensor on
+    the copy of its atom nearest the middle of the range -- or ``"all"``,
+    on every periodic copy drawn (the same tensor: a lattice translation
+    does not turn it). ``cell_edges`` : ``"cells"`` (every whole cell in
+    the region), ``"origin"`` (the cell at the origin), ``"range"`` (the
+    outline of the fractional range) or ``"none"``.
+
+    ``tensor_style`` : the keys of
+    :data:`opennmr.notebook.tensor_views.TENSOR_STYLE_DEFAULTS` -- the
+    tensor colours, opacity, grid and view; the 3D box's text (tick and
+    axis labels, padding); and the atoms and bonds (size, sizing,
+    opacity, outline, depth cueing, element colours, bond width and
+    colour). ``atom_scale`` (if given) overrides the style's.
+
+    ``legend_loc`` / ``legend_columns`` / ``legend_xy`` : see
+    :func:`opennmr.plotting.legend_placement` (``"outside right"`` by
+    default: beside the picture, which is narrowed to make room).
 
     Returns ``(figure, notes)``."""
     from matplotlib.lines import Line2D
     from mpl_toolkits.mplot3d.art3d import Line3DCollection
+
+    from ..plotting.legend_place import legend_placement, make_room_for_legend
 
     if isinstance(records, dict):
         records = [records]
     records = list(records or [])
     if not records:
         raise ValueError("Choose at least one site to draw the tensors of.")
+    if tensor_copies not in ("one", "all"):
+        raise ValueError("tensor_copies must be 'one' or 'all'.")
+    if cell_edges not in CELL_EDGES:
+        raise ValueError(f"cell_edges must be one of {CELL_EDGES}.")
     look = _merge_style(tensor_style)
+    if atom_scale is not None:
+        look["atom_scale"] = float(atom_scale)
     lattice = _lattice(calc)
     if frame == "cell":
         if lattice is None:
@@ -310,28 +409,57 @@ def plot_dft_structure(calc, records, frame="cell", tensor="shift_aniso", region
         frame_title = f"{calc.get('code', 'file')} Cartesian frame"
     else:
         raise ValueError("frame must be 'cell' or 'cartesian'.")
+    if region not in ("cell", "radius", "range"):
+        raise ValueError("region must be 'cell', 'radius' or 'range'.")
     if region == "cell" and lattice is None:
         region_used = "molecule"
+    elif region == "range" and lattice is None:
+        raise ValueError("A fractional range needs a cell: this calculation is not periodic.")
     else:
         region_used = region
+    span = frac_range_of(frac_range if frac_range is not None else ((0, 1),) * 3) \
+        if region_used == "range" else None
     notes = []
 
     # Where each tensor goes: its own atom (wrapped into the cell when the
-    # cell is drawn), or the mean position of an averaged group.
-    centres = []
+    # cell is drawn), or the mean position of an averaged group; in a
+    # fractional range, the copy (or copies) of it inside the range.
+    inv = np.linalg.inv(lattice) if lattice is not None else None
+    placed = []           # (record, [centres, Å]) -- the first one is labelled
     for rec in records:
         p = np.asarray(rec["position"], dtype=float)
-        if region_used == "cell":
-            inv = np.linalg.inv(lattice)
+        if region_used in ("cell", "range"):
             p = _wrap(p @ inv) @ lattice
-        centres.append(p)
+        if region_used == "range":
+            f = p @ inv
+            steps = [range(int(np.floor(span[k, 0])) - 1, int(np.ceil(span[k, 1])) + 1)
+                     for k in range(3)]
+            cand = np.array([f + np.array(n) for n in itertools.product(*steps)])
+            inside = cand[np.all((cand >= span[:, 0] - _TOL) & (cand <= span[:, 1] + _TOL),
+                                 axis=1)]
+            middle = span.mean(axis=1)
+            if len(inside) == 0:
+                inside = cand[[int(np.argmin(np.linalg.norm((cand - middle) @ lattice,
+                                                            axis=1)))]]
+                notes.append(f"{rec['label']}: no copy inside the range; its tensor is drawn "
+                             "on the nearest one, outside it.")
+            order = np.argsort(np.linalg.norm((inside - middle) @ lattice, axis=1),
+                               kind="stable")
+            inside = inside[order]
+            chosen = inside if tensor_copies == "all" else inside[:1]
+            placed.append((rec, [c @ lattice for c in chosen]))
+        else:
+            placed.append((rec, [p]))
         if int(rec.get("n_atoms", 1)) > 1:
             notes.append(f"{rec['label']}: an average over {rec['n_atoms']} sites, drawn at "
                          "their mean position.")
-    atoms = structure_atoms(calc, centres=centres, region=region if region_used != "molecule"
-                            else "cell", radius=radius)
-    pos = np.array([a["position"] for a in atoms]) @ Q.T
-    centres_d = np.array(centres) @ Q.T
+    first_centres = [c[0] for _r, c in placed]
+    atoms = structure_atoms(calc, centres=first_centres,
+                            region=region if region_used != "molecule" else "cell",
+                            radius=radius, frac_range=span)
+    pos = np.array([a["position"] for a in atoms]).reshape(-1, 3) @ Q.T
+    if not atoms:
+        notes.append("No atom lies inside this range.")
 
     figure, ax = _new_3d_axes(figure)
     # Drawn in the order given (bonds, atoms, tensors), not depth-sorted
@@ -339,85 +467,126 @@ def plot_dft_structure(calc, records, frame="cell", tensor="shift_aniso", region
     # at their centre shows through (see the module docstring).
     ax.computed_zorder = False
 
-    if region_used == "cell":
-        segs = [(a @ Q.T, b @ Q.T) for a, b in _cell_edges(lattice)]
-        ax.add_collection3d(Line3DCollection(segs, colors="0.25", linewidths=1.0, zorder=1))
+    # Cell edges.
+    boxes = []                       # (fractional origin, size) of each parallelepiped
+    if lattice is not None and region_used in ("cell", "range") and cell_edges != "none":
+        if cell_edges == "origin" or region_used == "cell":
+            boxes = [((0, 0, 0), (1, 1, 1))]
+        elif cell_edges == "range":
+            boxes = [(span[:, 0], span[:, 1] - span[:, 0])]
+        else:
+            whole = [range(int(np.ceil(span[k, 0] - _TOL)), int(np.floor(span[k, 1] + _TOL)))
+                     for k in range(3)]
+            boxes = [(n, (1, 1, 1)) for n in itertools.product(*whole)]
+            if not boxes:
+                notes.append("No whole cell inside the range: no cell edges drawn (choose "
+                             "\"outline of the range\" to see its extent).")
+    edge_points = []
+    if boxes:
+        segs = []
+        for origin, size in boxes:
+            for a, b in _cell_edges(lattice, origin, size):
+                segs.append((a @ Q.T, b @ Q.T))
+                edge_points += [a @ Q.T, b @ Q.T]
+        ax.add_collection3d(Line3DCollection(segs, colors=look["cell_colour"],
+                                             linewidths=float(look["cell_width"]), zorder=1))
         corner = np.zeros(3)
         for v, name in zip(lattice, "abc"):
             tip = (Q @ v)
-            ax.text(*(corner + 0.55 * tip), name, fontsize=fontsize * 0.9, color="0.15",
-                    fontstyle="italic", fontweight="bold", zorder=6)
+            ax.text(*(corner + 0.55 * tip), name, fontsize=fontsize * 0.9,
+                    color=look["cell_colour"], fontstyle="italic", fontweight="bold", zorder=6)
 
+    element_colours = dict(look.get("atom_colours") or {})
     if bonds:
         pairs = find_bonds(atoms, tolerance=bond_tolerance)
         segs, colours = [], []
         for i, j in pairs:
             mid = 0.5 * (pos[i] + pos[j])
             segs += [(pos[i], mid), (mid, pos[j])]
-            colours += [colour_of(atoms[i]["species"]), colour_of(atoms[j]["species"])]
-        if segs:
-            ax.add_collection3d(Line3DCollection(segs, colors=colours, linewidths=2.4,
-                                                 zorder=2))
-        # The bonds' own outline, so a white or pale element still shows.
-        if segs:
-            ax.add_collection3d(Line3DCollection(segs, colors="0.35", linewidths=3.2,
+            if look["bond_colour"]:
+                colours += [look["bond_colour"]] * 2
+            else:
+                colours += [colour_of(atoms[i]["species"], element_colours),
+                            colour_of(atoms[j]["species"], element_colours)]
+        width = float(look["bond_width"])
+        if segs and width > 0:
+            # The bonds' own outline, so a white or pale element still shows.
+            ax.add_collection3d(Line3DCollection(segs, colors="0.35", linewidths=width + 0.8,
                                                  zorder=1.5, alpha=0.5))
+            ax.add_collection3d(Line3DCollection(segs, colors=colours, linewidths=width,
+                                                 zorder=2))
 
     species = [a["species"] for a in atoms]
-    sizes = np.array([(radius_of(s) * 9.0 * float(atom_scale)) ** 2 for s in species])
+    scale_atoms = float(look["atom_scale"])
+    if look["atom_size_by"] == "uniform":
+        sizes = np.full(len(species), (1.2 * 9.0 * scale_atoms) ** 2)
+    elif look["atom_size_by"] == "radius":
+        sizes = np.array([(radius_of(s) * 9.0 * scale_atoms) ** 2 for s in species])
+    else:
+        raise ValueError("atom_size_by must be 'radius' or 'uniform'.")
     interest = {rec["label"] for rec in records} | {lab for rec in records
                                                     for lab in rec.get("members", [])}
     # The atoms of interest get a heavier outline.
-    widths = [1.8 if a["label"] in interest else 0.6 for a in atoms]
-    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], s=sizes, c=[colour_of(s) for s in species],
-               edgecolors="0.1", linewidths=widths, depthshade=False, alpha=1.0, zorder=3)
+    edge = float(look["atom_edge_width"])
+    widths = [max(1.8, 2.5 * edge) if a["label"] in interest else edge for a in atoms]
+    if scale_atoms > 0 and len(pos):
+        ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], s=sizes,
+                   c=[colour_of(s, element_colours) for s in species],
+                   edgecolors=look["atom_edge_colour"], linewidths=widths,
+                   depthshade=bool(look["atom_depthshade"]), alpha=float(look["atom_alpha"]),
+                   zorder=3)
 
     # One length scale for every tensor drawn.
-    tensors = [(rec, tensor_of(rec, tensor)) for rec in records]
-    missing = [rec["label"] for rec, t in tensors if t is None]
+    tensors = [(rec, tensor_of(rec, tensor), centres) for rec, centres in placed]
+    missing = [rec["label"] for rec, t, _c in tensors if t is None]
     if missing:
         notes.append(f"No {TENSOR_KINDS[tensor].split(' (')[0]} for " + ", ".join(missing)
                      + " – nothing drawn there.")
-    sized = [np.max(np.abs(np.linalg.eigvalsh(t))) for _r, t in tensors if t is not None]
+    sized = [np.max(np.abs(np.linalg.eigvalsh(t))) for _r, t, _c in tensors if t is not None]
     biggest = max(sized) if sized else 0.0
     if biggest <= 0:
         notes.append("Every tensor drawn is zero: nothing to show at this scale.")
     scale = float(tensor_size) / biggest if biggest > 0 else 0.0
     positive, negative = look["positive_colour"], look["negative_colour"]
-    for (rec, t), c in zip(tensors, centres_d):
-        if t is None or scale == 0.0:
-            continue
-        td = Q @ t @ Q.T
-        x, y, z, sign = tensor_glyph(td, tensor, scale, c)
-        if tensor == "shift":
-            ax.plot_surface(x, y, z, color=look["ellipsoid_colour"],
-                            alpha=max(float(look["ellipsoid_alpha"]), 0.25), linewidth=0,
-                            shade=True, zorder=4)
+    centres_d = []
+    n_glyphs = 0
+    for rec, t, centres in tensors:
+        for k_copy, c0 in enumerate(centres):
+            c = np.asarray(c0) @ Q.T
+            centres_d.append(c)
+            if t is None or scale == 0.0:
+                continue
+            td = Q @ t @ Q.T
+            x, y, z, sign = tensor_glyph(td, tensor, scale, c)
+            n_glyphs += 1
+            if tensor == "shift":
+                ax.plot_surface(x, y, z, color=look["ellipsoid_colour"],
+                                alpha=max(float(look["ellipsoid_alpha"]), 0.25), linewidth=0,
+                                shade=True, zorder=4)
+            else:
+                face = np.where(sign[..., None] >= 0, np.array(_rgba(positive)),
+                                np.array(_rgba(negative)))
+                face[..., 3] = 0.6
+                ax.plot_surface(x, y, z, facecolors=face, linewidth=0, shade=False, zorder=4)
+            if look["show_axes"]:
+                w, U = np.linalg.eigh(td)
+                for k in range(3):
+                    v = U[:, k] * abs(w[k]) * scale * 1.15
+                    ax.plot([c[0] - v[0], c[0] + v[0]], [c[1] - v[1], c[1] + v[1]],
+                            [c[2] - v[2], c[2] + v[2]],
+                            color=positive if w[k] >= 0 else negative, linewidth=1.2, zorder=5)
+            if labels and k_copy == 0:
+                ax.text(*(c + np.array([0.0, 0.0, 1.1 * float(tensor_size)])), rec["label"],
+                        fontsize=fontsize * 0.75, color="black", zorder=7, ha="center")
+        if tensor == "shift" and t is not None:
             w = np.linalg.eigvalsh(t)
             if w.min() < 0 < w.max():
                 notes.append(f"{rec['label']}: its principal shifts have mixed signs, so the "
                              "ellipsoid (|δii|) does not show them; the anisotropic view does.")
-        else:
-            face = np.where(sign[..., None] >= 0, np.array(_rgba(positive)),
-                            np.array(_rgba(negative)))
-            face[..., 3] = 0.6
-            ax.plot_surface(x, y, z, facecolors=face, linewidth=0, shade=False, zorder=4)
-        if look["show_axes"]:
-            w, U = np.linalg.eigh(td)
-            for k in range(3):
-                v = U[:, k] * abs(w[k]) * scale * 1.15
-                ax.plot([c[0] - v[0], c[0] + v[0]], [c[1] - v[1], c[1] + v[1]],
-                        [c[2] - v[2], c[2] + v[2]], color=positive if w[k] >= 0 else negative,
-                        linewidth=1.2, zorder=5)
-        if labels:
-            ax.text(*(c + np.array([0.0, 0.0, 1.1 * float(tensor_size)])), rec["label"],
-                    fontsize=fontsize * 0.75, color="black", zorder=7, ha="center")
 
     # Equal scaling in x, y, z: a sphere must look like a sphere.
-    every = np.vstack([pos, centres_d])
-    if region_used == "cell":
-        every = np.vstack([every, np.array([np.array(c, float) @ lattice for c in
-                                            itertools.product((0, 1), repeat=3)]) @ Q.T])
+    every = np.vstack([p for p in (pos, np.array(centres_d).reshape(-1, 3),
+                                   np.array(edge_points).reshape(-1, 3)) if len(p)])
     pad = float(tensor_size) + 0.6
     lo, hi = every.min(axis=0) - pad, every.max(axis=0) + pad
     half = 0.5 * float(np.max(hi - lo))
@@ -430,7 +599,8 @@ def plot_dft_structure(calc, records, frame="cell", tensor="shift_aniso", region
 
     shown = list(dict.fromkeys(species))
     handles = [Line2D([], [], linestyle="", marker="o", markersize=7,
-                      markerfacecolor=colour_of(s), markeredgecolor="0.15", label=s)
+                      markerfacecolor=colour_of(s, element_colours),
+                      markeredgecolor=look["atom_edge_colour"], label=s)
                for s in shown[:12]]
     if tensor == "shift":
         handles.append(Line2D([], [], color=look["ellipsoid_colour"], linewidth=6, alpha=0.6,
@@ -438,17 +608,25 @@ def plot_dft_structure(calc, records, frame="cell", tensor="shift_aniso", region
     else:
         handles += [Line2D([], [], color=positive, linewidth=6, alpha=0.7, label="> 0"),
                     Line2D([], [], color=negative, linewidth=6, alpha=0.7, label="< 0")]
-    ax.legend(handles=handles, loc="upper left", fontsize=fontsize * 0.7, frameon=False,
-              ncols=1 if len(handles) < 8 else 2)
+    placement = legend_placement(legend_loc, legend_columns, *legend_xy)
+    placement.setdefault("ncols", 1 if len(handles) < 8 else 2)
+    ax.legend(handles=handles, fontsize=fontsize * 0.7, frameon=False, **placement)
     what = {"cell": "unit cell", "radius": f"within {float(radius):g} Å",
-            "molecule": "molecule"}[region_used]
+            "molecule": "molecule",
+            "range": _describe_range(span) if span is not None else ""}[region_used]
     figure.suptitle(f"{', '.join(r['label'] for r in records[:4])}"
                     f"{' …' if len(records) > 4 else ''}: {TENSOR_KINDS[tensor].split(' (')[0]} "
                     f"on the structure ({what}, {frame_title})", fontsize=fontsize * 0.85)
+    try:
+        make_room_for_legend(ax)
+    except Exception:  # a backend without a renderer: the legend may overhang
+        pass
 
     notes.insert(0, f"{len(atoms)} atoms ({what}); tensors of "
-                    f"{sum(t is not None for _r, t in tensors)} site(s): "
-                    f"{TENSOR_KINDS[tensor]}.")
+                    f"{sum(t is not None for _r, t, _c in tensors)} site(s)"
+                    + (f", {n_glyphs} drawn (every copy in the range)"
+                       if tensor_copies == "all" and region_used == "range" else "")
+                    + f": {TENSOR_KINDS[tensor]}.")
     if biggest > 0:
         notes.append(f"Scale: {float(tensor_size):g} Å = {_fmt(biggest)} "
                      f"{'V/m²' if tensor == 'efg' else 'ppm'} (the same for every tensor "
@@ -459,9 +637,20 @@ def plot_dft_structure(calc, records, frame="cell", tensor="shift_aniso", region
     if bonds:
         notes.append(f"Bonds: closer than {float(bond_tolerance):g} × the sum of covalent radii "
                      "(a guide to the eye; metal–metal pairs are not bonded).")
-    notes.append("Turn the view by dragging. Atoms are drawn to scale with their covalent "
-                 "radii only roughly (marker size); positions are exact.")
+    notes.append("Turn the view by dragging. Atoms are drawn "
+                 + ("to scale with their covalent radii only roughly (marker size)"
+                    if look["atom_size_by"] == "radius" else "all the same size")
+                 + "; positions are exact.")
     return figure, notes
+
+
+def _describe_range(span) -> str:
+    """"2 × 2 × 1 supercell" for whole cells from the origin, the
+    fractional ranges otherwise."""
+    span = np.asarray(span, dtype=float)
+    if np.allclose(span[:, 0], 0) and np.allclose(span[:, 1], np.round(span[:, 1])):
+        return " × ".join(f"{int(round(v))}" for v in span[:, 1]) + " supercell"
+    return "fractional range " + " × ".join(f"[{a:g}, {b:g}]" for a, b in span)
 
 
 def _rgba(colour):

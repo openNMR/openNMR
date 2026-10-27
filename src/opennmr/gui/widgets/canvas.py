@@ -1215,6 +1215,12 @@ class MplCanvas(QWidget):
         self._home_limits = None
         self._legend_visible = False
         self._legend_loc = "best"
+        # Columns (0: whatever the legend's builder chose) and the
+        # upper-left corner of a "custom" legend, in axes fractions --
+        # plotting.legend_placement (user request, 2026-10-27).
+        self._legend_columns = 0
+        self._legend_x = 1.02
+        self._legend_y = 1.0
         # --- Legend appearance ------------------------------------
         # **frameon=False and the axis label size by default.** A
         # framed legend at matplotlib's own default sits in an opaque
@@ -4198,6 +4204,14 @@ class MplCanvas(QWidget):
             return []
         bounds, tol = self.figure.bbox, 2.0
         scale = 1.8294640721620434 * 25 / 24         # mplot3d's own box scale at zoom 1
+        # A legend placed outside the box (Plot Style ▸ Legend position:
+        # outside right / custom) gets its room first.
+        from ...plotting.legend_place import make_room_for_legend
+        for ax in threes:
+            try:
+                make_room_for_legend(ax, renderer=renderer)
+            except Exception:  # never let a layout check break a redraw
+                pass
         outside = []
         for _step in range(12):
             outside = []
@@ -5070,11 +5084,16 @@ class MplCanvas(QWidget):
         matplotlib treats any ``framealpha``/``facecolor`` as an
         implicit "there is a frame", which would quietly undo the
         setting the user just turned off."""
-        kwargs = {
-            "loc": self._legend_loc,
+        from ...plotting.legend_place import legend_placement
+        try:
+            kwargs = legend_placement(self._legend_loc, self._legend_columns,
+                                      self._legend_x, self._legend_y)
+        except ValueError:          # a saved position this version does not know
+            kwargs = legend_placement("best", self._legend_columns)
+        kwargs.update({
             "fontsize": self._legend_fontsize or self._AXIS_LABELSIZE,
             "frameon": self._legend_frameon,
-        }
+        })
         if self._legend_frameon:
             kwargs["framealpha"] = self._legend_framealpha
             if self._legend_facecolor:
@@ -5253,7 +5272,10 @@ class MplCanvas(QWidget):
             # rows of a stacked Compare (see _legend_entries).
             handles = list(getattr(old, "legend_handles", None) or old.legendHandles)
             labels = [t.get_text() for t in old.get_texts()]
-            legend = ax.legend(handles, labels, **kwargs)
+            # Columns left to the legend's builder: as many as it had.
+            own = dict(kwargs) if "ncols" in kwargs else {**kwargs,
+                                                          "ncols": getattr(old, "_ncols", 1)}
+            legend = ax.legend(handles, labels, **own)
             plotting.set_legend_linewidth(legend, self._legend_linewidth)
             # **After the rebuild, not before.** The font family is a
             # property of the Text artists inside the Legend, and
@@ -5687,6 +5709,9 @@ class MplCanvas(QWidget):
             "right_spine": self._right_spine_visible,
             "grid": self._grid_visible,
             "legend_loc": self._legend_loc,
+            "legend_columns": self._legend_columns,
+            "legend_x": self._legend_x,
+            "legend_y": self._legend_y,
             "compare_colormap": self._compare_colormap,
             "trace_color": self._trace_color,
             "contour_linewidth": self._contour_linewidth,
@@ -5712,7 +5737,7 @@ class MplCanvas(QWidget):
         }
 
     def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
-                  tick_direction=None, map_colormap=None, tensor_style=None, colorbar_gap=None, minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None,
+                  tick_direction=None, map_colormap=None, tensor_style=None, colorbar_gap=None, minor_ticks=None, grid=None, legend_loc=None, legend_columns=None, legend_x=None, legend_y=None, compare_colormap=None,
                   trace_color=None, contour_linewidth=None, contour_colour=None, contour_clevels=None,
                   contour_level_mode=None, contour_power=None,
                   title_visible=None, font_family=None, axis_label_style=None,
@@ -5795,6 +5820,12 @@ class MplCanvas(QWidget):
             self._grid_visible = grid
         if legend_loc is not None:
             self._legend_loc = legend_loc
+        if legend_columns is not None:
+            self._legend_columns = max(int(legend_columns), 0)
+        if legend_x is not None:
+            self._legend_x = float(legend_x)
+        if legend_y is not None:
+            self._legend_y = float(legend_y)
         if compare_colormap is not None:
             self._compare_colormap = compare_colormap
         if title_visible is not None:
@@ -5958,7 +5989,7 @@ class MplCanvas(QWidget):
     _STYLE_KEYS = (
         "linewidth", "labelsize", "tick_length", "tick_width", "tick_direction", "map_colormap",
         "tensor_style", "colorbar_gap", "minor_ticks", "grid",
-        "legend_loc", "compare_colormap", "trace_color", "contour_linewidth", "contour_colour",
+        "legend_loc", "legend_columns", "legend_x", "legend_y", "compare_colormap", "trace_color", "contour_linewidth", "contour_colour",
         "contour_clevels", "contour_level_mode", "contour_power", "title_visible",
         "font_family", "axis_label_style", "axis_label_template", "legend_frameon",
         "legend_fontsize", "legend_framealpha", "legend_facecolor",

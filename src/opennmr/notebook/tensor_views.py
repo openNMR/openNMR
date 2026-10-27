@@ -190,16 +190,43 @@ TENSOR_STYLE_DEFAULTS = {
     "negative_colour": "#2166ac",
     "ellipsoid_colour": "#8c8c8c",
     "ellipsoid_alpha": 0.35,
+    # The 3D box's text (user request, 2026-10-27: "the x, y, z tick
+    # labels can get in the way -- padding options and the ability to
+    # just remove the labels entirely").
+    "tick_labels": True,       # the numbers on the x, y, z axes
+    "axis_labels": True,       # "x (Å)", "y (Å)", "z (Å)"
+    "axes_box": True,          # the box, its panes, ticks and labels (off: nothing but the picture)
+    "tick_pad": 0.0,           # extra space between the axes and their tick labels, pt
+    "label_pad": 0.0,          # extra space between the tick labels and the axis label, pt
+    # The structure picture's atoms and bonds (notebook.dft_structure;
+    # user request, 2026-10-27: "control the colours and rendering of
+    # the balls for the atoms").
+    "atom_scale": 1.0,         # marker size x this
+    "atom_size_by": "radius",  # "radius" (covalent) or "uniform"
+    "atom_alpha": 1.0,         # opacity of the atoms
+    "atom_edge_colour": "#1a1a1a",
+    "atom_edge_width": 0.6,    # pt (the atoms of interest get a heavier outline)
+    "atom_depthshade": False,  # fade atoms further from the viewer (depth cueing)
+    "atom_colours": {},        # {element: colour} over the Jmol colours
+    "bond_width": 2.4,         # pt
+    "bond_colour": "",         # "": each half in its atom's colour
+    "cell_colour": "#404040",
+    "cell_width": 1.0,         # pt
 }
+
+#: The tensor-style keys that set the 3D box's text (see
+#: :func:`apply_3d_axes_style`).
+AXES_STYLE_KEYS = ("tick_labels", "axis_labels", "axes_box", "tick_pad", "label_pad")
 
 
 def tensor_style(overrides=None) -> dict:
     """:data:`TENSOR_STYLE_DEFAULTS` with ``overrides`` (unknown keys and
     ``None`` values ignored) laid over it."""
     style = dict(TENSOR_STYLE_DEFAULTS)
+    style["atom_colours"] = {}
     for key, value in (overrides or {}).items():
         if key in style and (value is not None or key == "colormap"):
-            style[key] = value
+            style[key] = dict(value) if key == "atom_colours" else value
     return style
 
 
@@ -235,7 +262,40 @@ def _finish_3d(ax, extent, fontsize, unit_label, style=None):
         axis.pane.set_alpha(0.05)
     ax.grid(bool(style["grid"]))
     ax.view_init(elev=float(style["elev"]), azim=float(style["azim"]))
+    apply_3d_axes_style(ax, style)
     fit_3d_ticks(ax, fontsize * 0.85)
+
+
+def apply_3d_axes_style(ax, style=None) -> dict:
+    """The 3D box's text as ``style`` asks (:data:`AXES_STYLE_KEYS`):
+    tick labels and axis labels shown or not, the whole box shown or not,
+    and the extra padding (pt) of the tick labels and of the axis labels.
+
+    Kept on the Axes (``ax._opennmr_3d_style``), so :func:`fit_3d_ticks`
+    -- which the GUI calls again after every rotation, zoom and restyle --
+    keeps it rather than putting the labels back. Returns what was set."""
+    from matplotlib.ticker import NullFormatter, ScalarFormatter
+    style = _merge_style(style)
+    look = {k: style[k] for k in AXES_STYLE_KEYS}
+    look["tick_pad"] = max(float(look["tick_pad"]), -20.0)
+    look["label_pad"] = max(float(look["label_pad"]), -20.0)
+    ax._opennmr_3d_style = look
+    box = bool(look["axes_box"])
+    if box:
+        ax.set_axis_on()
+    else:
+        ax.set_axis_off()
+    ax.tick_params(pad=look["tick_pad"])
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        hidden = isinstance(axis.get_major_formatter(), NullFormatter)
+        if not look["tick_labels"] and not hidden:
+            axis.set_major_formatter(NullFormatter())
+        elif look["tick_labels"] and hidden:
+            axis.set_major_formatter(ScalarFormatter())
+        # A hidden label stays hidden through the GUI's relabelling and
+        # is left out of its "does every label fit?" check.
+        axis.label.set_visible(bool(look["axis_labels"]) and box)
+    return look
 
 
 #: Tick steps a thinned axis may use: the usual nice ones plus 4, so
@@ -288,6 +348,18 @@ def fit_3d_ticks(ax, fontsize=None, max_ticks=8, font_family=None, label_pad=Tru
             box = artist.get_window_extent(renderer)
             return box.width, box.height
         return 0.62 * to_px * len(text), 1.4 * to_px    # no renderer: an em-based estimate
+
+    # The tensor style's own text settings (apply_3d_axes_style), kept
+    # through every refit.
+    look = getattr(ax, "_opennmr_3d_style", None)
+    tick_labels = True if look is None else bool(look["tick_labels"])
+    extra_label_pad = 0.0 if look is None else float(look["label_pad"])
+    tick_pad = 0.0 if look is None else float(look["tick_pad"])
+    if not tick_labels:
+        # Nothing to keep apart: the ticks (and gridlines) go where they
+        # would with labels of one character.
+        def text_size(text, _measure=text_size):
+            return _measure("0")
 
     M = ax.get_proj()
     limits = (ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d())
@@ -398,8 +470,11 @@ def fit_3d_ticks(ax, fontsize=None, max_ticks=8, font_family=None, label_pad=Tru
             # angle (cos, sin) spans w*sin + h*cos), in points.
             # Half of it: mplot3d already offsets the label outward from
             # the tick-label row (found by rendering at 8-32 pt).
-            across = max(w * sin + h * cos for w, h in sizes)
-            axis.labelpad = 0.5 * across * 72.0 / figure.dpi + 0.2 * fontsize
+            across = max(w * sin + h * cos for w, h in sizes) if tick_labels else 0.0
+            axis.labelpad = (0.5 * across * 72.0 / figure.dpi + 0.2 * fontsize
+                             + extra_label_pad + (tick_pad if tick_labels else 0.0))
+    if look is not None:
+        apply_3d_axes_style(ax, look)
     return counts
 
 

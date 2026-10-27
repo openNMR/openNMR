@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 from ..notebook import dft_calibration as dcal
 from ..notebook import crystal_nmr, dft_nmr, dft_structure
 from .combined_panels import CombinedHamiltonianPanel, _spin_box
+from .widgets.typed_spinbox import TypedSpinBox
 
 _FILE_FILTER = ("DFT output (*.magres OUTCAR* *.out *.outp *.log *.LOG);;All files (*)")
 
@@ -646,8 +647,58 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self.dft_structure_region_combo = QComboBox()
         self.dft_structure_region_combo.addItem("Unit cell (or whole molecule)", "cell")
         self.dft_structure_region_combo.addItem("Atoms within a radius of the site(s)", "radius")
+        # 2026-10-27 (explicit user request): "show supercells (or change
+        # the limits in terms of fractional cell coords -- e.g., x from
+        # -0.2 to +1.6)".
+        self.dft_structure_region_combo.addItem("Fractional range / supercell", "range")
         self.dft_structure_region_combo.currentIndexChanged.connect(lambda _i: self._sync_dft())
         form.addRow("Atoms shown:", self.dft_structure_region_combo)
+        self.dft_structure_range_spins = {}
+        range_rows = []
+        for axis in "abc":
+            row = QHBoxLayout()
+            spins = []
+            for end, value in (("from", 0.0), ("to", 1.0)):
+                spin = _spin_box(-6.0, 7.0, value, 2, step=0.1,
+                                 tip=f"Fractional coordinate along {axis}, {end}. Atoms on the "
+                                     "ends are included (0 to 2 along a is two cells, with "
+                                     "the copies on both faces).")
+                row.addWidget(QLabel(end))
+                row.addWidget(spin, 1)
+                spins.append(spin)
+            self.dft_structure_range_spins[axis] = tuple(spins)
+            form.addRow(f"{axis} range:", row)
+            range_rows.append(row)
+        super_row = QHBoxLayout()
+        super_row.addWidget(QLabel("Supercell"))
+        self.dft_structure_supercell_spins = []
+        for axis in "abc":
+            spin = TypedSpinBox()
+            spin.setRange(1, 12)
+            spin.setValue(1)
+            spin.setToolTip(f"Cells along {axis}: sets the {axis} range to 0 – n.")
+            super_row.addWidget(spin)
+            self.dft_structure_supercell_spins.append(spin)
+        self.dft_structure_supercell_button = QPushButton("Set")
+        self.dft_structure_supercell_button.setToolTip("Set the three ranges to 0 – n.")
+        self.dft_structure_supercell_button.clicked.connect(self._set_supercell)
+        super_row.addWidget(self.dft_structure_supercell_button)
+        form.addRow("", super_row)
+        self.dft_structure_copies_combo = QComboBox()
+        self.dft_structure_copies_combo.addItem("Nearest the middle of the range", "one")
+        self.dft_structure_copies_combo.addItem("Every copy in the range", "all")
+        self.dft_structure_copies_combo.setToolTip(
+            "Which periodic copies of a site carry its tensor. A lattice translation does not "
+            "turn a tensor, so every copy's is the same.")
+        form.addRow("Tensors on:", self.dft_structure_copies_combo)
+        self.dft_structure_edges_combo = QComboBox()
+        self.dft_structure_edges_combo.addItem("Every whole cell", "cells")
+        self.dft_structure_edges_combo.addItem("The cell at the origin", "origin")
+        self.dft_structure_edges_combo.addItem("Outline of the range", "range")
+        self.dft_structure_edges_combo.addItem("None", "none")
+        form.addRow("Cell edges:", self.dft_structure_edges_combo)
+        self._range_rows = (*range_rows, super_row, self.dft_structure_copies_combo,
+                            self.dft_structure_edges_combo)
         self.dft_structure_radius_spin = _spin_box(
             1.0, 30.0, 5.0, 2, " Å", step=0.5,
             tip="Every atom, periodic images included, within this distance of a chosen site.")
@@ -1136,10 +1187,12 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         on_structure = self.dft_tensor_style_combo.currentData() == "structure"
         for row in self._structure_rows:
             self._tensor_form.setRowVisible(row, on_structure)
+        region = self.dft_structure_region_combo.currentData()
+        for row in self._range_rows:
+            self._tensor_form.setRowVisible(row, on_structure and region == "range")
         if on_structure:
             self._tensor_form.setRowVisible(
-                self.dft_structure_radius_spin,
-                self.dft_structure_region_combo.currentData() == "radius")
+                self.dft_structure_radius_spin, region == "radius")
         sample = self.calcs["sample"]
         periodic = sample is not None and sample.get("lattice") is not None
         cell_item = self.dft_frame_combo.model().item(0)
@@ -1282,7 +1335,21 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
                 "radius": self.dft_structure_radius_spin.value(),
                 "tensor_size": self.dft_structure_size_spin.value(),
                 "bonds": self.dft_structure_bonds_check.isChecked(),
-                "bond_tolerance": self.dft_structure_bond_spin.value()}
+                "bond_tolerance": self.dft_structure_bond_spin.value(),
+                "frac_range": self.frac_range(),
+                "tensor_copies": self.dft_structure_copies_combo.currentData(),
+                "cell_edges": self.dft_structure_edges_combo.currentData()}
+
+    def frac_range(self) -> tuple:
+        """The fractional range ((a0, a1), (b0, b1), (c0, c1)) typed."""
+        return tuple((lo.value(), hi.value())
+                     for lo, hi in (self.dft_structure_range_spins[k] for k in "abc"))
+
+    def _set_supercell(self) -> None:
+        for (lo, hi), n in zip((self.dft_structure_range_spins[k] for k in "abc"),
+                               self.dft_structure_supercell_spins):
+            lo.setValue(0.0)
+            hi.setValue(float(n.value()))
 
     def show_structure(self) -> bool:
         """The structure with the chosen site's (or every site's) tensors."""
