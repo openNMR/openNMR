@@ -392,7 +392,8 @@ def test_crystal_file_shows_the_scaling_controls_and_gives_shifts_and_cq(qapp, s
     panel.dft_sample_edit.setText(str(path))
     assert panel.read_files(quiet=True), panel.dft_files_label.text()
     assert "CRYSTAL" in panel.dft_files_label.text()
-    assert panel.dft_pm_box.isVisibleTo(panel)
+    # Shown (inside step 2, which may be collapsed: 2026-10-27).
+    assert not panel.dft_pm_box.isHidden()
     panel.dft_element_combo.setCurrentText("Li")
     assert panel.dft_site_list.count() == 2                  # the raw calculation has no σ yet
     # three routes, each showing only its own rows
@@ -457,5 +458,5 @@ def test_crystal_scaling_survives_the_saved_state(qapp, said, tmp_path):  # noqa
     assert other.dft_pm_route_combo.currentData() == "phi"
     assert other.dft_pm_phi_spin.value() == pytest.approx(0.0123)
     assert other.dft_pm_orbital_spin.value() == pytest.approx(-4.0)
-    assert other.dft_pm_box.isVisibleTo(other)
+    assert not other.dft_pm_box.isHidden()
     window.close()

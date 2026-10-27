@@ -30,12 +30,13 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..notebook import dft_calibration as dcal
 from ..notebook import crystal_nmr, dft_nmr, dft_structure
 from .combined_panels import CombinedHamiltonianPanel, _spin_box
+from .widgets.collapsible_section import CollapsibleSection
 from .widgets.typed_spinbox import TypedSpinBox
 
 _FILE_FILTER = ("DFT output (*.magres OUTCAR* *.out *.outp *.log *.LOG);;All files (*)")
@@ -63,11 +64,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
     as a tensor picture; ``draw_plot(draw, kind)``: show it as a plain
     plot (the calibration); ``style()``: that plot's style settings."""
 
-    BLURB = ("Simulate from DFT: give the sample's calculation (CASTEP .magres, VASP OUTCAR, "
-             "ORCA output or Gaussian log) and one or more reference compounds with their "
-             "experimental shifts. Shifts, CSA (span/skew and Δ/η), C_Q and η_Q, and the CSA's "
-             "orientation relative to the EFG come from the tensors; the sites then appear "
-             "below, editable, for Simulate.")
+    BLURB = ("Simulate a spectrum from a DFT calculation (CASTEP, VASP, ORCA, Gaussian or "
+             "CRYSTAL): work through the numbered steps in order.")
 
     #: Not saved as plain widgets: the references are saved as points, the
     #: tables are rebuilt.
@@ -92,11 +90,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self.model = None
         self.tensor_notes = []
         self._filling = False
-        layout = self.layout()
-        layout.insertWidget(1, self._build_import_box())
-        layout.insertWidget(2, self._build_paramagnetic_box())
-        layout.insertWidget(3, self._build_reference_box())
-        layout.insertWidget(layout.count() - 1, self._build_tensor_box())
+        self._build_steps()
         # The base panel starts with one empty site; a DFT panel starts
         # with none until something is imported.
         self.site_list.clear()
@@ -107,6 +101,79 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self._sync_dft()
 
     # ---- building -------------------------------------------------------------------
+
+    #: The workflow's numbered sections (explicit user request, 2026-10-27:
+    #: "sub-menus that are collapsible and make the layout clearer").
+    STEP_TITLES = ("1 · Calculation and sites",
+                   "2 · Shift scale (references) or paramagnetic scaling",
+                   "3 · Solid or solution, and motional averaging",
+                   "4 · Experiment: field, static or MAS",
+                   "5 · Simulate",
+                   "6 · View tensors (3D)")
+
+    def _build_steps(self) -> None:
+        """Rearrange the Solid-state NMR panel this extends into the six
+        steps of :attr:`STEP_TITLES`, each a collapsible section, with
+        the DFT parts between them. Its own parts are moved, not rebuilt,
+        so everything it does (and every test of it) still holds."""
+        layout = self.layout()
+        taken = []
+        while layout.count():
+            taken.append(layout.takeAt(0))
+        blurb = taken[0].widget()
+        sites_box = taken[2].widget()
+        actions = [item for item in taken[4:] if item.spacerItem() is None]
+        # The base's experiment form: the nucleus comes from step 1.
+        setup = self._setup_form
+        setup.setParent(None)
+        self.dft_nucleus_label = QLabel("— (choose the sites in step 1)")
+        self.dft_nucleus_label.setToolTip("The observed isotope chosen in step 1.")
+        setup.insertRow(0, "Nucleus:", self.dft_nucleus_label)
+        setup.setRowVisible(self.nucleus_combo, False)
+
+        def part(item):
+            return item.widget() if item.widget() is not None else item.layout()
+
+        def section(title, *parts):
+            body = QWidget()
+            v = QVBoxLayout(body)
+            v.setContentsMargins(0, 0, 0, 0)
+            for p in parts:
+                if isinstance(p, QWidget):
+                    v.addWidget(p)
+                else:
+                    p.setParent(None)
+                    v.addLayout(p)
+            return CollapsibleSection(title, content=body)
+
+        self.dft_sites_section = section(
+            "Edit the sites (peaks)", sites_box, self.site_box)
+        self.dft_axis_section = section("Axis and plot options", part(actions[0]))
+        self.dft_steps = [
+            section(self.STEP_TITLES[0], self._build_import_box()),
+            section(self.STEP_TITLES[1], self._build_paramagnetic_box(),
+                    self._build_reference_box()),
+            section(self.STEP_TITLES[2], self._build_state_box()),
+            section(self.STEP_TITLES[3], setup),
+            section(self.STEP_TITLES[4], self._build_calculate_box(), self.dft_sites_section,
+                    self.dft_axis_section, *[part(item) for item in actions[1:]]),
+            section(self.STEP_TITLES[5], self._build_tensor_box()),
+        ]
+        self.dft_isotope_combo.currentTextChanged.connect(self._on_isotope)
+        self.simulate_button.setText("Simulate the Sites as Edited")
+        self.simulate_button.setToolTip(
+            "Simulate the sites as they are now (after editing them above), without "
+            "recalculating them from the DFT file.")
+        layout.addWidget(blurb)
+        for step in self.dft_steps:
+            layout.addWidget(step)
+        layout.addStretch(1)
+
+    def _on_isotope(self, isotope: str) -> None:
+        """Step 1's isotope is the observed nucleus (step 4 shows it)."""
+        self.dft_nucleus_label.setText(isotope or "— (choose the sites in step 1)")
+        if isotope:
+            self.nucleus_combo.setCurrentText(isotope)
 
     def _file_row(self, attr, title):
         row = QHBoxLayout()
@@ -120,9 +187,10 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         row.addWidget(button)
         return row
 
-    def _build_import_box(self) -> QGroupBox:
-        box = QGroupBox("DFT calculation (sample)")
+    def _build_import_box(self) -> QWidget:
+        box = QWidget()
         v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
         form = QFormLayout()
         form.addRow("Sample:", self._file_row("dft_sample_edit", "Sample calculation"))
         self.dft_g0_check = QCheckBox("VASP: include the G=0 term")
@@ -333,8 +401,9 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
 
     def _build_state_box(self) -> QGroupBox:
         """Solid or solution, and which sites a fast motion averages."""
-        box = QGroupBox("Sample state and motion")
+        box = QWidget()
         v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
         form = QFormLayout()
         self.dft_state_combo = QComboBox()
         self.dft_state_combo.addItem("Solid – use the tensors in full", "solid")
@@ -350,8 +419,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         v.addLayout(form)
         v.addWidget(QLabel(
             "Fast motion (e.g. a rotating CH₃ or NH₃⁺): select the sites that exchange – "
-            "rows of the table of sites below (click, Ctrl-click or Shift-click), or names in "
-            "the Sites list at the top – and press Average Selected Sites. Their tensors are "
+            "names in the Sites list of step 1, or rows of the table of sites in step 5 (click, "
+            "Ctrl-click or Shift-click) – and press Average Selected Sites. Their tensors are "
             "averaged in the calculation's frame, so a solid gives the motionally averaged "
             "lineshape and a solution gives the mean shift. The sites are recalculated at once."))
         self.dft_average_hint = QLabel("No sites averaged.")
@@ -366,7 +435,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         row = QHBoxLayout()
         self.dft_average_button = QPushButton("Average Selected Sites")
         self.dft_average_button.setToolTip("Average the sites selected (highlighted) in the "
-                                           "site list above into one group.")
+                                           "Sites list of step 1 (or the table of step 5) into "
+                                           "one group.")
         self.dft_average_button.clicked.connect(lambda: self.average_selected())
         self.dft_unaverage_button = QPushButton("Remove Group")
         self.dft_unaverage_button.clicked.connect(lambda: self.remove_average_group())
@@ -437,6 +507,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
 
     def _build_reference_box(self) -> QGroupBox:
         box = QGroupBox("Shift scale: reference compounds")
+        self.dft_reference_box = box
         v = QVBoxLayout(box)
         intro = QLabel(
             "Add the reference calculations and type each one's experimental shift (δ_exp, on "
@@ -556,12 +627,17 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         row.addWidget(self.dft_slope_spin, 1)
         typed.addRow(row)
         v.addLayout(typed)
+        return box
 
-        v.addWidget(self._build_state_box())
+    def _build_calculate_box(self) -> QWidget:
+        """Step 5's top: calculate the sites, simulate, and the table."""
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
         self.dft_calculate_button = QPushButton("Calculate Sites and Simulate")
         self.dft_calculate_button.setToolTip(
-            "Work out every chosen site's parameters, put them in the site list below (replacing "
-            "what is there) and simulate with the settings below.")
+            "Work out every chosen site's parameters (steps 1–3), put them in the sites below "
+            "(replacing what is there) and simulate with the experiment of step 4.")
         self.dft_calculate_button.clicked.connect(lambda: self.calculate())
         v.addWidget(self.dft_calculate_button)
         self.dft_result_table = QTableWidget(0, len(dft_nmr.TABLE_COLUMNS))
@@ -597,9 +673,10 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         v.addWidget(self.dft_notes_label)
         return box
 
-    def _build_tensor_box(self) -> QGroupBox:
-        box = QGroupBox("Tensors of a site (3D)")
+    def _build_tensor_box(self) -> QWidget:
+        box = QWidget()
         form = QFormLayout(box)
+        form.setContentsMargins(0, 0, 0, 0)
         self.dft_tensor_site_combo = QComboBox()
         self.dft_tensor_site_combo.setToolTip("Any calculated atom (not only merged sites).")
         form.addRow("Site:", self.dft_tensor_site_combo)
@@ -1194,6 +1271,11 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
             self._tensor_form.setRowVisible(
                 self.dft_structure_radius_spin, region == "radius")
         sample = self.calcs["sample"]
+        # The G=0 choice only concerns VASP: shown before a file is read
+        # and for a VASP file, not for the others (a tidier step 1).
+        vasp = sample is None or str(sample.get("code", "")).upper().startswith("VASP")
+        self.dft_g0_check.setVisible(vasp)
+        self.dft_g0_help.setVisible(vasp)
         periodic = sample is not None and sample.get("lattice") is not None
         cell_item = self.dft_frame_combo.model().item(0)
         cell_item.setEnabled(periodic or sample is None)

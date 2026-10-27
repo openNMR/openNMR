@@ -29,8 +29,16 @@ def _dialogs(monkeypatch):
 
 
 def _titles(window, index):
+    """The tab's top-level sections (not those inside a section, e.g. the
+    DFT panel's numbered steps)."""
     tab = window.side_tabs.widget(index)
-    return [s.title() for s in tab.findChildren(CollapsibleSection)]
+
+    def nested(section):
+        node = section.parentWidget()
+        while node is not None and not isinstance(node, CollapsibleSection):
+            node = node.parentWidget()
+        return node is not None
+    return [s.title() for s in tab.findChildren(CollapsibleSection) if not nested(s)]
 
 
 def _editor(panel, kind):

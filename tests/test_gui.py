@@ -15503,7 +15503,10 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     assert side.index("Fitting") < side.index("Relaxation") < side.index("Simulations")
 
     simulations_tab = window.side_tabs.widget(side.index("Simulations"))
-    sections = simulations_tab.findChildren(CollapsibleSection)
+    # Top-level sections only: the DFT panel has numbered steps of its own
+    # inside its section (2026-10-27).
+    sections = [s for s in simulations_tab.findChildren(CollapsibleSection)
+                if _enclosing_collapsible_section(s) is None]
     # Diffusion (PFG) and Shaped pulse (Bloch): ported from upstream;
     # pNMR (CIF): the notebook's CIF shift simulation (test_gui_pnmr.py).
     # J-coupling first (test_gui_jcoupling.py); Czjzek distribution after
@@ -16137,7 +16140,8 @@ def _enter_simulations(window):
 def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
     window = MainWindow()
     page = window.side_tabs.widget(window._simulations_tab_index)
-    titles = [s.title() for s in page.findChildren(CollapsibleSection)]
+    titles = [s.title() for s in page.findChildren(CollapsibleSection)
+              if _enclosing_collapsible_section(s) is None]      # not the DFT panel's steps
     # Solid-state NMR holds every interaction since 2026-10-06.
     assert titles == ["Solution NMR", "Solid-state NMR", "Czjzek distribution",
                       "DFT tensors (CASTEP, VASP, ORCA, Gaussian)", "Diffusion (PFG)",
