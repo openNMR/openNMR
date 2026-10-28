@@ -793,6 +793,11 @@ class MplCanvas(QWidget):
     _BASELINE_GAP = 0.10
     _STACK_GAP = 0.05
     _TOP_GAP = 0.05
+    #: The stacked-spectra gap may go **negative** -- spectra that overlap,
+    #: each reaching into the one above by that fraction of its height
+    #: (Compare ▸ Spacing slider, 2026-10-28). -0.9 keeps a spectrum's
+    #: baseline 10 % of its height from the next one's.
+    _STACK_GAP_MIN = -0.90
     TICK_DIRECTIONS = (("In", "in"), ("Out", "out"), ("In and out", "inout"))
 
     #: Default **export** figure size, inches. Not applied to the live
@@ -1576,6 +1581,10 @@ class MplCanvas(QWidget):
         self._spectrum_panel_groups: list = []   # ... and the spectra (indices) it holds
         self._spectrum_panel_link = None
         self._compare_panels_kwargs = None
+        #: Panel labels (a), (b)... : the ``add_panel_labels`` arguments last
+        #: asked for (None: none), and a drag of one in progress.
+        self._panel_label_args: dict | None = None
+        self._label_drag: dict | None = None
         self._panel_home_limits: list = []
         self._panel_spectra: list = []
         #: Zoomed insets of the single 2D contour on show (Plot Style ▸ 2D ▸
@@ -3165,7 +3174,7 @@ class MplCanvas(QWidget):
         trace's height), as in a 1D and a stacked Compare."""
         return {"slices": self._contour_slices or None,
                 "slice_bottom_gap": self._baseline_gap,
-                "slice_offset_fraction": 1.0 / (1.0 + max(0.0, self._stack_gap))}
+                "slice_offset_fraction": 1.0 / (1.0 + max(self._STACK_GAP_MIN, self._stack_gap))}
 
     def set_slice_colour(self, position: int, colour: str) -> None:
         """Recolour one extracted slice, by its position in the list.
@@ -3351,12 +3360,133 @@ class MplCanvas(QWidget):
         else:
             result = plotting.fit_labels_within_figure(self.figure)
             clipped = result["clipped"] if not result["fitted"] else []
+            if self._settle_panel_labels():
+                result = plotting.fit_labels_within_figure(self.figure)
+                clipped = result["clipped"] if not result["fitted"] else []
+                self._settle_panel_labels(final=True)
         self._apply_colorbar_gap()
         # Only on a change: a phase drag relayouts continuously, and
         # re-announcing the same thing every frame is noise.
         if clipped != self._last_clipped_labels:
             self._last_clipped_labels = clipped
             self.labelsClipped.emit(list(clipped))
+
+    # ---- panel labels (a), (b), ... -------------------------------------------
+
+    def panel_labels(self):
+        """The :class:`opennmr.notebook.panel_labels.PanelLabels` on show, or None."""
+        labels = getattr(self.figure, "_opennmr_panel_labels", None)
+        if labels is None or not any(t is not None for t in labels.texts):
+            return None
+        return labels
+
+    def _settle_panel_labels(self, final: bool = False) -> bool:
+        """Put the panel labels where the layout just made room for them.
+        Returns True when they moved (so the layout must be redone to
+        reserve that room). ``final``: only place, never ask for another pass."""
+        labels = self.panel_labels()
+        if labels is None:
+            return False
+        try:
+            moved = labels.place()
+        except Exception:  # noqa: BLE001 -- labels are cosmetic: never take a redraw down
+            return False
+        return bool(moved) and not final
+
+    def _label_target_axes(self) -> list:
+        """The panels a label set belongs to: the Compare panels, or the
+        side-by-side 2D panels; none for any other view."""
+        if self._spectrum_panels:
+            return list(self._spectrum_panels)
+        if len(self._panel_axes) > 1:
+            return list(self._panel_axes)
+        return []
+
+    def set_panel_labels(self, args: dict | None) -> bool:
+        """Show, change or remove the panel labels (a), (b)... on the panels
+        showing now. ``args``: :func:`opennmr.notebook.panel_labels.add_panel_labels`
+        keywords (``style``, ``start``, ``order``, ``placement``, ``positions``,
+        ``fontsize``, ...), or None / empty for no labels. Kept, so the next
+        redraw of the same view carries them. Returns whether labels are
+        showing (False: no multi-panel view is on)."""
+        from ...notebook.panel_labels import add_panel_labels
+        self._panel_label_args = dict(args) if args else None
+        old = getattr(self.figure, "_opennmr_panel_labels", None)
+        if old is not None:
+            old.remove()
+        if self._compare_panels_kwargs is not None:
+            self._compare_panels_kwargs["panel_labels"] = self._panel_label_args
+        axes = self._label_target_axes()
+        if not args or not axes:
+            self._apply_layout()
+            self.canvas.draw_idle()
+            return False
+        kwargs = dict(args)
+        kwargs.setdefault("fontsize", self._AXIS_LABELSIZE * 1.15)
+        add_panel_labels(self.figure, axes, **kwargs)
+        self._apply_layout()
+        self.canvas.draw_idle()
+        return True
+
+    # -- dragging a label with the mouse
+
+    _LABEL_DRAG_BLOCKERS = ("_pick_mode", "_region_select_mode", "_measurement_mode", "_width_mode",
+                            "_inset_mode")
+
+    def _panel_label_at(self, event):
+        """``(panel index, Text)`` of the panel label under the mouse, or None."""
+        labels = self.panel_labels()
+        if labels is None or event.x is None or event.y is None:
+            return None
+        if self.toolbar.mode != "" or any(getattr(self, name, False) for name in self._LABEL_DRAG_BLOCKERS):
+            return None
+        try:
+            renderer = self.canvas.get_renderer()
+        except AttributeError:
+            return None
+        for i, text in enumerate(labels.texts):
+            if text is None or not text.get_visible():
+                continue
+            box = text.get_window_extent(renderer).expanded(1.15, 1.25)
+            if box.contains(event.x, event.y):
+                return i, text
+        return None
+
+    def _begin_label_drag(self, event) -> bool:
+        if event.button != 1 or getattr(event, "dblclick", False):
+            return False
+        hit = self._panel_label_at(event)
+        if hit is None:
+            return False
+        i, _text = hit
+        labels = self.panel_labels()
+        self._label_drag = {"panel": i, "x": float(event.x), "y": float(event.y),
+                            "offset": tuple(labels.offsets[i]), "moved": False}
+        return True
+
+    def _drag_label(self, event) -> None:
+        drag = self._label_drag
+        labels = self.panel_labels()
+        if drag is None or labels is None or event.x is None or event.y is None:
+            return
+        scale = 72.0 / self.figure.dpi
+        dx = drag["offset"][0] + (event.x - drag["x"]) * scale
+        dy = drag["offset"][1] + (event.y - drag["y"]) * scale
+        if abs(event.x - drag["x"]) + abs(event.y - drag["y"]) > 2:
+            drag["moved"] = True
+        labels._apply(drag["panel"], (dx, dy))
+        drag["current"] = (dx, dy)
+        self.canvas.draw_idle()
+
+    def _end_label_drag(self, event) -> None:
+        drag, self._label_drag = self._label_drag, None
+        if drag is None or not drag.get("moved") or "current" not in drag:
+            return
+        dx, dy = drag["current"]
+        labels = self.panel_labels()
+        if labels is not None:
+            labels.offsets[drag["panel"]] = (dx, dy)
+        self.panelLabelMoved.emit(int(drag["panel"]), float(dx), float(dy))
 
     def _cancel_navigation_drag(self) -> None:
         """Abandon any half-finished toolbar zoom/pan drag, and take
@@ -3462,6 +3592,9 @@ class MplCanvas(QWidget):
         self._spectrum_panel_groups = []
         self._spectrum_panel_link = None
         self._compare_panels_kwargs = None
+        # The labels belonged to the Axes about to go
+        self._label_drag = None
+        self.figure._opennmr_panel_labels = None
         self._overlay_spectra = []
         self._overlay_labels = None
         self._overlay_kwargs = {}
@@ -3541,7 +3674,9 @@ class MplCanvas(QWidget):
             self.canvas, self.ax, self._proj_axes.get("f1"), self._proj_axes.get("f2"),
             self.toolbar, stack_axes=self._compare_axes,
             panel_axes=(self._panel_axes if len(self._panel_axes) > 1 else
-                        self._spectrum_panels if len(self._spectrum_panels) > 1 else None),
+                        [a for a in self._spectrum_panels
+                         if getattr(a, "_opennmr_panel_kind", "") != "pulse"]
+                        if len(self._spectrum_panels) > 1 else None),
             color=self._crosshair_color, linewidth=self._crosshair_width, linestyle="--",
         )
 
@@ -3980,6 +4115,8 @@ class MplCanvas(QWidget):
                 for ax in self.figure.axes}
 
     def _on_press(self, event) -> None:
+        if self._begin_label_drag(event):
+            return
         # getattr, not a plain attribute access -- a real matplotlib
         # MouseEvent always has .xdata (possibly None), but this is no
         # longer gated on _fit_mode first (see below), so a fake event
@@ -4145,6 +4282,9 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     def _on_motion(self, event) -> None:
+        if self._label_drag is not None:
+            self._drag_label(event)
+            return
         self._ensure_crosshair()
         # Before the drag branches below, not after: they return early,
         # and the cursor has to be resolved on every move, not only on
@@ -4267,6 +4407,9 @@ class MplCanvas(QWidget):
             self.canvas.draw_idle()
 
     def _on_release(self, event) -> None:
+        if self._label_drag is not None:
+            self._end_label_drag(event)
+            return
         self._refit_3d_ticks_after_release(event)
         if self._zoom_start is not None:
             self._zoom_drag_to(event)
@@ -4417,6 +4560,10 @@ class MplCanvas(QWidget):
     #: A double-click cleared a stacked Compare row's selection, so the
     #: Compare list can drop its current row too.
     compareSelectionCleared = Signal()
+    #: A panel label was dragged to a new place: ``(panel, dx, dy)`` -- the
+    #: 0-based panel and the label's offset from that panel's top-left
+    #: corner, in points.
+    panelLabelMoved = Signal(int, float, float)
     #: Emitted with the plotted-row position when a click on the stacked
     #: Compare plot selects a row (the list follows; see MainWindow).
     compareRowSelected = Signal(int)
@@ -5144,6 +5291,8 @@ class MplCanvas(QWidget):
         panel, or the names written on the traces)."""
         as_labels = self._legend_style == "labels"
         for ax in self._spectrum_panels:
+            if getattr(ax, "_opennmr_panel_kind", "1d") != "1d":
+                continue          # a 2D overlay and a pulse diagram draw their own legends
             handles, labels = ax.get_legend_handles_labels()
             pairs = [(h, plotting.safe_label(l) if hasattr(plotting, "safe_label") else l)
                      for h, l in zip(handles, labels) if not str(l).startswith("_")]
@@ -5791,7 +5940,7 @@ class MplCanvas(QWidget):
             self._baseline_gap = max(0.0, float(baseline_gap))
             gaps_changed = True
         if stack_gap is not None and float(stack_gap) != self._stack_gap:
-            self._stack_gap = max(0.0, float(stack_gap))
+            self._stack_gap = max(self._STACK_GAP_MIN, float(stack_gap))
             gaps_changed = True
         if gaps_changed:
             self._refit_spectrum_y_limits()
@@ -5968,6 +6117,23 @@ class MplCanvas(QWidget):
         # scratch) -- nothing to update on the already-drawn axes here.
 
         self.canvas.draw_idle()
+
+    def set_stack_gap(self, gap: float) -> None:
+        """Change the spacing between stacked spectra alone -- the Compare
+        ▸ Spacing slider's fast path (:meth:`set_style` re-applies every axis
+        setting, too slow to run on every step of a drag). ``gap`` is a
+        fraction of a spectrum's height; negative: the spectra overlap."""
+        gap = max(self._STACK_GAP_MIN, float(gap))
+        if gap == self._stack_gap:
+            return
+        self._stack_gap = gap
+        self._refit_spectrum_y_limits()
+        if self._contour_spectrum is not None and self._contour_slices:
+            self._redraw_contour(preserve_view=True)
+
+    def stack_gap(self) -> float:
+        """The current spacing between stacked spectra (see :meth:`set_stack_gap`)."""
+        return float(self._stack_gap)
 
     def plot_kind(self) -> str | None:
         """The kind of plot showing -- ``"1d"``, ``"2d"``,
@@ -7415,19 +7581,35 @@ class MplCanvas(QWidget):
                             ncols: int | None = None, linked: bool = True, link_y: bool = False,
                             normalize: bool = False, series_keys: list | None = None,
                             legend_labels: list | None = None, axis_labels: str = "auto",
-                            axis_styles=None) -> None:
-        """Compare 1D spectra as separate panels. ``groups`` says which of
+                            axis_styles=None, twod_options: dict | None = None,
+                            pulse_panels: dict | None = None,
+                            panel_labels: dict | None = None) -> None:
+        """Compare spectra as separate panels. ``groups`` says which of
         ``spectra`` (indices) share a panel: ``[[0, 1], [2]]`` is two panels,
         the first holding two superimposed spectra. Names and colours come
         from the series entries, so Plot Style and Rename reach every panel;
         a spectrum made from a kept fit brings its fit, components and
         residual. ``linked`` ties the panels' shift axes together (and
-        ``link_y`` the intensity axes); see :meth:`set_spectrum_panels_linked`."""
+        ``link_y`` the intensity axes); see :meth:`set_spectrum_panels_linked`.
+
+        A panel holds 1D spectra (superimposed) **or** 2D spectra (a contour,
+        or an overlay of 2-6), so 1D and 2D can share one figure; ``twod_options``
+        are extra :func:`opennmr.plotting.twod.plot_2d_contour` keywords for the
+        2D panels (``factor``, ``clevels``, ``show_projections``...).
+        ``pulse_panels`` -- ``{spectrum index: {"sequence": PulseSequence | None,
+        "options": {...}, "message": "..."}}`` -- turns the (single-spectrum)
+        panel of that index into the spectrum's pulse-sequence diagram
+        (``sequence`` None: a note saying why there is none).
+        ``panel_labels``: :func:`opennmr.notebook.panel_labels.add_panel_labels`
+        keywords for (a), (b)... (None: no labels)."""
         from ...notebook.compare_panels import apply_axis_styles, plot_compare_panels
         groups = [list(g) for g in groups]
+        pulse_panels = dict(pulse_panels or {})
         kwargs = {"layout": layout, "ncols": ncols, "linked": linked, "link_y": link_y,
                   "normalize": normalize, "series_keys": series_keys, "legend_labels": legend_labels,
-                  "axis_labels": axis_labels, "axis_styles": axis_styles}
+                  "axis_labels": axis_labels, "axis_styles": axis_styles,
+                  "twod_options": twod_options, "pulse_panels": pulse_panels,
+                  "panel_labels": panel_labels}
         self._enter_plot_kind("compare")
         self._contour_spectrum = None
         self._contour_factor = None
@@ -7444,6 +7626,7 @@ class MplCanvas(QWidget):
         if not was_panels:
             self._legend_visible = True         # panels hold different spectra: name them
         self._compare_panels_kwargs = kwargs
+        self._panel_label_args = dict(panel_labels) if panel_labels else None
         self._compare_kwargs = None
         self._compare_spectra = list(spectra)
         entries = self._assign_series("compare", [
@@ -7452,16 +7635,33 @@ class MplCanvas(QWidget):
              False)
             for i in range(len(spectra))
         ])
-        panels = [{"spectra": [spectra[i] for i in g],
-                   "labels": [entries[i].label for i in g],
-                   "colors": [entries[i].colour for i in g]} for g in groups]
+        panels = []
+        for g in groups:
+            if len(g) == 1 and g[0] in pulse_panels:
+                info = pulse_panels[g[0]]
+                panels.append({"pulse_sequence": info.get("sequence"), "options": info.get("options") or {},
+                               "message": info.get("message")})
+            else:
+                panels.append({"spectra": [spectra[i] for i in g],
+                               "labels": [entries[i].label for i in g],
+                               "colors": [entries[i].colour for i in g]})
+        twod = {"tick_length": self._TICK_LENGTH, "tick_width": self._TICK_WIDTH,
+                "contour_linewidth": self._contour_linewidth, "colour_spectra": self._contour_colour,
+                "factor": self._CONTOUR_FACTOR_DEFAULT, "clevels": self._CONTOUR_CLEVELS_DEFAULT,
+                **self._contour_fraction_kwargs(), **self._nq_line_kwargs()}
+        twod.update({k: v for k, v in (twod_options or {}).items() if v is not None})
+        label_args = dict(panel_labels) if panel_labels else None
+        if label_args is not None:
+            label_args.setdefault("fontsize", self._AXIS_LABELSIZE * 1.15)
         result = plot_compare_panels(
             panels, layout=layout, ncols=ncols, link=linked, link_y=link_y, normalize=normalize,
             full_resolution=self._full_resolution, fig=self.figure, fontsize=self._AXIS_LABELSIZE,
             tight=False, model_for=self.compare_fit_model, axis_labels=axis_labels,
-            axis_styles=axis_styles)
+            axis_styles=axis_styles, twod_options=twod, panel_labels=label_args)
         for ax in result.axes:
             ax.patch.set_alpha(0.0)
+            if getattr(ax, "_opennmr_panel_kind", "1d") != "1d":
+                continue                  # a 2D contour and a pulse diagram keep their own furniture
             plotting.apply_spine_style(ax, top=False, right=False, bottom=True, left=False,
                                        linewidth=self._AXIS_LINEWIDTH)
             plotting.apply_tick_style(ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
@@ -7637,7 +7837,8 @@ class MplCanvas(QWidget):
 
     def show_2d_panels(self, spectra: list[NMRSpectrum], labels: list[str] | None = None,
                        layout: str = "row", projections: bool = False, link_axes: bool = False,
-                       insets=None, factor: float | None = None, clevels: int | None = None) -> None:
+                       insets=None, factor: float | None = None, clevels: int | None = None,
+                       panel_labels: dict | None = None) -> None:
         """2D spectra side by side -- one contour panel each, in a row,
         column or grid (:func:`opennmr.plotting.twod.multi_plot`, the
         GUI's port of the notebook's ``NMR2D_multi_plot``).
@@ -7648,6 +7849,9 @@ class MplCanvas(QWidget):
         and zooming one zooms them all. Done with limit callbacks, not
         matplotlib's ``sharex``: each panel inverts its own axes, and
         inverting a shared axis once per panel flips it back and forth.
+
+        ``panel_labels`` : :func:`opennmr.notebook.panel_labels.add_panel_labels`
+        keywords -- (a), (b)... on the panels (None: none).
         """
         self._enter_plot_kind("2d")   # its saved default style (Plot Style ▸ Per-type)
         self.clear()
@@ -7675,6 +7879,12 @@ class MplCanvas(QWidget):
             self._link_panel_limits(axes)
         self._panel_axes = list(axes)
         self._panel_home_limits = [(ax.get_xlim(), ax.get_ylim()) for ax in axes]
+        self._panel_label_args = dict(panel_labels) if panel_labels else None
+        if panel_labels and n > 1:
+            from ...notebook.panel_labels import add_panel_labels
+            label_args = dict(panel_labels)
+            label_args.setdefault("fontsize", self._AXIS_LABELSIZE * 1.15)
+            add_panel_labels(self.figure, list(axes), **label_args)
         # A crosshair here too (Compare 2D): in every panel while their
         # spans match, in the panel under the cursor alone otherwise.
         self._crosshair_ready = True

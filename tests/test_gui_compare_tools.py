@@ -148,11 +148,25 @@ def _compare(window, spectra, labels):
 
 def test_compare_sections_in_order(window):
     page = window.side_tabs.widget(window._compare_tab_index)
-    titles = [s.title() for s in page.findChildren(CollapsibleSection)]
+    sections = page.findChildren(CollapsibleSection)
+
+    def nested(section):
+        parent = section.parentWidget()
+        while parent is not None:
+            if isinstance(parent, CollapsibleSection):
+                return True
+            parent = parent.parentWidget()
+        return False
+
+    top = [s for s in sections if not nested(s)]
     # DNP moved to Apply ▸ DNP (2026-09-30); the plot options went into a
-    # "Compare Controls" section in 0.8.4. Every section starts collapsed.
-    assert titles == ["Compare Controls", "Spectrum Arithmetic"]
-    assert all(not s.isExpanded() for s in page.findChildren(CollapsibleSection))
+    # "Compare Controls" section in 0.8.4. Every top-level section starts
+    # collapsed. (2026-10-28: Compare Controls holds its own sub-sections.)
+    assert [s.title() for s in top] == ["Compare Controls", "Spectrum Arithmetic"]
+    assert all(not s.isExpanded() for s in top)
+    inner = [s.title() for s in sections if nested(s)]
+    for title in ("Spacing", "2D spectra", "Panels", "Axes", "Panel labels"):
+        assert title in inner
 
 
 def test_combine_to_spectrum_is_the_notebook_function(qapp):

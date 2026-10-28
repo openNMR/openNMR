@@ -1,18 +1,26 @@
-"""Compare ▸ Layout ▸ Panels: the controls for separate 1D panels in a row,
-column or grid -- link the panels' zoom, choose the grid's columns, and say
-which panel each checked spectrum goes in (one or many spectra per panel)."""
+"""Compare ▸ Layout ▸ Panels: the controls for separate panels in a row,
+column or grid -- link the panels' zoom, choose the grid's columns, say which
+panel each checked spectrum goes in (one or many spectra per panel) and whether
+a panel shows the spectrum or its pulse sequence, and style each panel's axis.
+
+1D spectra, 2D spectra and pulse sequences can share one figure. The widget
+holds two collapsible sub-sections, *Panels* and *Axes*."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
                                QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout)
+                               QVBoxLayout, QWidget)
 
 from ..notebook.compare_panels import TICK_DIRECTIONS, panel_groups
+from .widgets.collapsible_section import CollapsibleSection
 from .widgets.typed_spinbox import TypedDoubleSpinBox, TypedSpinBox
 
+#: What a panel shows for a checked spectrum.
+CONTENTS = (("Spectrum", "spectrum"), ("Pulse sequence", "pulse"))
 
-class ComparePanelsControls(QGroupBox):
+
+class ComparePanelsControls(QWidget):
     """``changed`` -- the assignment or grid shape changed (redraw);
     ``link_toggled(x_linked, y_linked)`` -- only the linking changed (no
     redraw needed)."""
@@ -21,11 +29,16 @@ class ComparePanelsControls(QGroupBox):
     link_toggled = Signal(bool, bool)
 
     def __init__(self, parent=None) -> None:
-        super().__init__("Panels", parent)
+        super().__init__(parent)
         self._keys: list = []
         self._panel_of: dict = {}          # key -> panel number (kept when a row is unchecked)
+        self._content_of: dict = {}        # key -> "spectrum" | "pulse"
         self._building = False
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        panels_body = QWidget()
+        layout = QVBoxLayout(panels_body)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         links = QHBoxLayout()
         self.link_check = QCheckBox("Link panels")
@@ -49,13 +62,16 @@ class ComparePanelsControls(QGroupBox):
         cols.addStretch(1)
         layout.addLayout(cols)
 
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Spectrum", "Panel"])
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Spectrum", "Panel", "Show"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
-        self.table.setMaximumHeight(160)
+        self.table.setMaximumHeight(180)
         self.table.setToolTip("Which panel each checked spectrum is drawn in. Give several spectra "
-                              "the same number to superimpose them in one panel.")
+                              "the same number to put them in one panel (1D together are "
+                              "superimposed; 2D together are overlaid); a different number gives a "
+                              "spectrum its own axes. A 1D and a 2D cannot share a panel. "
+                              "Show: the spectrum, or its pulse sequence.")
         layout.addWidget(self.table)
 
         buttons = QHBoxLayout()
@@ -66,8 +82,10 @@ class ComparePanelsControls(QGroupBox):
         buttons.addWidget(one)
         buttons.addWidget(every)
         layout.addLayout(buttons)
-
-        layout.addWidget(self._build_axis_group())
+        self.panels_section = CollapsibleSection("Panels", content=panels_body, expanded=False)
+        outer.addWidget(self.panels_section)
+        self.axes_section = CollapsibleSection("Axes", content=self._build_axis_group(), expanded=False)
+        outer.addWidget(self.axes_section)
 
         self.link_check.toggled.connect(self._emit_link)
         self.link_y_check.toggled.connect(self._emit_link)
@@ -75,10 +93,11 @@ class ComparePanelsControls(QGroupBox):
 
     # --- axes ------------------------------------------------------------
 
-    def _build_axis_group(self) -> QGroupBox:
+    def _build_axis_group(self) -> QWidget:
         """Axis labels and the look of each panel's shift axis."""
-        box = QGroupBox("Axes")
+        box = QWidget()
         g = QGridLayout(box)
+        g.setContentsMargins(0, 0, 0, 0)
         self._axis_styles: dict = {}            # "all" or 0-based panel -> {option: value}
         g.addWidget(QLabel("Labels"), 0, 0)
         self.axis_labels_combo = QComboBox()
@@ -87,7 +106,8 @@ class ComparePanelsControls(QGroupBox):
         self.axis_labels_combo.addItem("Bottom panels only", "bottom")
         self.axis_labels_combo.setToolTip(
             "Automatic: every panel has its own label when the axes read differently (different "
-            "nuclei), only the bottom ones when they all read the same.")
+            "nuclei) or when 2D spectra or pulse sequences are among the panels, only the bottom "
+            "ones when 1D panels all read the same.")
         self.axis_labels_combo.currentIndexChanged.connect(lambda _i: self._emit_changed())
         g.addWidget(self.axis_labels_combo, 0, 1)
         g.addWidget(QLabel("Edit"), 1, 0)
@@ -254,8 +274,33 @@ class ComparePanelsControls(QGroupBox):
                 spin.setValue(self._panel_of[k])
                 spin.valueChanged.connect(lambda v, key=k: self._on_panel(key, v))
                 self.table.setCellWidget(row, 1, spin)
+                show = QComboBox()
+                for text, value in CONTENTS:
+                    show.addItem(text, value)
+                show.setCurrentIndex(max(0, show.findData(self._content_of.get(k, "spectrum"))))
+                show.setToolTip("Spectrum: the data. Pulse sequence: this experiment's pulse programme, "
+                                "drawn as in the Pulse sequence viewer (its colours, names and fonts), "
+                                "in a panel of its own.")
+                show.currentIndexChanged.connect(lambda _i, key=k, box=show: self._on_content(key, box.currentData()))
+                self.table.setCellWidget(row, 2, show)
         finally:
             self._building = False
+
+    def contents(self) -> list:
+        """``"spectrum"`` or ``"pulse"`` for each spectrum, in plot order."""
+        return [self._content_of.get(k, "spectrum") for k in self._keys]
+
+    def contents_by_key(self) -> dict:
+        """``{series key: "spectrum" | "pulse"}`` for the spectra in the table."""
+        return {k: self._content_of.get(k, "spectrum") for k in self._keys}
+
+    def has_pulse(self) -> bool:
+        """Whether any spectrum is set to show its pulse sequence."""
+        return any(v == "pulse" for v in self.contents_by_key().values())
+
+    def _on_content(self, key, value) -> None:
+        self._content_of[key] = value
+        self._emit_changed()
 
     def assignment(self) -> list:
         """The panel number of each spectrum, in plot order."""

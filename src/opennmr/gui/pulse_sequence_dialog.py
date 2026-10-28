@@ -59,6 +59,46 @@ _GROUPS = (("Pulses", ("hard", "shaped", "decoupling")), ("Gradients", ("gradien
            ("Delays", ("delay",)))
 
 
+def saved_draw_options(settings: dict | None, sequence_name: str = "") -> dict:
+    """The look the pulse-sequence viewer has saved -- its colours, options and
+    the renames kept for ``sequence_name`` -- as keywords for
+    :func:`opennmr.notebook.pulse_sequence.plot_pulse_sequence`, without opening
+    the viewer. What Compare uses to draw a pulse sequence in a panel in the
+    style the user has set up (every name shown: which names are ticked in the
+    viewer's tree is not kept). ``settings`` is the window's ``_ui_settings``."""
+    from ..notebook import pulse_sequence as ps
+    settings = settings or {}
+    saved = settings.get("pulse_sequence_options") or {}
+    style = saved.get("delay_style")
+    if style not in ps.DELAY_STYLES:
+        style = "line"
+    opts = {"show_values": bool(saved.get("show_values", False)),
+            "show_loops": bool(saved.get("show_loops", True)), "delay_style": style}
+    for key, default in PulseSequenceDialog._STYLE_DEFAULTS.items():
+        value = saved.get(key, default)
+        opts[key] = value if isinstance(value, type(default)) or (
+            isinstance(default, float) and isinstance(value, int)) else default
+    for key, allowed in (("legend_position", ps.LEGEND_POSITIONS), ("title_position", ps.TITLE_POSITIONS)):
+        if opts[key] not in allowed:
+            opts[key] = PulseSequenceDialog._STYLE_DEFAULTS[key]
+    renames = (settings.get("pulse_sequence_renames") or {}).get(sequence_name) or {}
+    return dict(colors={**ps.DEFAULT_COLORS, **(settings.get("pulse_sequence_colors") or {})},
+                show_values=opts["show_values"], show_loops=opts["show_loops"],
+                delay_style=opts["delay_style"],
+                renames=dict(renames.get("names") or {}),
+                channel_labels=dict(renames.get("channels") or {}),
+                legend_labels=dict(renames.get("legend") or {}),
+                acquire_separate=opts["acquire_separate"], fontfamily=opts["fontfamily"] or None,
+                fontsize=float(opts["fontsize"]),
+                channel_fontsize=float(opts["channel_fontsize"]) or None,
+                legend_fontsize=float(opts["legend_fontsize"]) or None,
+                title_fontsize=float(opts["title_fontsize"]) or None,
+                linewidth=float(opts["linewidth"]), pulse_height=float(opts["pulse_height"]),
+                title=opts["title"], title_text=opts["title_text"] or None,
+                title_position=opts["title_position"], legend=opts["legend"],
+                legend_position=opts["legend_position"], note=opts["note"])
+
+
 class PulseSequenceDialog(QDialog):
     """``spectrum``: the open experiment (its own parameter values fill in
     ``d1``, ``p1``...). ``settings``: the window's ``_ui_settings`` dict,

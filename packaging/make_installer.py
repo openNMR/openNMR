@@ -84,9 +84,55 @@ def macos_dmg(version: str) -> str:
     shutil.copytree(app, os.path.join(staging, f"{APP_NAME}.app"), symlinks=True)
     os.symlink("/Applications", os.path.join(staging, "Applications"))
     out = os.path.join(DIST_DIR, f"openNMR-{version}-macos-{_arch()}.dmg")
-    subprocess.run(["hdiutil", "create", "-volname", f"openNMR {version}", "-srcfolder", staging,
-                    "-ov", "-format", "UDZO", out], check=True)
+    volume = f"openNMR {version}"
+    _detach_volume(volume)
+    # HFS+ rather than the default (APFS on recent macOS), whose image
+    # creation from a folder is the usual source of "hdiutil: create
+    # failed - Resource busy" (a friend's Mac, 2026-10-27); HFS+ also
+    # opens on every macOS the app supports.
+    command = ["hdiutil", "create", "-volname", volume, "-srcfolder", staging, "-fs", "HFS+",
+               "-ov", "-format", "UDZO", out]
+    _run_with_retries(command, out, volume)
     return out
+
+
+#: How often, and how long apart (s), ``hdiutil create`` is tried. A busy
+#: resource is usually Spotlight or the malware scan looking at the newly
+#: signed app or the scratch image, which lets go within seconds.
+DMG_ATTEMPTS = 5
+DMG_PAUSE_S = 3.0
+
+
+def _detach_volume(volume: str) -> None:
+    """Eject ``/Volumes/<volume>`` if an earlier run (or a double-click on
+    an earlier .dmg) left it mounted: a volume of the same name keeps the
+    new image's from mounting ("Resource busy")."""
+    mount = os.path.join("/Volumes", volume)
+    if os.path.ismount(mount) or os.path.isdir(mount):
+        subprocess.run(["hdiutil", "detach", mount, "-force"], check=False)
+
+
+def _run_with_retries(command, out, volume, attempts=None, pause=None, sleep=None) -> None:
+    """``command`` (``hdiutil create``), tried again after a pause when it
+    fails -- each time with a stale volume ejected and the partial image
+    removed. Raises the last failure after ``attempts`` tries."""
+    import time
+    attempts = DMG_ATTEMPTS if attempts is None else attempts
+    pause = DMG_PAUSE_S if pause is None else pause
+    sleep = time.sleep if sleep is None else sleep
+    for attempt in range(1, attempts + 1):
+        try:
+            subprocess.run(command, check=True)
+            return
+        except subprocess.CalledProcessError:
+            if attempt == attempts:
+                raise
+            print(f"hdiutil create failed (attempt {attempt} of {attempts}); trying again in "
+                  f"{pause * attempt:g} s", flush=True)
+            if os.path.exists(out):
+                os.remove(out)
+            _detach_volume(volume)
+            sleep(pause * attempt)
 
 
 def _copy_text_lf(source: str, target: str) -> None:

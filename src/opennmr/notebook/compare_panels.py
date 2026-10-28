@@ -1,5 +1,6 @@
 """
-Compare 1D spectra as a **row, column or grid of separate panels**.
+Compare spectra as a **row, column or grid of separate panels**: 1D spectra,
+2D spectra and pulse-sequence diagrams, in any mixture.
 
 The 1D counterpart of :func:`opennmr.notebook.NMR2D_multi_plot`, and what the
 GUI's Compare tile draws for *Layout ▸ Panels*::
@@ -17,8 +18,15 @@ GUI's Compare tile draws for *Layout ▸ Panels*::
     link.set(x=False)          # zoom each panel on its own
     link.set(y=True)           # ... or share the vertical scale too
 
-Each **panel** is one Axes holding one spectrum or many (superimposed, one
-colour each, with a legend). A spectrum that carries a kept fit
+    # 1D beside a 2D (several 2D in one panel are overlaid), a pulse sequence
+    # in a panel of its own, and (a), (b)... on the panels
+    fig, axes, link = cp.plot_compare_panels(
+        [s1, hsqc, {"pulse_sequence": seq}], layout="row",
+        panel_labels={"style": "(a)", "start": "a", "order": "row"})
+
+Each **panel** is one Axes holding one 1D spectrum or many (superimposed, one
+colour each, with a legend), one 2D spectrum (or 2-6 overlaid), or a pulse
+sequence. Panel labels come from :mod:`opennmr.notebook.panel_labels`. A spectrum that carries a kept fit
 (``metadata.raw["fit_model"]``, i.e. an experiment made by "Keep in Open
 Experiments" on a kept fit) is drawn with its fit, components and residual as
 set by its ``fit_model_view`` -- exactly as Compare draws it.
@@ -84,10 +92,21 @@ class PanelLink:
     -- zooming or panning one panel moves them all. ``y`` (default False):
     the intensity axis too (only meaningful for spectra on one scale).
     Switch either at any time with :meth:`set`; turning one on puts every
-    panel on the first panel's current view."""
+    panel on the first panel's current view.
 
-    def __init__(self, axes, *, x: bool = True, y: bool = False) -> None:
+    ``x_keys`` / ``y_keys`` (one entry per panel) split the panels into link
+    groups: panels follow only those with an equal key, and a ``None`` key
+    never links. A figure mixing 1D and 2D spectra uses them so that a 1D and
+    the F2 axis of a 2D of the same nucleus move together, while a pulse
+    sequence (no shift axis) is left alone."""
+
+    def __init__(self, axes, *, x: bool = True, y: bool = False, x_keys=None, y_keys=None) -> None:
         self.axes = list(axes)
+        n = len(self.axes)
+        self.x_keys = list(x_keys) if x_keys is not None else [0] * n
+        self.y_keys = list(y_keys) if y_keys is not None else [0] * n
+        if len(self.x_keys) != n or len(self.y_keys) != n:
+            raise ValueError("x_keys and y_keys need one entry per panel.")
         self._busy = False
         self.x = False
         self.y = False
@@ -102,12 +121,22 @@ class PanelLink:
             turned_on = bool(x) and many and not self.x
             self.x = bool(x) and many
             if turned_on:
-                self._follow(self.axes[0], "x")
+                self._align("x")
         if y is not None:
             turned_on = bool(y) and many and not self.y
             self.y = bool(y) and many
             if turned_on:
-                self._follow(self.axes[0], "y")
+                self._align("y")
+
+    def _align(self, which: str) -> None:
+        """Every group onto its first panel's view."""
+        keys = self.x_keys if which == "x" else self.y_keys
+        seen = []
+        for ax, key in zip(self.axes, keys):
+            if key is None or key in seen:
+                continue
+            seen.append(key)
+            self._follow(ax, which)
 
     def _on_x(self, source) -> None:
         self._follow(source, "x")
@@ -118,11 +147,18 @@ class PanelLink:
     def _follow(self, source, which: str) -> None:
         if self._busy or not (self.x if which == "x" else self.y):
             return
+        keys = self.x_keys if which == "x" else self.y_keys
+        try:
+            key = keys[self.axes.index(source)]
+        except ValueError:
+            return
+        if key is None:
+            return
         self._busy = True
         try:
             limits = source.get_xlim() if which == "x" else source.get_ylim()
-            for other in self.axes:
-                if other is not source:
+            for other, other_key in zip(self.axes, keys):
+                if other is not source and other_key == key:
                     (other.set_xlim if which == "x" else other.set_ylim)(limits)
         finally:
             self._busy = False
@@ -132,6 +168,12 @@ class ComparePanels(NamedTuple):
     fig: object
     axes: list
     link: PanelLink
+
+    @property
+    def labels(self):
+        """The panel labels (:class:`opennmr.notebook.panel_labels.PanelLabels`),
+        or None when none were asked for."""
+        return getattr(self.fig, "_opennmr_panel_labels", None)
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +305,7 @@ def apply_axis_styles(axes, axis_styles, fontsize: float = 12.0) -> None:
     from matplotlib.ticker import MaxNLocator
     for k, ax in enumerate(axes):
         st = _style_for(axis_styles, k)
-        if not st:
+        if not st or ax is None or getattr(ax, "_opennmr_panel_kind", "") == "pulse":
             continue
         kw = {}
         for key, name in (("tick_direction", "direction"), ("tick_length", "length"),
@@ -300,29 +342,55 @@ def apply_axis_styles(axes, axis_styles, fontsize: float = 12.0) -> None:
             ax.set_xlabel(getattr(ax, "_opennmr_auto_xlabel", ""), fontsize=st.get("xlabel_fontsize") or fontsize)
 
 
+def _spectrum_kind(spectrum) -> str:
+    return "2d" if getattr(spectrum, "ndim", 1) == 2 else "1d"
+
+
 def _as_panels(panels) -> list:
-    """Each panel -> ``{"spectra": [...], "title": ..., "labels": [...],
-    "colors": [...]}``. A panel may be a spectrum, a list of them, or such a
-    dict (``title`` / ``labels`` / ``colors`` optional)."""
+    """Each panel -> ``{"kind": "1d" | "2d" | "pulse", "spectra": [...],
+    "title": ..., "labels": [...], "colors": [...], ...}``. A panel may be a
+    spectrum, a list of them, or such a dict (``title`` / ``labels`` /
+    ``colors`` optional; a 2D panel may carry ``insets`` and ``options`` for
+    :func:`opennmr.plotting.twod.plot_2d_contour`). A **pulse-sequence panel**
+    is ``{"pulse_sequence": <PulseSequence | spectrum | file path>,
+    "options": {...}}`` (``options``: :func:`plot_pulse_sequence` keywords).
+    A panel holds spectra of one kind: 1D together (superimposed) or 2D
+    together (an overlay, 2-6 of the same nuclei) -- never both."""
     if isinstance(panels, NMRSpectrum) or isinstance(panels, dict):
         panels = [panels]
     out = []
     for p in panels:
-        if isinstance(p, dict):
+        if isinstance(p, dict) and "pulse_sequence" in p:
+            if p.get("spectra"):
+                raise ValueError("A pulse-sequence panel holds a sequence, not spectra.")
+            out.append({"kind": "pulse", "spectra": [], "sequence": p["pulse_sequence"],
+                        "title": p.get("title"), "labels": None, "colors": None,
+                        "options": dict(p.get("options") or {}), "insets": None,
+                        "message": p.get("message")})
+        elif isinstance(p, dict):
             spectra = p["spectra"]
             spectra = [spectra] if isinstance(spectra, NMRSpectrum) else list(spectra)
-            out.append({"spectra": spectra, "title": p.get("title"),
-                        "labels": p.get("labels"), "colors": p.get("colors")})
+            out.append({"kind": None, "spectra": spectra, "title": p.get("title"),
+                        "labels": p.get("labels"), "colors": p.get("colors"),
+                        "options": dict(p.get("options") or {}), "insets": p.get("insets")})
         elif isinstance(p, NMRSpectrum):
-            out.append({"spectra": [p], "title": None, "labels": None, "colors": None})
+            out.append({"kind": None, "spectra": [p], "title": None, "labels": None,
+                        "colors": None, "options": {}, "insets": None})
         else:
-            out.append({"spectra": list(p), "title": None, "labels": None, "colors": None})
+            out.append({"kind": None, "spectra": list(p), "title": None, "labels": None,
+                        "colors": None, "options": {}, "insets": None})
     for k, p in enumerate(out):
+        if p["kind"] == "pulse":
+            continue
         if not p["spectra"]:
             raise ValueError(f"Panel {k + 1} holds no spectra.")
         for s in p["spectra"]:
-            if not isinstance(s, NMRSpectrum) or s.ndim != 1:
-                raise ValueError(f"Panel {k + 1}: every entry must be a 1D NMRSpectrum.")
+            if not isinstance(s, NMRSpectrum) or s.ndim not in (1, 2):
+                raise ValueError(f"Panel {k + 1}: every entry must be a 1D or 2D NMRSpectrum.")
+        kinds = {_spectrum_kind(s) for s in p["spectra"]}
+        if len(kinds) > 1:
+            raise ValueError(f"Panel {k + 1} mixes 1D and 2D spectra; give each kind its own panel.")
+        p["kind"] = kinds.pop()
     if not out:
         raise ValueError("Nothing to plot: give at least one panel.")
     return out
@@ -341,6 +409,82 @@ def _data_y_range(ax):
     return (min(lows), max(highs)) if lows else None
 
 
+def _x_link_key(p: dict, x_unit: str):
+    """Which panels' shift axes mean the same thing: ``(unit, nucleus)``. A
+    pulse sequence has no shift axis."""
+    if p["kind"] == "pulse":
+        return None
+    s = p["spectra"][0]
+    unit = "ppm" if p["kind"] == "2d" else str(x_unit).lower()
+    return (unit, getattr(getattr(s, "metadata", None), "nucleus", None))
+
+
+def _y_link_key(p: dict):
+    if p["kind"] == "pulse":
+        return None
+    if p["kind"] == "1d":
+        return "intensity"
+    s = p["spectra"][0]
+    meta = getattr(s, "metadata", None)
+    return ("2d", getattr(meta, "nucleus_indirect", None), bool(getattr(s, "is_pseudo_2d", False)))
+
+
+def _call_with(func, **kwargs):
+    """``func(**kwargs)`` keeping only the keywords it accepts."""
+    import inspect
+    accepted = inspect.signature(func).parameters
+    if any(v.kind is inspect.Parameter.VAR_KEYWORD for v in accepted.values()):
+        return func(**kwargs)
+    return func(**{k: v for k, v in kwargs.items() if k in accepted})
+
+
+def _draw_2d_panel(ax, fig, p: dict, names, cols, twod: dict, fontsize: float) -> None:
+    """One 2D panel: a contour plot of one spectrum, or a flat-colour overlay of
+    several (2-6 of the same nuclei). Settings, lowest first: this function's
+    defaults (no projections, a panel that fills its cell so it lines up with a
+    1D beside or above it), ``twod_options`` for every 2D panel, the panel's
+    own ``options``."""
+    from ..plotting import twod as _twod
+    opts = {"show_projections": False, "square_aspect": False, "fontsize": fontsize}
+    opts.update(twod)
+    opts.update(p.get("options") or {})
+    spectra = p["spectra"]
+    if len(spectra) == 1:
+        _twod.plot_2d_contour(spectra[0], ax=ax, fig=fig, insets=p.get("insets") or None, **opts)
+        return
+    if len(spectra) > _twod.MAX_OVERLAY_SPECTRA:
+        raise ValueError(f"An overlay takes 2 to {_twod.MAX_OVERLAY_SPECTRA} spectra "
+                         f"({len(spectra)} in one panel).")
+    _twod._check_overlay_compatible(spectra)
+    opts["labels"] = list(names)
+    opts["colours"] = list(cols)
+    opts["insets"] = p.get("insets") or None
+    _call_with(_twod.overlay_plot, spectra=spectra, ax=ax, fig=fig, **opts)
+
+
+def _draw_pulse_panel(ax, p: dict, defaults: dict, title) -> None:
+    """A pulse-sequence panel: ``p["sequence"]`` is a ``PulseSequence``, an
+    open spectrum (its own sequence) or the path of a sequence file."""
+    import os
+    from . import pulse_sequence as ps
+    seq = p["sequence"]
+    if seq is None:
+        # no sequence to draw: say so in the panel rather than leave it blank
+        ax.set_axis_off()
+        ax.text(0.5, 0.5, p.get("message") or "No pulse sequence to show", ha="center", va="center",
+                color="0.4", wrap=True, transform=ax.transAxes)
+        return
+    if isinstance(seq, NMRSpectrum):
+        seq = ps.pulse_sequence_for(seq)[0]
+    elif isinstance(seq, (str, os.PathLike)):
+        seq = ps.read_pulse_sequences(str(seq))[0]
+    opts = dict(defaults)
+    opts.update(p.get("options") or {})
+    if title and "title_text" not in opts:
+        opts["title_text"] = title
+    ps.plot_pulse_sequence(seq, ax, **opts)
+
+
 def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None,
                         link: bool = True, link_y: bool = False, normalize: bool = False,
                         titles=None, labels=None, colors=None, legend: bool = True,
@@ -348,21 +492,38 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
                         linewidth: float = 1.5, fontsize: float = 12.0, fig=None,
                         figsize=None, tight: bool = True, gap_below: float = 0.05,
                         gap_above: float = 0.08, model_for=None, axis_labels: str = "auto",
-                        axis_styles=None) -> ComparePanels:
+                        axis_styles=None, twod_options: dict | None = None,
+                        pulse_options: dict | None = None,
+                        panel_labels=None) -> ComparePanels:
     """Draw ``panels`` side by side (``layout="row"``), one above another
     (``"column"``) or in a grid (``"grid"``, ``ncols`` columns).
 
     Parameters
     ----------
     panels
-        One entry per panel: a 1D :class:`NMRSpectrum`, a list of them
-        (superimposed on one axes), or ``{"spectra": [...], "title": ...,
-        "labels": [...], "colors": [...]}``.
+        One entry per panel. A panel is **one axes**:
+
+        * a 1D :class:`NMRSpectrum`, or a list of them (superimposed, one
+          colour each, with a legend) -- or ``{"spectra": [...], "title": ...,
+          "labels": [...], "colors": [...]}``;
+        * a 2D :class:`NMRSpectrum` (contours), or a list of 2-6 with the same
+          nuclei (an overlay), optionally ``{"spectra": ..., "options": {...},
+          "insets": [...]}`` -- see ``twod_options``;
+        * a pulse sequence, ``{"pulse_sequence": <PulseSequence | spectrum |
+          file path>, "options": {...}}`` (:func:`pulse_sequence.plot_pulse_sequence`
+          keywords: colours, names, fonts ...).
+
+        1D, 2D and pulse-sequence panels can be mixed freely; a panel never
+        mixes 1D and 2D spectra. Whether each dataset has an axes of its own or
+        shares one is just how you group the list.
     link, link_y
         Whether the panels share the shift axis (zoom and scroll together) /
-        the intensity axis. Switch later with ``result.link.set(x=..., y=...)``.
+        the intensity axis. Panels link only with panels whose axis means the
+        same thing: a 1D and the F2 axis of a 2D of the same nucleus move
+        together; a pulse sequence never links. Switch later with
+        ``result.link.set(x=..., y=...)``.
     normalize
-        Scale each spectrum to its own maximum (a shape comparison).
+        Scale each 1D spectrum to its own maximum (a shape comparison).
     titles
         One title per panel. Default: the spectrum's name for a panel holding
         one spectrum, none (a legend instead) for a panel holding several.
@@ -376,7 +537,8 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
         panel has its own), ``"bottom"`` (only the bottom panel of each
         column, as one shared axis), or ``"auto"`` (default): every panel
         when the panels' axes read differently -- different nuclei -- and
-        the bottom ones when they all read the same.
+        the bottom ones when they all read the same. A figure with any 2D or
+        pulse-sequence panel gives every panel its own label under ``"auto"``.
     axis_styles
         Per-panel axis options, ``{panel: {...}}`` (0-based; ``"all"`` for
         every panel; a list works too). Keys: ``xlabel`` (text, LaTeX
@@ -384,6 +546,19 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
         ``tick_direction`` (``"in"``, ``"out"``, ``"inout"``), ``tick_length``,
         ``tick_width``, ``tick_labelsize``, ``minor_ticks``, ``num_ticks``,
         ``show_tick_labels``, ``spine_width``. See :func:`apply_axis_styles`.
+    twod_options
+        Keywords for every 2D panel, passed to
+        :func:`opennmr.plotting.twod.plot_2d_contour` (``factor``, ``clevels``,
+        ``contour_linewidth``, ``show_projections``, ``square_aspect`` ...).
+        Defaults here: no projections and ``square_aspect=False`` (the panel
+        fills its cell, so its F2 axis lines up with a 1D above or below it).
+    pulse_options
+        Keywords for every pulse-sequence panel (a panel's own ``options`` win).
+    panel_labels
+        Add (a), (b) ... to the panels: ``True``, a style (``"(a)"``, ``"A."``
+        ...) or a dict of :func:`opennmr.notebook.panel_labels.add_panel_labels`
+        arguments (``style``, ``start``, ``order``, ``placement``, ``positions``,
+        ``fontsize`` ...). The labels are returned by ``result.labels``.
     fig, figsize, tight
         Draw into an existing figure (the GUI does); ``tight`` runs
         ``fig.tight_layout()`` afterwards.
@@ -400,10 +575,19 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
     spec = _as_panels(panels)
     for k in range(len(spec)):
         _style_for(axis_styles, k)                       # validate before drawing
+    label_args = _label_arguments(panel_labels)          # validate before drawing
     n = len(spec)
+    kinds = [p["kind"] for p in spec]
+    mixed = any(kind != "1d" for kind in kinds)
     nrows, ncols_ = grid_shape(n, layout, ncols)
     if fig is None:
-        fig = plt.figure(figsize=figsize or (min(3.4 * ncols_, 14.0), min(2.6 * nrows + 0.6, 11.0)))
+        cell_w, cell_h = 3.4, 2.6
+        if "2d" in kinds:
+            cell_w, cell_h = 3.8, 3.4
+        if "pulse" in kinds:
+            cell_w = max(cell_w, 5.5)
+        fig = plt.figure(figsize=figsize or (min(cell_w * ncols_, 14.0),
+                                             min(cell_h * nrows + 0.6, 11.0 if not mixed else 12.0)))
     else:
         fig.clear()
     axes_grid = fig.subplots(nrows, ncols_, squeeze=False)
@@ -411,28 +595,46 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
     for i in range(n, nrows * ncols_):
         axes_grid[i // ncols_][i % ncols_].set_visible(False)
 
-    xmins, xmaxs = [], []
-    label_text = ""
+    twod = dict(twod_options or {})
+    pulse_defaults = dict(pulse_options or {})
+    ranges: list = [None] * n                 # (low, high) of each panel's shift axis
     label_texts = []
     for k, (ax, p) in enumerate(zip(axes, spec)):
+        ax._opennmr_panel_kind = p["kind"]
         m = len(p["spectra"])
+        title = (titles[k] if titles is not None and k < len(titles) else p["title"])
+        if p["kind"] == "pulse":
+            _draw_pulse_panel(ax, p, pulse_defaults, title)
+            continue
         pal = qualitative_colors(m)
         cols = (p["colors"] or (colors[k] if colors is not None and k < len(colors) else None)
                 or [pal[j] for j in range(m)])
         names = (p["labels"] or (labels[k] if labels is not None and k < len(labels) else None)
                  or [_spectrum_label(s, f"Spectrum {j + 1}") for j, s in enumerate(p["spectra"])])
+        if p["kind"] == "2d":
+            _draw_2d_panel(ax, fig, p, names, cols, twod, fontsize)
+            if title is None and m == 1:
+                title = names[0]
+            if title:
+                ax.set_title(title, fontsize=fontsize * 0.9)
+            lo, hi = sorted(ax.get_xlim())
+            ranges[k] = (lo, hi)
+            ax._opennmr_auto_xlabel = ax.get_xlabel()
+            label_texts.append(ax.get_xlabel())
+            continue
         lines = []
+        xmins, xmaxs = [], []
         for s, c in zip(p["spectra"], cols):
             lo, hi, label_text = plot_1d(ax, s, x_unit=x_unit, normalize=normalize, color=c,
                                          linewidth=linewidth, full_resolution=full_resolution)
             xmins.append(lo)
             xmaxs.append(hi)
             lines.append(ax.lines[-1])
+        ranges[k] = (min(xmins), max(xmaxs))
         for line, name in zip(lines, names):
             line.set_label(name)
         draw_kept_fit_overlays(p["spectra"], [ax] * m, lines, list(cols), list(names),
                                normalize, model_for)
-        title = (titles[k] if titles is not None and k < len(titles) else p["title"])
         if title is None and m == 1:
             title = names[0]
         if title:
@@ -448,48 +650,104 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
         ax._opennmr_auto_xlabel = label_text
         label_texts.append(label_text)
 
-    # shift axes: the union of every panel's range when linked, each its own otherwise
-    per_panel = []
-    idx = 0
-    for p in spec:
-        m = len(p["spectra"])
-        per_panel.append((min(xmins[idx:idx + m]), max(xmaxs[idx:idx + m])))
-        idx += m
-    lo_all, hi_all = min(r[0] for r in per_panel), max(r[1] for r in per_panel)
-    for ax, (lo, hi) in zip(axes, per_panel):
-        safe_xlim(ax, *((lo_all, hi_all) if link else (lo, hi)))
-        ax.invert_xaxis()
+    # Which panels' axes mean the same thing. A figure of 1D panels only keeps the
+    # original rule (every panel links); once 2D or pulse-sequence panels join,
+    # only a 1D and a 2D of the same nucleus and unit share a shift axis.
+    if mixed:
+        x_keys = [_x_link_key(p, x_unit) for p in spec]
+        y_keys = [_y_link_key(p) for p in spec]
+    else:
+        x_keys = [0] * n
+        y_keys = [0] * n
 
-    # intensity axes: each panel's own data (plus the gap Plot Style calls
-    # "below spectra"), or one range for all when the vertical scale is linked
-    ranges = [_data_y_range(ax) for ax in axes]
-    known = [r for r in ranges if r is not None]
+    # shift axes: the union of the range of every panel in the link group when
+    # linked, each panel's own otherwise
+    group_range: dict = {}
+    if link:
+        for r, key in zip(ranges, x_keys):
+            if r is None or key is None:
+                continue
+            lo_, hi_ = group_range.get(key, r)
+            group_range[key] = (min(lo_, r[0]), max(hi_, r[1]))
+    for ax, p, r, key in zip(axes, spec, ranges, x_keys):
+        if r is None:
+            continue
+        lo, hi = group_range.get(key, r) if link else r
+        if p["kind"] == "1d":
+            safe_xlim(ax, lo, hi)
+            ax.invert_xaxis()
+        else:
+            ax.set_xlim(hi, lo)
+
+    # intensity axes of the 1D panels: each panel's own data (plus the gap Plot
+    # Style calls "below spectra"), or one range for all when the vertical scale is linked
+    one_d = [ax for ax, p in zip(axes, spec) if p["kind"] == "1d"]
+    y_ranges = [_data_y_range(ax) for ax in one_d]
+    known = [r for r in y_ranges if r is not None]
     shared = (min(r[0] for r in known), max(r[1] for r in known)) if known and link_y else None
-    for ax, r in zip(axes, ranges):
+    for ax, r in zip(one_d, y_ranges):
         r = shared or r
         if r is None:
             continue
         span = (r[1] - r[0]) or abs(r[1]) or 1.0
         ax.set_ylim(r[0] - gap_below * span, r[1] + gap_above * span)
         ax._opennmr_fitted_ylim = ax.get_ylim()
+    if link_y:
+        # 2D panels with the same kind of F1 axis share their vertical range
+        by_key: dict = {}
+        for ax, p, key in zip(axes, spec, y_keys):
+            if p["kind"] == "2d":
+                by_key.setdefault(key, []).append(ax)
+        for group in by_key.values():
+            if len(group) < 2:
+                continue
+            ys = [v for ax in group for v in ax.get_ylim()]
+            for ax in group:
+                inverted = ax.get_ylim()[0] > ax.get_ylim()[1]
+                ax.set_ylim((max(ys), min(ys)) if inverted else (min(ys), max(ys)))
 
     # shared-axis convention: only the bottom panel of each column carries the
-    # label -- unless the panels' axes read differently (different nuclei) or
-    # every panel was asked for, when each keeps its own
-    each = axis_labels == "all" or (axis_labels == "auto" and len(set(label_texts)) > 1)
+    # label -- unless the panels' axes read differently (different nuclei), a 2D
+    # or pulse-sequence panel is among them, or every panel was asked for, when
+    # each keeps its own
+    each = (axis_labels == "all" or (axis_labels == "auto" and (mixed or len(set(label_texts)) > 1)))
     if layout in ("grid", "column") and not each:
         for i, ax in enumerate(axes):
             if i + ncols_ < n:
                 ax.set_xlabel("")
     apply_axis_styles(axes, axis_styles, fontsize)
-    controller = PanelLink(axes, x=link, y=link_y)
+    controller = PanelLink(axes, x=link, y=link_y, x_keys=x_keys, y_keys=y_keys)
     fig._opennmr_panel_link = controller            # the callbacks hold only weak references
+    labels_obj = None
+    if label_args is not None:
+        from .panel_labels import add_panel_labels
+        label_args.setdefault("fontsize", fontsize * 1.15)
+        labels_obj = add_panel_labels(fig, axes, **label_args)
+    elif getattr(fig, "_opennmr_panel_labels", None) is not None:
+        fig._opennmr_panel_labels = None
     if tight:
-        try:
-            fig.tight_layout()
-        except Exception:  # noqa: BLE001 -- layout is cosmetic
-            pass
+        def lay_out():
+            try:
+                fig.tight_layout()
+            except Exception:  # noqa: BLE001 -- layout is cosmetic
+                pass
+        lay_out()
+        if labels_obj is not None:
+            labels_obj.settle(lay_out)
     return ComparePanels(fig, axes, controller)
+
+
+def _label_arguments(panel_labels):
+    """``panel_labels`` as the keyword dict for ``add_panel_labels`` (or None)."""
+    if panel_labels in (None, False):
+        return None
+    if panel_labels is True:
+        return {}
+    if isinstance(panel_labels, str):
+        return {"style": panel_labels}
+    if isinstance(panel_labels, dict):
+        return dict(panel_labels)
+    raise ValueError("panel_labels must be True, a style such as '(a)', or a dict of options.")
 
 
 NMR1D_multi_plot = plot_compare_panels

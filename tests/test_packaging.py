@@ -242,3 +242,49 @@ def test_appdir_text_files_have_unix_line_endings(tmp_path, monkeypatch):
     assert dst.read_bytes() == b"#!/bin/sh\nexec x\n"
     desktop = open(os.path.join(PACKAGING, "linux", "openNMR.desktop"), "rb").read()
     assert b"Categories=Science;Chemistry;\n" in desktop.replace(b"\r\n", b"\n")
+
+
+def test_dmg_is_hfs_plus_and_retried_when_busy(tmp_path, monkeypatch):
+    """2026-10-27: "hdiutil: create failed - Resource busy" on a friend's
+    Mac. The image is made as HFS+, a stale volume is ejected first, and a
+    failed create is tried again (the partial image removed) before giving
+    up."""
+    import subprocess
+    mi = _load("make_installer")
+    dist = tmp_path / "dist"
+    (dist / "openNMR.app" / "Contents").mkdir(parents=True)
+    monkeypatch.setattr(mi, "DIST_DIR", str(dist))
+    monkeypatch.setattr(mi, "BUILD_DIR", str(tmp_path / "build"))
+    calls = []
+    fails = {"left": 2}
+
+    def fake_run(command, check=False, **_kw):
+        calls.append(list(command))
+        if command[:2] == ["hdiutil", "create"]:
+            out = command[-1]
+            open(out, "w").close()                       # a partial image
+            if fails["left"]:
+                fails["left"] -= 1
+                raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(mi.subprocess, "run", fake_run)
+    monkeypatch.setattr(mi, "DMG_PAUSE_S", 0.0)
+    out = mi.macos_dmg("1.2.3")
+    creates = [c for c in calls if c[:2] == ["hdiutil", "create"]]
+    assert len(creates) == 3
+    assert creates[0][creates[0].index("-fs") + 1] == "HFS+"
+    assert creates[0][creates[0].index("-volname") + 1] == "openNMR 1.2.3"
+    assert out.endswith("openNMR-1.2.3-macos-" + mi._arch() + ".dmg")
+    # Gives up after DMG_ATTEMPTS, with the last error.
+    calls.clear()
+    fails["left"] = 99
+    with pytest.raises(subprocess.CalledProcessError):
+        mi.macos_dmg("1.2.3")
+    assert len([c for c in calls if c[:2] == ["hdiutil", "create"]]) == mi.DMG_ATTEMPTS
+    # A partial image is removed before each new try.
+    removed = []
+    monkeypatch.setattr(mi.os, "remove", lambda p: removed.append(p))
+    fails["left"] = 1
+    mi.macos_dmg("1.2.3")
+    assert removed == [out]

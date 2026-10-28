@@ -48,6 +48,8 @@ from .cpmg_panel import CpmgProcessingPanel
 from .shear_panel import ShearPanel
 from .compare_2d import Compare2DControls
 from .compare_panels_controls import ComparePanelsControls
+from .panel_label_controls import PanelLabelControls
+from .widgets.spacing_slider import SpacingSlider
 from ..notebook import peak_integral_labels as integral_labels_module
 from ..notebook import notes as nb_notes
 from ..notebook import referencing as nb_referencing
@@ -58,6 +60,7 @@ from ..notebook import fit_advice as nb_fit_advice
 from ..notebook import relaxometry as nb_relaxometry
 from ..notebook import fit_correlation as nb_fit_correlation
 from ..notebook import intensity_scaling
+from ..notebook import pulse_sequence as notebook_pulse_sequence
 from ..notebook import slice_phase
 from ..notebook import drift_correction as nb_drift_correction
 from ..notebook import field_drift as nb_field_drift
@@ -103,7 +106,7 @@ from . import data_directory
 from .. import _version
 from . import progress as progress_dialogs
 from . import state_dialog as state_dialogs
-from .pulse_sequence_dialog import ClickableLabel, PulseSequenceDialog
+from .pulse_sequence_dialog import ClickableLabel, PulseSequenceDialog, saved_draw_options
 from .procno_dialog import ProcnoDialog
 from ..processing import diffusion as processing_diffusion
 from ..processing import fitting as processing_fitting
@@ -2696,6 +2699,15 @@ class MainWindow(QMainWindow):
 
         controls_layout.addLayout(compare_form)
 
+        # Collapsible sub-sections (explicit user request, 2026-10-28: the
+        # Compare options had become busy): Spacing, 2D spectra, Panels and
+        # Axes (inside the panels controls) and Panel labels each fold away.
+        # Each shows only when it applies, so a plain stack is still short.
+        self._compare_spacing_section = CollapsibleSection(
+            "Spacing", content=self._ensure_spacing_slider(), expanded=False)
+        self._compare_spacing_section.setToolTip("Spacing between stacked spectra.")
+        controls_layout.addWidget(self._compare_spacing_section)
+
         # 2D spectra: overlay or side by side, and insets (explicit user
         # request, bringing in the notebook's NMR2D_overlay_plot /
         # NMR2D_multi_plot / inset=). Shown only when a 2D is checked.
@@ -2705,7 +2717,12 @@ class MainWindow(QMainWindow):
         self.compare_2d_controls.link_toggled.connect(
             lambda on: self.compare_canvas.set_panels_linked(on))
         self.compare_2d_controls.setVisible(False)
-        controls_layout.addWidget(self.compare_2d_controls)
+        self.compare_2d_controls.setTitle("")      # the section's own header names it
+        self.compare_2d_controls.setFlat(True)
+        self._compare_2d_section = CollapsibleSection(
+            "2D spectra", content=self.compare_2d_controls, expanded=False)
+        self._compare_2d_section.setVisible(False)
+        controls_layout.addWidget(self._compare_2d_section)
 
         # 1D spectra as separate panels (Layout ▸ Panels): linking, grid
         # columns and which panel each spectrum goes in.
@@ -2715,6 +2732,15 @@ class MainWindow(QMainWindow):
             lambda x, y: self.compare_canvas.set_spectrum_panels_linked(x, y))
         self.compare_panels_controls.setVisible(False)
         controls_layout.addWidget(self.compare_panels_controls)
+
+        # (a), (b)... on the panels: style, start, reading order, placement.
+        self.compare_label_controls = PanelLabelControls()
+        self.compare_label_controls.changed.connect(self._on_compare_labels_changed)
+        self.compare_canvas.panelLabelMoved.connect(self._on_compare_label_dragged)
+        self._compare_labels_section = CollapsibleSection(
+            "Panel labels", content=self.compare_label_controls, expanded=False)
+        self._compare_labels_section.setVisible(False)
+        controls_layout.addWidget(self._compare_labels_section)
 
         compare_action_row = QHBoxLayout()
         compare_plot_button = QPushButton("Plot")
@@ -4962,17 +4988,11 @@ class MainWindow(QMainWindow):
         self.output_baseline_gap_spin.valueChanged.connect(self._on_output_style_changed)
         style_form.addRow("Gap below spectra:", self.output_baseline_gap_spin, section="Compare")
 
-        self.output_stack_gap_spin = QDoubleSpinBox()
-        self.output_stack_gap_spin.setRange(0.0, 200.0)
-        self.output_stack_gap_spin.setDecimals(1)
-        self.output_stack_gap_spin.setSingleStep(1.0)
-        self.output_stack_gap_spin.setSuffix(" %")
-        self.output_stack_gap_spin.setValue(MplCanvas._STACK_GAP * 100.0)
-        self.output_stack_gap_spin.setToolTip(
-            "Space between neighbouring spectra in a stacked Compare (and a "
-            "pseudo-2D's slices), as a percentage of each row's height.")
-        self.output_stack_gap_spin.valueChanged.connect(self._on_output_style_changed)
-        style_form.addRow("Gap between stacked spectra:", self.output_stack_gap_spin, section="Compare")
+        # The spacing between stacked spectra is a draggable slider on the
+        # Compare tile (Compare Controls ▸ Spacing) -- one control, one place.
+        # It is still the widget Plot Style's saved per-type defaults read and
+        # restore (``output_stack_gap_spin``, a percentage), just not shown here.
+        self._ensure_spacing_slider()
 
         self.output_contour_fraction_spin = TypedSpinBox()
         self.output_contour_fraction_spin.setRange(1, 100)
@@ -5528,6 +5548,26 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
         return tab
+
+    def _ensure_spacing_slider(self) -> SpacingSlider:
+        """The Compare tile's Spacing slider (``output_stack_gap_spin``), made
+        on first use by whichever panel builds first. A percentage of a
+        spectrum's height; negative: the stacked spectra overlap."""
+        slider = getattr(self, "output_stack_gap_spin", None)
+        if slider is None:
+            slider = SpacingSlider(default_percent=MplCanvas._STACK_GAP * 100.0,
+                                   top_gap_percent=MplCanvas._TOP_GAP * 100.0)
+            slider.valueChanged.connect(self._on_stack_spacing_changed)
+            self.output_stack_gap_spin = slider
+        return slider
+
+    def _on_stack_spacing_changed(self, percent: float) -> None:
+        """The Spacing slider moved: re-space the stacked spectra at once, on
+        whichever canvases Plot Style reaches (the fast path -- a drag fires
+        this many times a second)."""
+        for canvas in self._style_target_canvases():
+            canvas.set_stack_gap(percent / 100.0)
+        self._refresh_style_scope_label()
 
     def _current_output_style_kwargs(self) -> dict:
         return {
@@ -8126,9 +8166,21 @@ class MainWindow(QMainWindow):
         # the existing 1D-only logic below unchanged (which already
         # skips non-1D entries and reports them as such).
         two_d_rows_and_candidates = [(row, c) for row, c in rows_and_candidates if c.ndim == 2]
-        self.compare_2d_controls.setVisible(bool(two_d_rows_and_candidates))
+        self._set_compare_2d_visible(bool(two_d_rows_and_candidates))
         all_2d = bool(rows_and_candidates) and len(rows_and_candidates) == len(two_d_rows_and_candidates)
-        self.compare_panels_controls.setVisible(self.layout_mode_combo.currentIndex() >= 3 and not all_2d)
+        mixed = bool(two_d_rows_and_candidates) and not all_2d
+        in_panels = self.layout_mode_combo.currentIndex() >= 3
+        # Pulse sequences are drawn per panel, so the panels table must be
+        # reachable in Panels layouts for 1D and mixed selections alike.
+        self.compare_panels_controls.setVisible(in_panels and not all_2d)
+        self._compare_spacing_section.setVisible(self.layout_mode_combo.currentIndex() == 0 and not all_2d)
+        self._compare_labels_section.setVisible((in_panels and not all_2d) or (all_2d and self._compare_2d_is_panels()))
+        # 1D and 2D (or a pulse sequence) together: separate panels.
+        if mixed or (in_panels and self.compare_panels_controls.has_pulse()):
+            if in_panels:
+                self._refresh_compare_mixed(rows_and_candidates, switch_tab=switch_tab,
+                                            force_render=force_render)
+                return
         # Every checked entry a 2D (one or more): overlay or side-by-side
         # panels, with insets -- see _refresh_compare_2d. A single 2D is
         # drawn too, so an inset can be put on one spectrum.
@@ -8165,6 +8217,7 @@ class MainWindow(QMainWindow):
             bits = ["Select at least two 1D spectra to compare."]
             if skipped_ndim:
                 bits.append(f"{skipped_ndim} selected spectrum/spectra skipped (not 1D).")
+                bits.append(self._MIXED_HINT)
             if skipped_mass:
                 bits.append(f"{len(skipped_mass)} skipped (no sample mass set).")
             self.compare_status_label.setText(" ".join(bits))
@@ -8173,7 +8226,7 @@ class MainWindow(QMainWindow):
 
         bits = [f"Comparing {len(plot_spectra)} spectra."]
         if skipped_ndim:
-            bits.append(f"{skipped_ndim} skipped (not 1D).")
+            bits.append(f"{skipped_ndim} skipped (not 1D). {self._MIXED_HINT}")
         if skipped_mass:
             bits.append(f"{len(skipped_mass)} skipped (no sample mass set).")
         bits.extend(self._compare_scaling_notes)
@@ -8229,6 +8282,115 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot comparison", str(exc))
 
+    _MIXED_HINT = "Choose a Panels layout to show 1D and 2D spectra together."
+
+    def _set_compare_2d_visible(self, on: bool) -> None:
+        """Show the 2D options (and the section that folds them)."""
+        self.compare_2d_controls.setVisible(on)
+        self._compare_2d_section.setVisible(on)
+
+    def _compare_2d_is_panels(self) -> bool:
+        return self.compare_2d_controls.layout_key() != "overlay"
+
+    def _on_compare_labels_changed(self) -> None:
+        """The panel-label controls changed: restyle the labels on the plot
+        at once (no redraw, so a zoom is kept)."""
+        canvas = self.compare_canvas
+        args = self.compare_label_controls.args()
+        if args is not None and args.get("placement") == "manual" and "positions" not in args:
+            current = canvas.panel_labels()
+            if current is not None:
+                self.compare_label_controls.seed_positions(current.offsets)
+                args = self.compare_label_controls.args()
+        if not canvas.set_panel_labels(args) and args is not None:
+            self._refresh_compare_view_if_active(switch_tab=False)
+
+    def _on_compare_label_dragged(self, panel: int, dx: float, dy: float) -> None:
+        """A label was dragged on the plot: the controls go to Manual."""
+        current = self.compare_canvas.panel_labels()
+        self.compare_label_controls.apply_drag(
+            panel, dx, dy, offsets=list(current.offsets) if current is not None else None)
+
+    def _refresh_compare_mixed(self, rows_and_candidates: list, switch_tab: bool,
+                               force_render: bool) -> None:
+        """Compare ▸ Panels with 1D and 2D spectra and/or pulse sequences:
+        each panel holds 1D spectra (superimposed), 2D spectra (a contour or
+        an overlay) or one pulse sequence, as the Panels table says. Drawn by
+        :func:`opennmr.notebook.compare_panels.plot_compare_panels`."""
+        if not force_render and not switch_tab and self.canvas_tabs.currentWidget() is not self.compare_canvas:
+            self._compare_view_stale = True
+            return
+        self._compare_view_stale = False
+        controls = self.compare_panels_controls
+        norm_mode = ["none", "max", "mass"][self.compare_normalize_combo.currentIndex()]
+        layout = ("row", "column", "grid")[self.layout_mode_combo.currentIndex() - 3]
+        one_d = [(r, c) for r, c in rows_and_candidates if c.ndim == 1]
+        scaled = intensity_scaling.scale_for_comparison(
+            [c for _r, c in one_d],
+            mode={"none": "per_scan", "max": "max", "mass": "per_scan_mass"}[norm_mode],
+            divide_rg=self.compare_rg_check.isChecked(),
+            labels=[self.compare_list.item(r).text().split(" · ")[0] for r, _c in one_d])
+        self._compare_scaling_notes = list(scaled["notes"])
+        scaled_of = {one_d[i][0]: sp for i, sp in zip(scaled["kept"], scaled["spectra"])}
+        dropped = {one_d[i][0] for i, _why in scaled["skipped"]}
+        kept = [(r, c) for r, c in rows_and_candidates if r not in dropped]
+        self._compare_plot_row_positions = {r: pos for pos, (r, _c) in enumerate(kept)}
+        if not kept:
+            self.compare_status_label.setText("Nothing to show: no checked spectrum can be drawn.")
+            self.compare_canvas.clear()
+            return
+        spectra = [scaled_of.get(r, c) for r, c in kept]
+        entries = [self.compare_list.item(r).data(Qt.ItemDataRole.UserRole) for r, _c in kept]
+        keys = [repr(tuple(e)) for e in entries]
+        names = [self.compare_list.item(r).text() for r, _c in kept]
+        controls.set_spectra(keys, names)
+        groups = controls.groups()
+        controls.set_panel_count(len(groups))
+        self.compare_label_controls.set_panel_count(len(groups))
+        what = controls.contents_by_key()
+
+        notes = list(self._compare_scaling_notes)
+        pulse_panels = {}
+        for i, (key, (_r, original)) in enumerate(zip(keys, kept)):
+            if what.get(key) != "pulse":
+                continue
+            group = next(g for g in groups if i in g)
+            if len(group) > 1:
+                notes.append(f"{names[i]}: a pulse sequence takes a panel to itself; shown as a spectrum.")
+                continue
+            try:
+                sequence = notebook_pulse_sequence.pulse_sequence_for(original)[0]
+                options = saved_draw_options(getattr(self, "_ui_settings", None), sequence.name)
+                pulse_panels[i] = {"sequence": sequence, "options": options}
+            except Exception as exc:  # noqa: BLE001 -- say why in the panel, draw the rest
+                pulse_panels[i] = {"sequence": None, "message": str(exc)}
+        options_2d = dict(self.compare_2d_controls.plot_options())
+        options_2d["show_projections"] = self.compare_2d_controls.projections_check.isChecked()
+        try:
+            self._compare_series_entries = dict(zip(keys, (tuple(e) for e in entries)))
+            self.compare_canvas.show_compare_panels(
+                spectra, groups, layout=layout, ncols=controls.columns(),
+                linked=controls.linked(), link_y=controls.linked_y(),
+                normalize=(norm_mode == "max"), series_keys=keys, legend_labels=names,
+                axis_labels=controls.axis_labels(), axis_styles=controls.axis_styles(),
+                twod_options=options_2d, pulse_panels=pulse_panels,
+                panel_labels=self.compare_label_controls.args())
+        except ValueError as exc:
+            self.compare_status_label.setText(str(exc))
+            self.compare_canvas.clear()
+            return
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Failed to plot comparison", str(exc))
+            return
+        n2 = sum(1 for _r, c in kept if c.ndim == 2)
+        self.compare_status_label.setText(
+            f"Showing {len(spectra)} spectra ({len(spectra) - n2} 1D, {n2} 2D) in "
+            f"{len(groups)} panel{'s' if len(groups) != 1 else ''}"
+            + (f", {len(pulse_panels)} as pulse sequence" if pulse_panels else "") + ". "
+            + " ".join(notes))
+        if switch_tab:
+            self.canvas_tabs.setCurrentWidget(self.compare_canvas)
+
     def _show_compare_panels(self, spectra: list, rows: list[int], norm_mode: str, layout: str,
                              switch_tab: bool) -> None:
         """Compare ▸ Layout ▸ Panels: the checked 1D spectra as separate
@@ -8242,13 +8404,15 @@ class MainWindow(QMainWindow):
         controls.set_spectra(keys, names)
         groups = controls.groups()
         controls.set_panel_count(len(groups))
+        self.compare_label_controls.set_panel_count(len(groups))
         try:
             self._compare_series_entries = dict(zip(keys, (tuple(e) for e in entries)))
             self.compare_canvas.show_compare_panels(
                 spectra, groups, layout=layout, ncols=controls.columns(),
                 linked=controls.linked(), link_y=controls.linked_y(),
                 normalize=(norm_mode == "max"), series_keys=keys, legend_labels=names,
-                axis_labels=controls.axis_labels(), axis_styles=controls.axis_styles())
+                axis_labels=controls.axis_labels(), axis_styles=controls.axis_styles(),
+                panel_labels=self.compare_label_controls.args())
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot comparison", str(exc))
             return
@@ -8367,13 +8531,15 @@ class MainWindow(QMainWindow):
                 spectra, labels=labels, insets=controls.inset_specs() if with_insets else None,
                 factor=factor, clevels=clevels)
         else:
+            self.compare_label_controls.set_panel_count(len(spectra))
             insets = ([controls.inset_specs(panel=i) for i in range(len(spectra))]
                       if with_insets else None)
             self.compare_canvas.show_2d_panels(
                 spectra, labels=labels, layout=layout,
                 projections=controls.projections_check.isChecked(),
                 link_axes=controls.link_check.isChecked(), insets=insets,
-                factor=factor, clevels=clevels)
+                factor=factor, clevels=clevels,
+                panel_labels=self.compare_label_controls.args() if len(spectra) > 1 else None)
 
     def _on_add_compare_inset(self) -> None:
         """Turn the zoomed region of the Compare 2D plot into an inset
