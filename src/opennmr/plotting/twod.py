@@ -448,7 +448,13 @@ def _draw_traces_panel(ax, divider, entries, *, axis_kind,
     # (Already automatic for a row panel via sharex, above.)
     if axis_kind != "f1":
         panel.set_xlim(ax.get_ylim())
-    panel.set_ylim(-max(0.0, float(bottom_gap)) * slot * offset_fraction, 1.0)
+    # The top must clear the *highest trace*, not a fixed 1.0. Each trace
+    # is slot * offset_fraction tall, so any offset_fraction above 1
+    # (a negative stack gap, which overlaps traces on purpose) lifts the
+    # top trace past 1.0 and the axes clipped it: "the top slice(s) can
+    # get partly or wholly cut off" (user report, 2026-10-28).
+    top = max(1.0, max(baselines.values()) + slot * max(0.0, float(offset_fraction)))
+    panel.set_ylim(-max(0.0, float(bottom_gap)) * slot * offset_fraction, top)
     if axis_label:
         panel.set_xlabel(_italic_label(axis_label), fontsize=fontsize)
     panel.tick_params(axis="y", which="both", left=False, right=False,
