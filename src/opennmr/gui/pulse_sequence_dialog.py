@@ -78,7 +78,8 @@ def saved_draw_options(settings: dict | None, sequence_name: str = "") -> dict:
         value = saved.get(key, default)
         opts[key] = value if isinstance(value, type(default)) or (
             isinstance(default, float) and isinstance(value, int)) else default
-    for key, allowed in (("legend_position", ps.LEGEND_POSITIONS), ("title_position", ps.TITLE_POSITIONS)):
+    for key, allowed in (("legend_position", ps.LEGEND_POSITIONS), ("title_position", ps.TITLE_POSITIONS),
+                         ("shaped_style", ps.SHAPED_STYLES)):
         if opts[key] not in allowed:
             opts[key] = PulseSequenceDialog._STYLE_DEFAULTS[key]
     renames = (settings.get("pulse_sequence_renames") or {}).get(sequence_name) or {}
@@ -94,6 +95,7 @@ def saved_draw_options(settings: dict | None, sequence_name: str = "") -> dict:
                 legend_fontsize=float(opts["legend_fontsize"]) or None,
                 title_fontsize=float(opts["title_fontsize"]) or None,
                 linewidth=float(opts["linewidth"]), pulse_height=float(opts["pulse_height"]),
+                shaped_style=opts["shaped_style"],
                 title=opts["title"], title_text=opts["title_text"] or None,
                 title_position=opts["title_position"], legend=opts["legend"],
                 legend_position=opts["legend_position"], note=opts["note"])
@@ -109,7 +111,7 @@ class PulseSequenceDialog(QDialog):
         "acquire_separate": False, "fontfamily": "", "fontsize": 10.0, "channel_fontsize": 0.0,
         "legend_fontsize": 0.0, "title_fontsize": 0.0, "linewidth": 1.0, "pulse_height": 1.0,
         "title": True, "title_text": "", "title_position": "left", "legend": True,
-        "legend_position": "below", "note": True,
+        "legend_position": "below", "note": True, "shaped_style": "rounded",
         "export_width": 0.0, "export_height": 0.0, "export_dpi": 300, "export_format": "pdf",
     }
 
@@ -142,7 +144,8 @@ class PulseSequenceDialog(QDialog):
             self._opts[key] = value if isinstance(value, type(default)) or (
                 isinstance(default, float) and isinstance(value, int)) else default
         for key, allowed in (("legend_position", ps.LEGEND_POSITIONS),
-                             ("title_position", ps.TITLE_POSITIONS)):
+                             ("title_position", ps.TITLE_POSITIONS),
+                             ("shaped_style", ps.SHAPED_STYLES)):
             if self._opts[key] not in allowed:
                 self._opts[key] = self._STYLE_DEFAULTS[key]
         self._renames = {"names": {}, "channels": {}, "legend": {}}
@@ -274,6 +277,21 @@ class PulseSequenceDialog(QDialog):
         self.delay_style_combo.currentIndexChanged.connect(
             lambda _i: self._set_delay_style(self.delay_style_combo.currentData()))
         ol.addWidget(self.delay_style_combo)
+        ol.addWidget(QLabel("Shaped pulses:"))
+        self.shaped_style_combo = QComboBox()
+        for key, text in (("rounded", "Rounded"),
+                          ("arrow", "Rectangle with a diagonal arrow"),
+                          ("shaded", "Rectangle with a diagonal, one half shaded")):
+            self.shaped_style_combo.addItem(text, key)
+        self.shaped_style_combo.setCurrentIndex(
+            max(self.shaped_style_combo.findData(self._opts["shaped_style"]), 0))
+        self.shaped_style_combo.setToolTip(
+            "How a shaped pulse is drawn: the rounded shape (default), a rectangle crossed by "
+            "an arrow from bottom left to top right, or that rectangle with its lower-right "
+            "half shaded.")
+        self.shaped_style_combo.currentIndexChanged.connect(
+            lambda _i: self._set_option("shaped_style", self.shaped_style_combo.currentData()))
+        ol.addWidget(self.shaped_style_combo)
         sl.addWidget(obox)
         # conditional blocks
         self.flag_box = QGroupBox("Conditional blocks (#ifdef / flags)")
@@ -736,6 +754,7 @@ class PulseSequenceDialog(QDialog):
                     title_fontsize=float(self._opts["title_fontsize"]) or None,
                     linewidth=float(self._opts["linewidth"]),
                     pulse_height=float(self._opts["pulse_height"]),
+                    shaped_style=self._opts["shaped_style"],
                     title=self._opts["title"],
                     title_text=self._opts["title_text"] or None,
                     title_position=self._opts["title_position"],

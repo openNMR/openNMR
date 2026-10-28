@@ -2677,14 +2677,17 @@ class MainWindow(QMainWindow):
         # states and indices keep their meaning (explicit user request,
         # 2026-10-16: per scan, or per scan × sample mass).
         self.compare_normalize_combo.addItems(
-            ["Per scan (÷ NS)", "Max intensity", "Per scan and sample mass (÷ NS × mass)"])
+            ["Per scan (÷ NS)", "Max intensity", "Per scan and sample mass (÷ NS × mass)",
+             "Unscaled (as recorded)"])
         self.compare_normalize_combo.setToolTip(
             "Per scan: intensity per scan. Bruker, Varian, Spinsolve and X-Pulse data "
             "are divided by NS when loaded; JEOL data are not, so they are divided by "
             "their recorded number of scans here. Max intensity: each spectrum scaled "
             "to its own peak height, for shape comparison. Per scan and sample mass: "
             "per scan, then divided by the mass set via the spectrum list's "
-            "right-click \"Set sample mass…\" – spectra with no mass are skipped."
+            "right-click \"Set sample mass…\" – spectra with no mass are skipped. "
+            "Unscaled: the intensity as recorded, as TopSpin shows it (a reader that divided "
+            "by NS is multiplied by it again; nothing is divided by gain or mass)."
         )
         self.compare_normalize_combo.currentIndexChanged.connect(lambda _i: self._on_compare_controls_changed())
         compare_form.addRow("Normalize:", self.compare_normalize_combo)
@@ -2696,6 +2699,16 @@ class MainWindow(QMainWindow):
             "the status line).")
         self.compare_rg_check.toggled.connect(lambda _on: self._on_compare_controls_changed())
         compare_form.addRow("", self.compare_rg_check)
+        self.compare_common_scale_check = QCheckBox("Same intensity scale for all")
+        self.compare_common_scale_check.setChecked(True)
+        self.compare_common_scale_check.setToolTip(
+            "On (default): every stacked spectrum is drawn on one intensity scale, running "
+            "from the lowest to the highest point of any of them, so differences in height "
+            "are real differences in signal, as in TopSpin. Off: each spectrum is stretched "
+            "to fill its own row (shapes only). No effect with Normalize ▸ Max intensity, "
+            "which scales each spectrum to its own maximum.")
+        self.compare_common_scale_check.toggled.connect(lambda _on: self._on_compare_controls_changed())
+        compare_form.addRow("", self.compare_common_scale_check)
 
         controls_layout.addLayout(compare_form)
 
@@ -8191,14 +8204,14 @@ class MainWindow(QMainWindow):
         rows_and_1d = [(row, c) for row, c in rows_and_candidates if c.ndim == 1]
         skipped_ndim = len(rows_and_candidates) - len(rows_and_1d)
 
-        norm_mode = ["none", "max", "mass"][self.compare_normalize_combo.currentIndex()]
+        norm_mode = ["none", "max", "mass", "raw"][self.compare_normalize_combo.currentIndex()]
         # Copies scaled for this comparison only, never stored back into
         # the session: per scan (JEOL divided by its scans, the others are
         # per scan already), per gram, and optionally per unit RG --
         # notebook.intensity_scaling, as a notebook does it.
         scaled = intensity_scaling.scale_for_comparison(
             [s for _row, s in rows_and_1d],
-            mode={"none": "per_scan", "max": "max", "mass": "per_scan_mass"}[norm_mode],
+            mode={"none": "per_scan", "max": "max", "mass": "per_scan_mass", "raw": "unscaled"}[norm_mode],
             divide_rg=self.compare_rg_check.isChecked(),
             labels=[self.compare_list.item(row).text().split(" · ")[0] for row, _s in rows_and_1d])
         plot_rows = [rows_and_1d[i][0] for i in scaled["kept"]]
@@ -8270,6 +8283,7 @@ class MainWindow(QMainWindow):
             self._compare_series_entries = dict(zip(keys, (tuple(e) for e in entries)))
             self.compare_canvas.show_compare(
                 plot_spectra, mode=mode, normalize=(norm_mode == "max"),
+                shared_scale=self.compare_common_scale_check.isChecked(),
                 legend_labels=[self.compare_list.item(row).text() for row in plot_rows],
                 series_keys=keys, series_renameable=True)
             if switch_tab:
@@ -8322,12 +8336,12 @@ class MainWindow(QMainWindow):
             return
         self._compare_view_stale = False
         controls = self.compare_panels_controls
-        norm_mode = ["none", "max", "mass"][self.compare_normalize_combo.currentIndex()]
+        norm_mode = ["none", "max", "mass", "raw"][self.compare_normalize_combo.currentIndex()]
         layout = ("row", "column", "grid")[self.layout_mode_combo.currentIndex() - 3]
         one_d = [(r, c) for r, c in rows_and_candidates if c.ndim == 1]
         scaled = intensity_scaling.scale_for_comparison(
             [c for _r, c in one_d],
-            mode={"none": "per_scan", "max": "max", "mass": "per_scan_mass"}[norm_mode],
+            mode={"none": "per_scan", "max": "max", "mass": "per_scan_mass", "raw": "unscaled"}[norm_mode],
             divide_rg=self.compare_rg_check.isChecked(),
             labels=[self.compare_list.item(r).text().split(" · ")[0] for r, _c in one_d])
         self._compare_scaling_notes = list(scaled["notes"])
@@ -8429,6 +8443,7 @@ class MainWindow(QMainWindow):
         "none": "Intensity per scan (a.u.)",
         "max": "Intensity / own maximum",
         "mass": "Intensity per scan per gram (a.u. g$^{-1}$)",
+        "raw": "Intensity as recorded (a.u.)",
     }
 
     def _show_compare_heatmap(self, spectra: list, rows: list[int], norm_mode: str,
@@ -8447,7 +8462,7 @@ class MainWindow(QMainWindow):
             self.compare_canvas.show_1d_heatmap(
                 spectra, normalize=(norm_mode == "max"), row_labels=labels,
                 colorbar_label=intensity_scaling.intensity_label(
-                    {"none": "per_scan", "max": "max", "mass": "per_scan_mass"}[norm_mode],
+                    {"none": "per_scan", "max": "max", "mass": "per_scan_mass", "raw": "unscaled"}[norm_mode],
                     self.compare_rg_check.isChecked()),
                 first_row_on_top=True)
         except ValueError as exc:

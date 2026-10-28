@@ -65,7 +65,7 @@ __all__ = [
     "DEFAULT_COLORS", "KIND_NAMES", "PulseSequence", "PulseSequenceError",
     "read_pulse_sequences", "parse_pulse_sequence", "pulse_sequence_for",
     "find_sequence_file", "plot_pulse_sequence", "figure_size", "event_table", "channel_nuclei",
-    "pulse_label", "enable_zoom_pan", "housekeeping_delays", "DELAY_STYLES", "LEGEND_POSITIONS",
+    "pulse_label", "enable_zoom_pan", "housekeeping_delays", "DELAY_STYLES", "SHAPED_STYLES", "LEGEND_POSITIONS",
     "TITLE_POSITIONS", "font_rc", "user_label",
 ]
 
@@ -196,6 +196,10 @@ def event_table(seq: PulseSequence) -> list:
 # ---------------------------------------------------------------------------
 
 DELAY_STYLES = ("line", "brackets", "block")
+#: How a shaped pulse is drawn: a rounded half-ellipse; a rectangle crossed by an
+#: arrow from bottom left to top right; or that rectangle with the lower-right
+#: half shaded and the upper-left half left open.
+SHAPED_STYLES = ("rounded", "arrow", "shaded")
 LEGEND_POSITIONS = ("below", "above", "upper left", "upper center", "upper right", "center left",
                     "center right", "lower left", "lower center", "lower right", "none")
 TITLE_POSITIONS = ("left", "center", "right")
@@ -265,7 +269,7 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
                         figsize=None, fontsize: float = 10.0, channel_fontsize: float | None = None,
                         legend_fontsize: float | None = None, title_fontsize: float | None = None,
                         fontfamily: str | None = None, linewidth: float = 1.0,
-                        pulse_height: float = 1.0):
+                        pulse_height: float = 1.0, shaped_style: str = "rounded"):
     """Draw ``seq`` as a pulse-sequence diagram. Returns ``(fig, ax)``.
 
     Parameters
@@ -292,6 +296,11 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
         in a block of their own below every channel. A delay whose name is
         switched off is not drawn at all -- with no delay names there is no
         delay row.
+    shaped_style
+        How a shaped pulse is drawn (:data:`SHAPED_STYLES`): ``"rounded"`` (the
+        default) a half-ellipse; ``"arrow"`` a rectangle crossed by an arrow from
+        bottom left to top right; ``"shaded"`` that rectangle and diagonal with the
+        lower-right half filled and the other half open.
     delays_inline
         Old spelling: ``True`` is ``delay_style="brackets"``, ``False``
         is ``"block"``.
@@ -348,7 +357,7 @@ def _draw_pulse_sequence(seq, ax, colors, show_pulse_names, show_delay_names, sh
                          renames, channel_labels, legend_labels, acquire_separate, legend,
                          legend_position, title, title_text, title_position, note, figsize,
                          fontsize, channel_fontsize, legend_fontsize, title_fontsize, fontfamily,
-                         linewidth, pulse_height):
+                         linewidth, pulse_height, shaped_style="rounded"):
     import matplotlib.pyplot as plt
     from matplotlib.patches import Polygon, Rectangle
     import numpy as np
@@ -358,6 +367,8 @@ def _draw_pulse_sequence(seq, ax, colors, show_pulse_names, show_delay_names, sh
                             else "line")
     if style not in DELAY_STYLES:
         raise ValueError(f"delay_style must be one of {DELAY_STYLES}, got {style!r}.")
+    if shaped_style not in SHAPED_STYLES:
+        raise ValueError(f"shaped_style must be one of {SHAPED_STYLES}, got {shaped_style!r}.")
     if legend_position not in LEGEND_POSITIONS:
         raise ValueError(f"legend_position must be one of {LEGEND_POSITIONS}, got {legend_position!r}.")
     if title_position not in TITLE_POSITIONS:
@@ -510,6 +521,18 @@ def _draw_pulse_sequence(seq, ax, colors, show_pulse_names, show_delay_names, sh
         xm = 0.5 * (x0 + x1)
         if e.kind == "hard":
             ax.add_patch(Rectangle((x0, y), max(x1 - x0, 0.05), hp, fc=c, ec=c, lw=0.8 * lw, zorder=3))
+            put_label(e, xm, y, hp, c)
+        elif e.kind == "shaped" and shaped_style != "rounded":
+            w = max(x1 - x0, 0.05)
+            if shaped_style == "shaded":                 # lower-right half filled, upper-left open
+                ax.add_patch(Polygon([(x0, y), (x0 + w, y), (x0 + w, y + hp)], closed=True,
+                                     fc=c, ec="none", zorder=3))
+            ax.add_patch(Rectangle((x0, y), w, hp, fc="none", ec=c, lw=0.8 * lw, zorder=3,
+                                   joinstyle="miter"))
+            ax.annotate("", xy=(x0 + w, y + hp), xytext=(x0, y), zorder=4,
+                        arrowprops=dict(arrowstyle="-|>" if shaped_style == "arrow" else "-",
+                                        color=c, lw=0.8 * lw, shrinkA=0, shrinkB=0,
+                                        mutation_scale=8.0 * max(lw, 0.6)))
             put_label(e, xm, y, hp, c)
         elif e.kind == "shaped":
             n = 60

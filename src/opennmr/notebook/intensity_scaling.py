@@ -21,6 +21,12 @@ different RG are not comparable in absolute intensity, per scan or not;
 only -- Varian's ``gain`` is in dB and is never used) and otherwise warns
 when the gains differ.
 
+**Unscaled** (2026-10-28) shows the intensities as recorded -- as TopSpin
+shows them: a spectrum whose reader divided by NS is multiplied back by it,
+nothing is divided by gain or mass, and nothing is normalised. Compare it
+with the same intensity scale for every spectrum (the stacked view's
+default), so a real difference in height is a real difference in signal.
+
 Notebook use::
 
     from opennmr.notebook import intensity_scaling as isc
@@ -36,7 +42,7 @@ import math
 from ..core.spectrum import NMRSpectrum
 
 #: The comparison modes, as the GUI's Compare ▸ Normalize offers them.
-MODES = ("per_scan", "max", "per_scan_mass")
+MODES = ("per_scan", "max", "per_scan_mass", "unscaled")
 
 #: Readers that divide by NS at load time (data are already per scan).
 PER_SCAN_VENDORS = frozenset({"bruker", "varian", "spinsolve", "xpulse"})
@@ -121,15 +127,36 @@ def receiver_gain(spectrum: NMRSpectrum) -> float | None:
     return rg if math.isfinite(rg) and rg > 0 else None
 
 
+def _unscaled_factors(spectrum: NMRSpectrum) -> dict:
+    """Back to the intensity as recorded: a reader that divided by NS on
+    loading is multiplied by it again; data that were never divided (JEOL)
+    are left alone."""
+    per_scan = data_is_per_scan(spectrum)
+    notes, factor = [], 1.0
+    if per_scan:
+        ns = number_of_scans(spectrum)
+        if ns:
+            factor = float(ns)
+        else:
+            notes.append("number of scans not recorded (shown as loaded, per scan)")
+    elif per_scan is None:
+        notes.append("not known whether it is per scan (shown as it is)")
+    return {"factor": factor, "ns_divisor": 1.0 / factor, "mass_g": spectrum.metadata.mass,
+            "rg": receiver_gain(spectrum), "notes": notes, "skip": None}
+
+
 def comparison_factors(spectrum: NMRSpectrum, mode: str = "per_scan",
                        divide_rg: bool = False) -> dict:
     """The factor the spectrum's data are multiplied by for ``mode``
-    (``"per_scan"``, ``"per_scan_mass"`` or ``"max"`` -- the last only
-    makes the data per scan; the plot scales each to its own maximum),
+    (``"per_scan"``, ``"per_scan_mass"``, ``"unscaled"`` -- as recorded --
+    or ``"max"``, which only makes the data per scan; the plot scales each
+    to its own maximum),
     with what went into it. ``{"factor", "ns_divisor", "mass_g", "rg",
     "notes", "skip"}``; ``skip`` is a reason (no sample mass) or None."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
+    if mode == "unscaled":
+        return _unscaled_factors(spectrum)
     divisor, note = scan_divisor(spectrum)
     notes = [note] if note else []
     factor = 1.0 / divisor
@@ -186,6 +213,8 @@ def scale_for_comparison(spectra: list[NMRSpectrum], mode: str = "per_scan",
 
 #: What the y axis / colour bar means, per mode (and with RG divided).
 def intensity_label(mode: str, divide_rg: bool = False) -> str:
+    if mode == "unscaled":
+        return "Intensity as recorded (a.u.)"
     base = {"per_scan": "Intensity per scan", "max": "Intensity / own maximum",
             "per_scan_mass": "Intensity per scan per gram"}[mode]
     if divide_rg and mode != "max":

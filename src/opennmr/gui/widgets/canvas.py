@@ -3364,6 +3364,14 @@ class MplCanvas(QWidget):
                 result = plotting.fit_labels_within_figure(self.figure)
                 clipped = result["clipped"] if not result["fitted"] else []
                 self._settle_panel_labels(final=True)
+        if self._compare_axes:
+            # A stack's rows touch: the layout pass may have opened gaps
+            # between them, and the even pitch of the spacing control
+            # (see _fit_compare_rows) assumes none.
+            try:
+                self.figure.subplots_adjust(hspace=0.0)
+            except Exception:  # noqa: BLE001 -- spacing nicety: never break a redraw
+                pass
         self._apply_colorbar_gap()
         # Only on a change: a phase drag relayouts continuously, and
         # re-announcing the same thing every frame is noise.
@@ -9030,7 +9038,9 @@ class MplCanvas(QWidget):
     def _refit_spectrum_y_limits(self, only_if_untouched: bool = False) -> None:
         """Re-apply the gaps to whatever 1D spectrum / Compare is on
         show (a gap changed, or Full Resolution swapped the data).
-        ``only_if_untouched``: leave an axes the user has zoomed alone."""
+        ``only_if_untouched``: leave an axes the user has zoomed alone.
+        Otherwise a zoomed axes keeps its zoom -- the same crop of its row,
+        carried over to the new limits -- instead of snapping back."""
         if self._plot_kind not in ("1d", "compare", "pseudo2d") or self._contour_spectrum is not None:
             return
         if self._compare_axes is not None:
@@ -9042,28 +9052,64 @@ class MplCanvas(QWidget):
         shared = None
         if self._compare_axes is not None and getattr(self, "_compare_shared_range", None) is not None:
             shared = self._compare_shared_range
+        every = list(axes)
+        zoomed = {}
+        for ax in axes:
+            fitted = getattr(ax, "_opennmr_fitted_ylim", None)
+            if fitted is not None and tuple(ax.get_ylim()) != tuple(fitted):
+                zoomed[ax] = (tuple(fitted), tuple(ax.get_ylim()))
         if only_if_untouched:
-            axes = [ax for ax in axes
-                    if getattr(ax, "_opennmr_fitted_ylim", None) is None
-                    or tuple(ax.get_ylim()) == tuple(ax._opennmr_fitted_ylim)]
+            axes = [ax for ax in axes if ax not in zoomed]
         if self._compare_axes is not None:
-            self._fit_compare_rows(axes, shared, bottom_row=self._compare_axes[-1])
+            self._fit_compare_rows(every, shared, bottom_row=self._compare_axes[-1], apply_to=axes)
         else:
             for ax in axes:
                 self._fit_y_to_data(ax)
+        if not only_if_untouched:
+            for ax, (old_fit, view) in zoomed.items():
+                new_fit = getattr(ax, "_opennmr_fitted_ylim", None)
+                old_span = old_fit[1] - old_fit[0]
+                if new_fit is None or not old_span:
+                    continue
+                lo = new_fit[0] + (view[0] - old_fit[0]) / old_span * (new_fit[1] - new_fit[0])
+                hi = new_fit[0] + (view[1] - old_fit[0]) / old_span * (new_fit[1] - new_fit[0])
+                ax.set_ylim(lo, hi)
         self.canvas.draw_idle()
 
-    def _fit_compare_rows(self, axes, shared_range=None, bottom_row=None) -> None:
-        """Each stacked row's limits: the axis gap below the bottom row,
-        the stack gap below every other. On a shared scale every row must
-        also span the same range, so a row with the smaller gap below
-        takes the difference above -- equal scales, gaps kept."""
-        bottom_row = axes[-1] if bottom_row is None and axes else bottom_row
-        widest = max(self._baseline_gap, self._stack_gap)
-        for ax in axes:
-            gap = self._baseline_gap if ax is bottom_row else self._stack_gap
-            top = self._TOP_GAP + (widest - gap if shared_range is not None else 0.0)
-            self._fit_y_to_data(ax, bottom_gap=gap, y_range=shared_range, top_gap=top)
+    def _fit_compare_rows(self, axes, shared_range=None, bottom_row=None, apply_to=None) -> None:
+        """Limits of the stacked rows, so that the spectra sit one above
+        another at an **even pitch**: each baseline the same distance above
+        the one below (``1 + stack gap + top margin`` spectrum heights),
+        the bottom one ``baseline_gap`` above the axis. Every row is the
+        same slice of the figure; each row's limits place its own spectrum
+        where it belongs in the whole stack, so a gap changed -- including
+        to a negative one, which overlaps the spectra -- moves every
+        spectrum equally. A spectrum is one unit tall in its own scale
+        (its own range, or the shared one), so rows of different heights
+        keep their relative sizes on a shared scale. ``apply_to``: only
+        set these rows' limits (the others are still part of the stack)."""
+        if not axes:
+            return
+        n = len(axes)
+        bg = self._baseline_gap
+        top = self._TOP_GAP
+        pitch = 1.0 + max(self._STACK_GAP_MIN, self._stack_gap) + top
+        total = bg + (n - 1) * pitch + 1.0 + top
+        window = total / n
+        for index, ax in enumerate(axes):
+            if apply_to is not None and ax not in apply_to:
+                continue
+            y_range = shared_range if shared_range is not None else self._data_y_range(ax)
+            if y_range is None:
+                continue
+            low, high = y_range
+            span = high - low
+            if not np.isfinite(span) or span <= 0:
+                span = abs(high) or 1.0
+            k = n - 1 - index                  # 0 for the bottom row
+            lo = low + (k * window - bg - k * pitch) * span
+            ax.set_ylim(lo, lo + window * span)
+            ax._opennmr_fitted_ylim = ax.get_ylim()
 
     def _compare_kwargs_active(self) -> bool:
         """An overlay Compare (one axes) is showing."""

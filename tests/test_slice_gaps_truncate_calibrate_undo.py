@@ -85,19 +85,34 @@ def test_gap_below_spectra_is_a_plot_style_setting(qapp):
 
 
 def test_stacked_compare_uses_the_stack_gap_between_rows(qapp):
+    """2026-10-28: the gap is the *pitch* of the stack -- every spectrum the
+    same distance above the one below (1 + gap + the top margin spectrum
+    heights), the bottom one ``baseline_gap`` above the axis."""
     canvas = MplCanvas()
     a = _spectrum_1d(np.concatenate([np.full(300, -1.0), [5.0], np.full(300, -1.0)]))
     b = _spectrum_1d(np.concatenate([np.full(300, 0.2), [3.0], np.full(300, 0.2)]))
     canvas.set_style(baseline_gap=0.1, stack_gap=0.4)
     canvas.show_compare([a, b], mode="stack")
     top, bottom = canvas._compare_axes
-    # Bottom row: the axis gap; the row above: the gap between spectra.
-    lo_b, hi_b = canvas._data_y_range(bottom)
-    assert bottom.get_ylim()[0] == pytest.approx(lo_b - 0.1 * (hi_b - lo_b))
-    lo_t, hi_t = canvas._data_y_range(top)
-    assert top.get_ylim()[0] == pytest.approx(lo_t - 0.4 * (hi_t - lo_t))
+
+    def geometry():
+        canvas.figure.canvas.draw()
+        feet, heights = [], []
+        for ax in (top, bottom):
+            y = ax.lines[0].get_ydata()
+            lo = ax.transData.transform((0, float(np.min(y))))[1]
+            hi = ax.transData.transform((0, float(np.max(y))))[1]
+            feet.append(lo)
+            heights.append(hi - lo)
+        return feet, heights
+
+    feet, heights = geometry()
+    assert (feet[0] - feet[1]) / heights[0] == pytest.approx(1 + 0.4 + canvas._TOP_GAP, rel=1e-6)
+    axis_line = bottom.get_window_extent().y0
+    assert (feet[1] - axis_line) / heights[1] == pytest.approx(0.1, rel=1e-6)
     canvas.set_style(stack_gap=0.0)
-    assert top.get_ylim()[0] == pytest.approx(lo_t)
+    feet, heights = geometry()
+    assert (feet[0] - feet[1]) / heights[0] == pytest.approx(1 + canvas._TOP_GAP, rel=1e-6)
 
 
 def test_overlay_compare_keeps_every_trace_above_the_axis(qapp):
