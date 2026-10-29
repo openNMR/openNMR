@@ -578,6 +578,33 @@ def apply_recorded_f1_linear_prediction(interferogram: np.ndarray, proc2s: dict,
     return extended
 
 
+def first_point_factor(params: dict | None) -> float:
+    """TopSpin's ``FCOR`` (first-point scaling) for one dimension, from
+    ``procs``/``proc2s``. 1.0 when the key is absent, so data without
+    it (and every synthetic dataset) is untouched."""
+    if not params:
+        return 1.0
+    try:
+        return float(params.get("FCOR", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def apply_first_point_scaling(fid: np.ndarray, params: dict | None) -> np.ndarray:
+    """Multiply the first complex point along the last axis by ``FCOR``,
+    as TopSpin does before the window and FFT. Without it the DC-like
+    offset of a half-weighted first point is doubled, which shows up as
+    a rolling baseline in F2 and, much worse in an indirect dimension of
+    a strong-signal 2D, as t1-noise / leakage ridges. Returns a copy
+    when it changes anything."""
+    factor = first_point_factor(params)
+    if factor == 1.0:
+        return fid
+    out = np.array(fid, copy=True)
+    out[..., 0] = out[..., 0] * factor
+    return out
+
+
 def _apply_bruker_window(fid: np.ndarray, procs: dict, sw_hz: float) -> np.ndarray:
     """Apply the window TopSpin recorded in ``procs`` (``WDW``, with
     ``LB``/``SSB`` as needed), via :mod:`opennmr.processing.windows`."""
@@ -860,6 +887,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     )
 
     window_unsupported_note = None
+    fid = apply_first_point_scaling(fid, procs)
     if window is not None:
         fid = processing_ft.apodize(fid, dt, window=window, **(window_kwargs or {}))
     else:
@@ -943,6 +971,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             # instead of) the frequency-domain result, which stays the
             # default view.
             "fid": fid, "fid_dt": dt, "fid_original_length": original_length,
+            "fcor": first_point_factor(procs),
             # The *truly* raw FID -- straight off disk (post digital-
             # filter removal only), before even shift/align/LP, let
             # alone windowing/zero-fill. Lets the GUI recompute a live
@@ -1316,6 +1345,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     else:
         fid_f2 = data
     window_unsupported_note = None
+    fid_f2 = apply_first_point_scaling(fid_f2, procs)
     if window is not None:
         # Whole-array calls, not np.apply_along_axis -- window/zero_fill/
         # fft_spectrum all operate on the last axis (F2's own axis
@@ -1435,6 +1465,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         # short column, so per-call overhead dominated even more here
         # than in F2's own loop).
         spectrum = spectrum.T
+        spectrum = apply_first_point_scaling(spectrum, proc2s)
         if window_f1 is not None:
             spectrum = processing_ft.apodize(spectrum, 1.0 / sw_1, window=window_f1, **(window_kwargs_f1 or {}))
         else:
@@ -1533,6 +1564,8 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # pseudo-2D, isn't overridable the way F2's is -- see
             # this function's docstring).
             "fid": fid_f2, "fid_dt": 1.0 / sw, "fid_original_length": original_length,
+            "fcor": first_point_factor(procs),
+            "fcor_f1": (None if pseudo_2d else first_point_factor(proc2s)),
             # F1's own dt -- lets a live, in-memory recompute redo F1's
             # FFT (needed whenever F2's own reprocessing changes, since
             # F1's FFT operates across the rows F2's own FFT just

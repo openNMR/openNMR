@@ -211,6 +211,10 @@ from . import dnp_workflow
 # Signal-to-Noise; 2026-10-12): used as snr.signal_to_noise(...) etc.
 from . import snr
 from .snr import signal_to_noise, signal_to_noise_many, snr_report, plot_snr
+# Truncation "wiggles" in F2 (2026-10-29): ringing.check_f2_ringing(spectrum) says whether
+# the FID is cut off, how big the wiggles are, and which sine-bell removes them.
+from . import ringing
+from .ringing import check_f2_ringing
 # 2026-10-16: intensities per scan / per gram / per RG (Compare ▸ Normalize),
 # click-to-measure peak widths, several fit ranges, CP build-up curves.
 from . import intensity_scaling, peak_width, fit_ranges, cp_buildup
@@ -506,6 +510,7 @@ __all__ = [
     "plot_enhancement_spectra",
     # signal-to-noise; pNMR peaks -> Solid-state NMR sites
     "snr", "signal_to_noise", "signal_to_noise_many", "snr_report", "plot_snr",
+    "ringing", "check_f2_ringing",
     "pnmr_export", "sites_from_pnmr_fit", "sites_from_pnmr_table",
     # comparison scaling, peak widths, fit ranges, CP build-up (2026-10-16)
     "intensity_scaling", "scale_for_comparison", "peak_width", "peak_fwhm", "peak_fwhm_2d",

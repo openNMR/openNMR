@@ -1013,6 +1013,10 @@ class MainWindow(QMainWindow):
             canvas.styleEditedFromMenu.connect(
                 lambda c=canvas: self._on_canvas_style_edited_from_menu(c))
             canvas.linesChanged.connect(lambda c=canvas: self._on_canvas_lines_changed(c))
+            canvas.viewLimitsChanged.connect(lambda c=canvas: self._on_canvas_view_limits_changed(c))
+            # Whether a new view takes axis limits is known once it has drawn.
+            canvas.figureCleared.connect(
+                lambda c=canvas: QTimer.singleShot(0, lambda: self._on_canvas_view_limits_changed(c)))
             canvas.exportSettingsKept.connect(self._on_export_settings_kept)
         # Before any tab is current, so _style_target_canvases falls
         # back to every canvas and the saved defaults land everywhere.
@@ -4785,6 +4789,7 @@ class MainWindow(QMainWindow):
         style_box_layout.setContentsMargins(0, 0, 0, 0)
         style_form = _SectionedForm(style_box_layout)
         style_form.add_section("Core styling", expanded=True)
+        style_form.add_section("Axis limits")
         style_form.add_section("Legend")
         style_form.add_section("Compare")
         style_form.add_section("2-D")
@@ -5403,6 +5408,65 @@ class MainWindow(QMainWindow):
         self.output_contour_colour_combo.currentIndexChanged.connect(self._on_output_style_changed)
         style_form.addRow("Contour colour:", contour_colour_row, section="2-D")
 
+        # Exact axis limits (explicit user request, 2026-10-29: "a way to control
+        # the exact x and y limits of 1-d and 2-d plots"). Typed, so a figure can
+        # be framed to the digit; blank is automatic. Not part of the style that
+        # "Apply to all plots" or a per-type default carries: a range belongs to
+        # the data on show (see MplCanvas.set_view_limits).
+        limits_hint = QLabel(
+            "Frame the plot to an exact range, in the unit the axis shows. The order does "
+            "not matter: the plot keeps its direction, so ppm still runs high to low. "
+            "Leave a box empty for automatic, or one end only to fix just that end. "
+            "Applies to the saved figure too; Home and a double-click return to this "
+            "range, “Reset to full view” removes it.")
+        limits_hint.setWordWrap(True)
+        style_form.addRow(limits_hint, section="Axis limits")
+        self.output_limits_unit_label = QLabel("")
+        self.output_limits_unit_label.setWordWrap(True)
+        style_form.addRow(self.output_limits_unit_label, section="Axis limits")
+
+        def _limit_edit(tooltip: str) -> QLineEdit:
+            edit = QLineEdit()
+            edit.setPlaceholderText("auto")
+            edit.setToolTip(tooltip)
+            edit.editingFinished.connect(self._on_view_limits_edited)
+            return edit
+
+        def _limit_row(low_edit: QLineEdit, high_edit: QLineEdit) -> QWidget:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(low_edit)
+            row_layout.addWidget(QLabel("to"))
+            row_layout.addWidget(high_edit)
+            return row
+
+        x_tip = ("The x range to show, in the unit the axis is in (ppm, Hz, kHz or mm), either "
+                 "order. Press Enter to apply. On a 1D spectrum the intensity axis refits to the "
+                 "peaks inside this range.")
+        self.output_xlim_low_edit = _limit_edit(x_tip)
+        self.output_xlim_high_edit = _limit_edit(x_tip)
+        style_form.addRow("X axis range:", _limit_row(self.output_xlim_low_edit,
+                                                       self.output_xlim_high_edit),
+                          section="Axis limits")
+        y_tip = ("The y (indirect-dimension) range to show on a 2D contour, in the unit the axis "
+                 "is in, either order. Press Enter to apply. A 1D spectrum's y axis is intensity "
+                 "and is not set here.")
+        self.output_ylim_low_edit = _limit_edit(y_tip)
+        self.output_ylim_high_edit = _limit_edit(y_tip)
+        style_form.addRow("Y axis range (2-D):", _limit_row(self.output_ylim_low_edit,
+                                                             self.output_ylim_high_edit),
+                          section="Axis limits")
+        self.output_limits_note_label = QLabel("")
+        self.output_limits_note_label.setWordWrap(True)
+        self.output_limits_note_label.setVisible(False)
+        style_form.addRow(self.output_limits_note_label, section="Axis limits")
+        self.output_limits_reset_button = QPushButton("Reset to full view")
+        self.output_limits_reset_button.setToolTip(
+            "Remove the typed limits and show the whole plot again.")
+        self.output_limits_reset_button.clicked.connect(self._on_reset_view_limits_clicked)
+        style_form.addRow(self.output_limits_reset_button, section="Axis limits")
+
         # An inset of a zoomed region of the 2D on show, without Compare;
         # its controls are in a pop-up so this panel stays as short as it is.
         self.output_inset_button = QPushButton("Insets (zoomed regions)…")
@@ -5929,6 +5993,88 @@ class MainWindow(QMainWindow):
         current = self.canvas_tabs.currentWidget() if hasattr(self, "canvas_tabs") else None
         return [current] if isinstance(current, MplCanvas) else self._all_canvases()
 
+    # ---- Plot Style ▸ Axis limits ---------------------------------------------
+
+    @staticmethod
+    def _limit_from_edit(edit) -> float | None:
+        """The number typed in ``edit``, ``None`` for empty or "auto"; raises
+        ``ValueError`` (with a sentence for the panel) for anything else."""
+        text = edit.text().strip()
+        if not text or text.lower() in ("auto", "automatic"):
+            return None
+        shown = text
+        if "," in text and "." not in text:
+            text = text.replace(",", ".")        # a decimal comma
+        try:
+            value = float(text)
+        except ValueError:
+            raise ValueError(f"“{shown}” is not a number.") from None
+        if not np.isfinite(value):
+            raise ValueError(f"“{shown}” is not a finite number.")
+        return value
+
+    def _on_view_limits_edited(self) -> None:
+        """A limit box was finished (Enter or focus lost): apply both ranges to the plot
+        the panel acts on. Only what changed is pushed, so tabbing past a box
+        does not refit the intensity axis the user may have just zoomed."""
+        try:
+            x = MplCanvas._clean_limit_pair((self._limit_from_edit(self.output_xlim_low_edit),
+                                             self._limit_from_edit(self.output_xlim_high_edit)))
+            y = MplCanvas._clean_limit_pair((self._limit_from_edit(self.output_ylim_low_edit),
+                                             self._limit_from_edit(self.output_ylim_high_edit)))
+        except ValueError as error:
+            self.output_limits_note_label.setText(str(error))
+            self.output_limits_note_label.setVisible(True)
+            return
+        for canvas in self._style_target_canvases():
+            x_ok, y_ok = canvas.view_limit_support()
+            current = canvas.view_limits()
+            new_x = x if (x_ok and x != current["x"]) else MplCanvas.KEEP_LIMITS
+            new_y = y if (y_ok and y != current["y"]) else MplCanvas.KEEP_LIMITS
+            if new_x is MplCanvas.KEEP_LIMITS and new_y is MplCanvas.KEEP_LIMITS:
+                continue
+            canvas.set_view_limits(x=new_x, y=new_y)
+        self._sync_view_limit_controls(self._series_target_canvas())
+
+    def _on_reset_view_limits_clicked(self) -> None:
+        for canvas in self._style_target_canvases():
+            canvas.clear_view_limits()
+        self._sync_view_limit_controls(self._series_target_canvas())
+
+    def _on_canvas_view_limits_changed(self, canvas) -> None:
+        """``canvas`` redrew or changed its limits: refresh the boxes (and whether
+        they are enabled -- a FID has none) if it is the plot the panel acts on."""
+        dialog = getattr(self, "_style_dialog", None)
+        if dialog is not None and dialog.isVisible() and self._series_target_canvas() is canvas:
+            self._sync_view_limit_controls(canvas)
+
+    def _sync_view_limit_controls(self, canvas) -> None:
+        """Show ``canvas``'s own typed limits in the boxes, without firing their
+        handlers, and say what the plot can take."""
+        if canvas is None or not hasattr(self, "output_xlim_low_edit"):
+            return
+        x_ok, y_ok = canvas.view_limit_support()
+        limits = canvas.view_limits()
+        for pair, edits, enabled in (
+                (limits["x"], (self.output_xlim_low_edit, self.output_xlim_high_edit), x_ok),
+                (limits["y"], (self.output_ylim_low_edit, self.output_ylim_high_edit), y_ok)):
+            for index, edit in enumerate(edits):
+                blocked = edit.blockSignals(True)
+                edit.setText("" if pair is None or pair[index] is None else f"{pair[index]:.10g}")
+                edit.setEnabled(enabled)
+                edit.blockSignals(blocked)
+        self.output_limits_reset_button.setEnabled(x_ok)
+        if x_ok:
+            self.output_limits_unit_label.setText(
+                f"This plot's axis is in <b>{canvas.view_limits_unit_text()}</b>: type limits in that unit.")
+        else:
+            self.output_limits_unit_label.setText(
+                "Limits can be typed for a 1D spectrum, a Compare stack or overlay, and a "
+                "2D contour. The plot on show is none of these.")
+        note = canvas.view_limits_note()
+        self.output_limits_note_label.setText(note)
+        self.output_limits_note_label.setVisible(bool(note))
+
     def _on_output_style_changed(self, *_args) -> None:
         kwargs = self._current_output_style_kwargs()
         for canvas in self._style_target_canvases():
@@ -6202,6 +6348,7 @@ class MainWindow(QMainWindow):
         self._refresh_trace_color_button()
         self._refresh_slice_colour_rows()
         self._refresh_line_rows()
+        self._sync_view_limit_controls(canvas)
         self._refresh_style_scope_label()
 
     #: Most lines listed one by one in Plot Style ▸ Lines; past this the
@@ -8748,6 +8895,18 @@ class MainWindow(QMainWindow):
         self.ssb_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Sine-bell shift (SSB):", self.ssb_spin)
 
+        # Explicit user request (2026-10-29): wiggles in F2 rows that look like multiplets
+        # and are not in TopSpin -- "either filter this or work out whether there is a
+        # problem occurring".
+        self.check_ringing_button = QPushButton("Check for truncation wiggles…")
+        self.check_ringing_button.setToolTip(
+            "Is the FID cut off before it has decayed? If so the transform carries sinc "
+            "wiggles beside strong lines that look like a multiplet. Measures their size and "
+            "spacing, says whether TopSpin's window was reproduced here, and suggests the "
+            "sine-bell that removes them for the least broadening.")
+        self.check_ringing_button.clicked.connect(self._on_check_ringing_clicked)
+        form.addRow(self.check_ringing_button)
+
         self.zero_fill_combo = QComboBox()
         # Explicit user request (2026-10-20): "do not zero fill" as a
         # choice of its own, rather than having to type the number of
@@ -9093,6 +9252,57 @@ class MainWindow(QMainWindow):
         self.gb_spin.setEnabled(key == "gaussian")
         self.ssb_spin.setEnabled(key in ("sine", "qsine"))
 
+    def _run_ringing_check(self):
+        """The truncation-wiggle diagnosis of the selected spectrum's F2 (None, with a message
+        in the status bar, when there is no raw FID to check)."""
+        index = self._selected_index()
+        if index is None:
+            return None
+        from ..notebook import ringing as nb_ringing
+        spectrum = self.session.spectra[index]
+        try:
+            return nb_ringing.check_f2_ringing(spectrum)
+        except ValueError as error:
+            self.statusBar().showMessage(f"Truncation check: {error}", 8000)
+            return None
+
+    def _on_check_ringing_clicked(self) -> None:
+        diagnosis = self._run_ringing_check()
+        if diagnosis is None:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Truncation wiggles")
+        box.setIcon(QMessageBox.Icon.Information if diagnosis["severity"] in ("none", "mild")
+                    else QMessageBox.Icon.Warning)
+        box.setText(f"<b>Wiggles: {diagnosis['severity']}</b>")
+        box.setInformativeText(diagnosis["report"])
+        suggestion = diagnosis.get("suggestion")
+        apply_button = None
+        if suggestion:
+            apply_button = box.addButton(f"Apply {suggestion['label']}", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Close)
+        box.exec()
+        if apply_button is not None and box.clickedButton() is apply_button:
+            self._apply_ringing_suggestion(diagnosis)
+
+    def _apply_ringing_suggestion(self, diagnosis: dict) -> bool:
+        """Set F2's window to the suggested sine-bell (the live reprocess follows, and is
+        logged like any window change)."""
+        suggestion = (diagnosis or {}).get("suggestion")
+        if not suggestion:
+            return False
+        index = self.window_combo.findData(suggestion["window"])
+        if index < 0:
+            return False
+        for widget, set_value in ((self.ssb_spin, lambda: self.ssb_spin.setValue(float(suggestion["ssb"]))),
+                                  (self.window_combo, lambda: self.window_combo.setCurrentIndex(index))):
+            widget.blockSignals(True)
+            set_value()
+            widget.blockSignals(False)
+        self._update_window_param_spin_enabled()
+        self._on_fid_processing_control_changed()     # one live reprocess, whatever was set before
+        return True
+
     def _on_window_combo_changed(self, _index: int) -> None:
         self._update_window_param_spin_enabled()
         self._on_fid_processing_control_changed()
@@ -9335,6 +9545,13 @@ class MainWindow(QMainWindow):
             # crash a live Qt signal handler -- fall back to the
             # unmodified raw row and keep going.
             fid = raw_row.astype(complex)
+
+        if spectrum.metadata.vendor == "bruker":
+            # TopSpin scales the first point (FCOR) before the window,
+            # exactly as io.bruker.read_1d/read_2d do -- without it the
+            # live row differs from the loaded one.
+            fid = io_bruker.apply_first_point_scaling(
+                fid, spectrum.metadata.raw.get("procs"))
 
         window_key = self.window_combo.currentData()
         if window_key == "__recorded__":
@@ -10001,6 +10218,10 @@ class MainWindow(QMainWindow):
             proc2s_lp = spectrum.metadata.raw.get("proc2s")
             if proc2s_lp:
                 data = io_bruker.apply_recorded_f1_linear_prediction(data, proc2s_lp)
+            if spectrum.metadata.vendor == "bruker":
+                # FCOR on the first F1 point (axis 0 here), as read_2d.
+                data = np.moveaxis(io_bruker.apply_first_point_scaling(
+                    np.moveaxis(data, 0, -1), proc2s_lp), -1, 0)
             chosen_f1_window = self._resolve_f1_window()
             if chosen_f1_window is not None:
                 # An explicit F1 window wins over the vendor's recorded

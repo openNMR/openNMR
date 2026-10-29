@@ -37,6 +37,21 @@ BUNDLE_ID = "org.opennmr.openNMR"
 BUILD_DIR = os.path.join(REPO_ROOT, "build")
 DIST_DIR = os.path.join(REPO_ROOT, "dist")
 
+#: The matplotlib backends that write the vector formats Save Figure offers
+#: (SVG, PDF, EPS/PS). matplotlib imports a backend by name at the moment of
+#: saving (``importlib.import_module``), which PyInstaller's static analysis
+#: cannot see, so without these a frozen app drew bitmaps fine and failed
+#: every vector export with "No module named 'matplotlib.backends.backend_svg'"
+#: (user report, 2026-10-29). Listed one by one rather than
+#: ``--collect-submodules matplotlib.backends``, which would also pull in the
+#: Qt5/Tk/GTK backends and the second Qt binding the build excludes.
+MATPLOTLIB_EXPORT_BACKENDS = (
+    "matplotlib.backends.backend_svg",
+    "matplotlib.backends.backend_pdf",
+    "matplotlib.backends.backend_ps",
+    "matplotlib.backends.backend_agg",
+)
+
 
 def _make_icon() -> str | None:
     """Convert the app's PNG logo to whatever icon format this
@@ -303,6 +318,8 @@ def main() -> int:
         "--exclude-module", "nmrglue",
         "--osx-bundle-identifier", BUNDLE_ID,
     ]
+    for backend in MATPLOTLIB_EXPORT_BACKENDS:
+        args += ["--hidden-import", backend]
     args += _expat_args()
     icon = _make_icon()
     if icon:

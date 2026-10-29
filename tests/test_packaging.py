@@ -73,6 +73,32 @@ def test_build_passes_what_a_frozen_app_needs(monkeypatch):
     assert any(d.endswith("opennmr/topspin/resources") for d in data)
     assert "--windowed" in args
     assert args[0].endswith("entrypoint.py")
+    # Vector export (SVG/PDF/EPS) imports its matplotlib backend by name when saving,
+    # which PyInstaller cannot see: the frozen app must be told (2026-10-29 report).
+    hidden = value_after("--hidden-import")
+    for backend in ("matplotlib.backends.backend_svg", "matplotlib.backends.backend_pdf",
+                    "matplotlib.backends.backend_ps"):
+        assert backend in hidden
+
+
+def test_every_vector_backend_the_build_bundles_exists_and_saves(tmp_path):
+    """The names in build.MATPLOTLIB_EXPORT_BACKENDS are real modules (a typo would
+    only show up as a missing backend in a frozen app) and each writes its format."""
+    import importlib
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    build = _load("build")
+    for name in build.MATPLOTLIB_EXPORT_BACKENDS:
+        importlib.import_module(name)
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    for extension in ("svg", "pdf", "eps", "png"):
+        path = tmp_path / f"figure.{extension}"
+        fig.savefig(path)
+        assert path.stat().st_size > 500
+    plt.close(fig)
 
 
 @pytest.mark.parametrize("platform, name", [

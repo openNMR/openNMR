@@ -261,6 +261,16 @@ def run(out_dir: str) -> int:
         fig, ax = plt.subplots(figsize=(6, 4), dpi=100)
         plot_1d(ax, paths["s1"])
         fig.savefig(os.path.join(out_dir, "figure_1d.png"))
+        # Every vector format Save Figure offers. matplotlib imports each writer by
+        # name only when saving, so a frozen app that left one out passed every
+        # bitmap check and failed here for the user (2026-10-29: "No module named
+        # 'matplotlib.backends.backend_svg'").
+        for extension in ("svg", "pdf", "eps"):
+            name = f"figure_1d.{extension}"
+            fig.savefig(os.path.join(out_dir, name))
+            if os.path.getsize(os.path.join(out_dir, name)) < 500:
+                raise RuntimeError(f"{name} is empty")
+            written.append(name)
         plt.close(fig)
         written.append("figure_1d.png")
 

@@ -1218,6 +1218,16 @@ class MplCanvas(QWidget):
         # returns to. Recorded lazily, the first time the view is about
         # to change (see note_natural_view); cleared by _clear_figure.
         self._home_limits = None
+        # Typed axis limits (see set_view_limits): (low, high) pairs, either
+        # side None for "automatic", or None for no limit at all. Re-applied by
+        # every draw that supports them; in the unit they were typed in.
+        self._view_x = None
+        self._view_y = None
+        self._view_unit = "ppm"
+        self._view_limits_note = ""
+        # {Axes: (xlim, ylim)} the plot had before the typed limits were first
+        # applied to it -- what clearing them returns to.
+        self._natural_limits = None
         self._legend_visible = False
         self._legend_loc = "best"
         # Columns (0: whatever the legend's builder chose) and the
@@ -3631,6 +3641,7 @@ class MplCanvas(QWidget):
         # teardown above.
         self._last_cursor_shape = None
         self._home_limits = None
+        self._natural_limits = None
         self._trace_label_artists = []
         self._external_plot = False
         self._external_draw = None
@@ -3770,6 +3781,9 @@ class MplCanvas(QWidget):
                 **self._projection_mode_kwargs(),
         )
         self._apply_current_axis_style()
+        # Typed limits first: with a zoom to keep, Home then returns to them,
+        # and the zoom is put back on top just below.
+        self._apply_view_limits()
         if preserve_view:
             self.note_natural_view()
             self.ax.set_xlim(xlim)
@@ -4121,6 +4135,201 @@ class MplCanvas(QWidget):
             self._home_limits = {
                 ax: (ax.get_xlim(), ax.get_ylim(), ax.get_autoscalex_on(), ax.get_autoscaley_on())
                 for ax in self.figure.axes}
+
+    # ---- exact axis limits (Plot Style ▸ Axis limits) -------------------------
+    #
+    # A typed x range (and, on a 2D contour, y range) that every draw re-applies,
+    # so it survives a reprocess, a restyle and the next spectrum shown on the
+    # same tab. Deliberately not part of style_settings(): a range belongs to the
+    # data on show, not to the look, so it is neither saved as a per-type default
+    # nor pushed by "Apply to all plots" (a 1H window saved as a default would
+    # crop the next 13C spectrum to nothing). Home and a double-click return to
+    # the typed range; clearing it returns to the full view.
+
+    #: Pass as ``x``/``y`` of :meth:`set_view_limits` to leave that axis as it is.
+    KEEP_LIMITS = object()
+
+    @staticmethod
+    def _clean_limit_pair(pair):
+        """``(low, high)`` ordered, either side ``None`` for automatic; ``None``
+        when both are (no limit). Order does not matter to the caller: the plot
+        keeps its own direction (ppm still runs high to low)."""
+        if pair is None:
+            return None
+        try:
+            low, high = pair
+        except (TypeError, ValueError):
+            raise ValueError("an axis limit is a (low, high) pair; None on either side means automatic") from None
+        cleaned = []
+        for value in (low, high):
+            if value is None:
+                cleaned.append(None)
+                continue
+            value = float(value)
+            if not np.isfinite(value):
+                raise ValueError(f"axis limit {value!r} is not a finite number")
+            cleaned.append(value)
+        low, high = cleaned
+        if low is not None and high is not None:
+            if low == high:
+                raise ValueError(f"the two axis limits are both {low:g}: the range would be empty")
+            low, high = min(low, high), max(low, high)
+        if low is None and high is None:
+            return None
+        return (low, high)
+
+    def view_limits(self) -> dict:
+        """The typed limits, ``{"x": pair-or-None, "y": pair-or-None}``."""
+        return {"x": self._view_x, "y": self._view_y}
+
+    def view_limit_support(self) -> tuple:
+        """``(x, y)``: whether the plot on show takes a typed x range, and a typed
+        y range. Both on a 2D contour, x only on a 1D spectrum or a Compare
+        stack/overlay, neither on anything else (a FID, a fit, a curve...)."""
+        if not self._view_limit_axes():
+            return False, False
+        return True, self._contour_spectrum is not None
+
+    def view_limits_unit_text(self) -> str:
+        """The unit the plot's axis is in now, as the limits are to be typed."""
+        return self._UNIT_TEXT.get(self._axis_unit, self._axis_unit)
+
+    def view_limits_note(self) -> str:
+        """Why the typed limits are not doing what was asked, or ``""``."""
+        if self._view_x is None and self._view_y is None:
+            return ""
+        if self._view_unit != self._axis_unit:
+            was = self._UNIT_TEXT.get(self._view_unit, self._view_unit)
+            return (f"These limits were typed for an axis in {was}; the plot is in "
+                    f"{self.view_limits_unit_text()}, so they are not applied. Type them again "
+                    f"in {self.view_limits_unit_text()}, or switch the axis back.")
+        return self._view_limits_note
+
+    def set_view_limits(self, x=KEEP_LIMITS, y=KEEP_LIMITS) -> None:
+        """Fix the plot's x range (and, on a 2D contour, y range) exactly.
+
+        ``x`` / ``y``: ``(low, high)`` in the unit the axis is showing now (ppm,
+        Hz...), in either order -- the plot keeps its direction, so
+        ``x=(-2, 12)`` still draws 12 on the left. ``None`` on either side leaves
+        that end automatic; ``None`` for the whole pair clears that axis's limit
+        and restores the full view. Omit an argument to leave that axis alone.
+        Raises ``ValueError`` for a non-finite number or an empty range."""
+        if x is not self.KEEP_LIMITS:
+            x = self._clean_limit_pair(x)
+        if y is not self.KEEP_LIMITS:
+            y = self._clean_limit_pair(y)
+        if x is not self.KEEP_LIMITS:
+            self._view_x = x
+        if y is not self.KEEP_LIMITS:
+            self._view_y = y
+        self._view_unit = self._axis_unit
+        self._apply_view_limits()
+        self.canvas.draw_idle()
+        self.viewLimitsChanged.emit()
+
+    def clear_view_limits(self) -> None:
+        """Back to the full view on both axes."""
+        self.set_view_limits(x=None, y=None)
+
+    def _view_limit_axes(self) -> list:
+        """The Axes a typed range goes on: the contour's main Axes (its
+        projection strips share them), every row of a Compare stack, or the one
+        Axes of a 1D spectrum / Compare overlay. Nothing for any other view."""
+        live = self.figure.axes
+        if self._contour_spectrum is not None:
+            return [self.ax] if self.ax in live else []
+        if self._compare_axes:
+            return [ax for ax in self._compare_axes if ax in live]
+        if ((self._current_1d_spectrum is not None or self._plot_kind == "compare")
+                and not self._spectrum_panels and self.ax in live and self.ax.lines):
+            return [self.ax]
+        return []
+
+    @staticmethod
+    def _limits_in_orientation(current, natural, requested):
+        """``requested`` (low, high; ``None`` = take the plot's own end) as limits
+        for an axis currently running ``current``, keeping its direction."""
+        low, high = requested
+        natural_low, natural_high = sorted(natural)
+        low = natural_low if low is None else low
+        high = natural_high if high is None else high
+        if low > high:
+            low, high = high, low
+        if low == high:
+            return None
+        return (high, low) if current[0] > current[1] else (low, high)
+
+    def _apply_view_limits(self) -> None:
+        """Put the typed limits on the plot on show (and take them off an axis
+        whose limit was cleared). Called at the end of every draw that supports
+        them, and by :meth:`set_view_limits`. Does nothing when there are no
+        limits and none to undo."""
+        if self._view_x is None and self._view_y is None and self._natural_limits is None:
+            return
+        self._view_limits_note = ""
+        axes = self._view_limit_axes()
+        if not axes:
+            return
+        if self._view_unit != self._axis_unit:
+            return                      # view_limits_note() says so
+        if self._natural_limits is None:
+            # Before the first change: what a fresh draw gave (or, when a zoom is
+            # already on, the view Home would return to).
+            home = self._home_limits or {}
+            self._natural_limits = {
+                ax: ((home[ax][0], home[ax][1]) if ax in home else (ax.get_xlim(), ax.get_ylim()))
+                for ax in axes}
+        main = axes[0]
+        natural = self._natural_limits
+        # The crosshair's two-point lines live on this Axes and would be read as
+        # data by the refit below; they are rebuilt on the next mouse move.
+        self._remove_crosshair()
+
+        for ax in axes:
+            natural_x, _ = natural.get(ax, natural.get(main, (ax.get_xlim(), ax.get_ylim())))
+            if self._view_x is None:
+                target = natural_x
+            else:
+                target = self._limits_in_orientation(ax.get_xlim(), natural_x, self._view_x) or natural_x
+            ax.set_xlim(target)
+        if self._contour_spectrum is not None:
+            _, natural_y = natural.get(main, (main.get_xlim(), main.get_ylim()))
+            if self._view_y is None:
+                target = natural_y
+            else:
+                target = self._limits_in_orientation(main.get_ylim(), natural_y, self._view_y) or natural_y
+            main.set_ylim(target)
+        elif self._current_1d_spectrum is not None and self._compare_axes is None:
+            if self._view_x is None:
+                self._fit_y_to_data(main)
+            else:
+                # The intensity axis fits what is inside the window.
+                self._fit_y_to_data(main, y_range=self._data_y_range(
+                    main, x_window=tuple(sorted(main.get_xlim()))))
+
+        # Said when a typed range misses the data altogether (the plot would be
+        # an empty frame with no hint why).
+        data_x = sorted(natural.get(main, (main.get_xlim(), None))[0])
+        for name, pair, data in (("x", self._view_x, data_x),
+                                  ("y", self._view_y,
+                                   sorted(natural[main][1]) if self._contour_spectrum is not None
+                                   and main in natural else None)):
+            if pair is None or data is None:
+                continue
+            low = data[0] if pair[0] is None else pair[0]
+            high = data[1] if pair[1] is None else pair[1]
+            if high < data[0] or low > data[1]:
+                self._view_limits_note = (f"The {name} range {min(low, high):g} to {max(low, high):g} "
+                                          f"lies outside the data ({data[0]:g} to {data[1]:g}): "
+                                          f"the plot is empty.")
+        if self._view_x is None and self._view_y is None:
+            # Everything cleared: back to a plain fresh view.
+            self._natural_limits = None
+            self._home_limits = None
+            return
+        # Home and a double-click return to the typed range.
+        self._home_limits = {ax: (ax.get_xlim(), ax.get_ylim(), False, False)
+                             for ax in self.figure.axes}
 
     def _on_press(self, event) -> None:
         if self._begin_label_drag(event):
@@ -4605,6 +4814,10 @@ class MplCanvas(QWidget):
     #: with "Keep for later exports" ticked -- the main window copies it
     #: into Plot Style ▸ Export so every canvas follows.
     exportSettingsKept = Signal(float, float, float)
+    #: The typed axis limits (Plot Style ▸ Axis limits) changed, were applied
+    #: to a fresh draw, or stopped applying (the axis unit changed): the
+    #: panel re-reads :meth:`view_limits` and :meth:`view_limits_note`.
+    viewLimitsChanged = Signal()
 
     #: Who drew the figure on show, for its right-click plot options
     #: (``register_plot_options``): set by the drawer after drawing,
@@ -6639,6 +6852,10 @@ class MplCanvas(QWidget):
         for every other precondition it checks."""
         if unit not in ("ppm", "hz", "khz", "mm"):
             return
+        previous_unit = self._axis_unit
+        if unit != previous_unit:
+            # Once the switch has happened (or been refused): see below.
+            QTimer.singleShot(0, lambda: self._after_axis_unit_change(previous_unit))
         if self._contour_spectrum is not None:
             # A contour has no lines to rewrite -- its axes come from
             # the spectrum, so the unit change is a rebuild. Not
@@ -6694,6 +6911,24 @@ class MplCanvas(QWidget):
             self._ppm_label = label
         self._axis_unit = unit
         self.canvas.draw_idle()
+
+    def _after_axis_unit_change(self, previous_unit: str) -> None:
+        """After :meth:`set_axis_unit`. If the unit did change, the view Home
+        returns to and the plot before any typed limits were both in the old
+        unit, so both are dropped; typed limits then go back on if the axis is
+        again in the unit they were typed in, and the panel re-reads them."""
+        if self._axis_unit == previous_unit:
+            return
+        self._home_limits = None
+        self._natural_limits = None
+        if self._view_x is None and self._view_y is None:
+            return
+        try:
+            self._apply_view_limits()
+            self.canvas.draw_idle()
+        except RuntimeError:            # the canvas was closed in the meantime
+            return
+        self.viewLimitsChanged.emit()
 
     def _set_axis_unit_for_stack(self, unit: str) -> None:
         """:meth:`set_axis_unit` for a Compare/component stack: rewrite
@@ -7074,6 +7309,7 @@ class MplCanvas(QWidget):
         else:
             raise ValueError(f"Cannot display a spectrum with ndim={spectrum.ndim}")
 
+        self._apply_view_limits()
         self._apply_view_options()
         if spectrum.ndim == 1:
             self._pivot_marker_ax = self.ax
@@ -7576,6 +7812,7 @@ class MplCanvas(QWidget):
                                        labelsize=self._AXIS_LABELSIZE)
             self.ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
 
+        self._apply_view_limits()
         self._apply_view_options()
         # Crosshairs here too: reading a value off this plot is
         # exactly what it is for (Compare).
@@ -8988,7 +9225,7 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     @classmethod
-    def _data_y_range(cls, ax):
+    def _data_y_range(cls, ax, x_window=None):
         """``(lowest, highest)`` of every data line on ``ax``, read from
         each line's **full-resolution** arrays where it has them.
 
@@ -9007,6 +9244,12 @@ class MplCanvas(QWidget):
             y = np.asarray(full[1] if full is not None else line.get_ydata(), dtype=float)
             if y.ndim != 1 or y.size < 2:
                 continue
+            if x_window is not None:
+                # Only what is inside the typed x range: a solvent peak outside
+                # the window must not set the height of the peaks within it.
+                x = np.asarray(full[0] if full is not None else line.get_xdata(), dtype=float)
+                if x.shape == y.shape:
+                    y = y[(x >= x_window[0]) & (x <= x_window[1])]
             y = y[np.isfinite(y)]
             if y.size:
                 lows.append(float(np.min(y)))
