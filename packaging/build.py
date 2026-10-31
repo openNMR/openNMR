@@ -53,6 +53,49 @@ MATPLOTLIB_EXPORT_BACKENDS = (
 )
 
 
+def _tk_available() -> bool:
+    """PyInstaller's boot splash is drawn by Tcl/Tk, which a few Python builds
+    lack. (It is not supported on macOS at all.)"""
+    if sys.platform == "darwin":
+        return False
+    try:
+        import _tkinter  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _make_boot_splash() -> str | None:
+    """Draw the image PyInstaller shows while the bundle unpacks and Python
+    starts -- before any of our code can run -- with the same picture as the
+    Qt splash that takes over (``opennmr_launch.render_splash_pixmap``).
+
+    Returns its path, or ``None`` when it cannot or should not be made
+    (no Tk, macOS, ``OPENNMR_BUILD_SPLASH=0``); the build then goes ahead
+    without it, and the Qt splash is all the user sees."""
+    if os.environ.get("OPENNMR_BUILD_SPLASH", "1").strip() == "0" or not _tk_available():
+        return None
+    try:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        if os.name == "nt":      # offscreen finds no fonts on Windows (see tests/conftest.py)
+            fonts = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+            if os.path.isdir(fonts):
+                os.environ.setdefault("QT_QPA_FONTDIR", fonts)
+        src = os.path.join(REPO_ROOT, "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from PySide6.QtWidgets import QApplication
+        import opennmr_launch
+        app = QApplication.instance() or QApplication([])  # noqa: F841 - QPixmap needs it
+        os.makedirs(BUILD_DIR, exist_ok=True)
+        path = os.path.join(BUILD_DIR, "boot_splash.png")
+        pix = opennmr_launch.render_splash_pixmap(app_version(), "Loading\u2026")
+        return path if pix.save(path, "PNG") else None
+    except Exception as exc:     # a missing splash must never fail a release build
+        print(f"Boot splash skipped: {exc}", file=sys.stderr)
+        return None
+
+
 def _make_icon() -> str | None:
     """Convert the app's PNG logo to whatever icon format this
     platform's build wants (``.icns`` on macOS, ``.ico`` on Windows).
@@ -311,7 +354,6 @@ def main() -> int:
         # table and other tables from JSON/YAML files at import.
         "--collect-data", "pymatgen",
         # Never used by the app; keep them (and their size) out.
-        "--exclude-module", "tkinter",
         "--exclude-module", "PyQt5",
         "--exclude-module", "PySide2",
         "--exclude-module", "pytest",
@@ -321,6 +363,11 @@ def main() -> int:
     for backend in MATPLOTLIB_EXPORT_BACKENDS:
         args += ["--hidden-import", backend]
     args += _expat_args()
+    boot_splash = _make_boot_splash()
+    if boot_splash:
+        args += ["--splash", boot_splash]       # needs tkinter, so it is not excluded
+    else:
+        args += ["--exclude-module", "tkinter"]
     icon = _make_icon()
     if icon:
         args += ["--icon", icon]

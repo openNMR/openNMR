@@ -24,7 +24,15 @@ if __name__ == "__main__":
     # would launch another copy of the GUI on Windows and macOS.
     multiprocessing.freeze_support()
     if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
+        try:                      # the boot splash (build --splash) has no use here
+            import pyi_splash
+            pyi_splash.close()
+        except ImportError:
+            pass
         from opennmr.selftest import main as selftest_main
         raise SystemExit(selftest_main(sys.argv[2:]))
-    from opennmr.gui.app import main
+    # Not ``opennmr.gui.app`` directly: that imports numpy/scipy/matplotlib
+    # (through ``opennmr/__init__``) before it can draw anything. The
+    # launcher shows the splash first and keeps to one window.
+    from opennmr_launch import main
     raise SystemExit(main())

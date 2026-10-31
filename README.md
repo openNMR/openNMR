@@ -28,6 +28,11 @@ pip install opennmr
 opennmr-gui
 ```
 
+A splash screen shows while the program loads, and a second launch brings the
+running window to the front instead of opening another (`opennmr-gui
+--new-instance` or `OPENNMR_MULTI_INSTANCE=1` opens a second window on purpose;
+`OPENNMR_SPLASH=0` turns the splash off).
+
 Python 3.12 or newer. The same package serves a notebook (`from opennmr
 import notebook`) and the GUI.
 

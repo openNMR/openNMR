@@ -41,11 +41,14 @@ test = ["pytest", "pytest-xdist", "pytest-timeout", "nmrglue", "pymatgen"]
 build = ["pyinstaller"]
 
 [project.scripts]
-opennmr-gui = "opennmr.gui.app:main"
+opennmr-gui = "opennmr_launch:main"
 opennmr-topspin-install = "opennmr.topspin.install:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+# Start-up shim outside the package, so the splash can appear before
+# ``import opennmr`` (several seconds of numpy/scipy/matplotlib).
+py-modules = ["opennmr_launch"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

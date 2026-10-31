@@ -58,6 +58,7 @@ def test_build_passes_what_a_frozen_app_needs(monkeypatch):
     monkeypatch.setattr(build, "_fix_qt_plugins", lambda: None)
     monkeypatch.setattr(build, "_stamp_macos_version", lambda: None)
     monkeypatch.setattr(build, "_make_icon", lambda: None)
+    monkeypatch.setattr(build, "_make_boot_splash", lambda: None)
     assert build.main() == 0
     args = captured[0]
 
