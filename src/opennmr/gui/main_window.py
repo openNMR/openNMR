@@ -1235,6 +1235,63 @@ class MainWindow(QMainWindow):
         self.show_welcome()
         return True
 
+    def show_command_palette(self):
+        """Help ▸ Search Commands… (Ctrl+H): the "Where is…?" palette
+        (gui/command_palette.py). A second call while it is open closes
+        it. The index is rebuilt each time, from the window as it is."""
+        existing = getattr(self, "_command_palette", None)
+        if existing is not None:
+            visible = existing.isVisible()
+            existing.close()
+            existing.deleteLater()
+            self._command_palette = None
+            if visible:
+                return None
+        from .command_palette import CommandPalette
+        palette = self._command_palette = CommandPalette(self)
+        return palette.open_palette()
+
+    def show_shortcut_sheet(self):
+        """Help ▸ Keyboard Shortcuts… (F1): see gui/shortcut_sheet.py."""
+        sheet = getattr(self, "_shortcut_sheet", None)
+        if sheet is not None:
+            sheet.close()
+            sheet.deleteLater()
+        from .shortcut_sheet import ShortcutSheet
+        sheet = self._shortcut_sheet = ShortcutSheet(self)
+        sheet.show()
+        sheet.raise_()
+        sheet.filter_edit.setFocus()
+        return sheet
+
+    def _on_export_notebook_clicked(self) -> None:
+        """File ▸ Export Experiment to Notebook…: the selected experiment
+        as a Jupyter notebook (notebook/experiment_notebook.py)."""
+        index = self._selected_index()
+        if index is None:
+            self.statusBar().showMessage("Select an experiment in Open experiments first.", 6000)
+            return
+        from ..notebook.experiment_notebook import export_experiment_notebook
+        spectrum = self.session.spectra[index]
+        source = spectrum.metadata.source_path or ""
+        base = os.path.basename(os.path.normpath(source)) if source else "experiment"
+        folder = os.path.dirname(os.path.normpath(source)) if source else ""
+        path, _selected = QFileDialog.getSaveFileName(
+            self, "Export experiment to notebook",
+            os.path.join(folder, f"{base}_openNMR.ipynb"), "Jupyter notebook (*.ipynb)")
+        if not path:
+            return
+        try:
+            written = export_experiment_notebook(
+                spectrum, path, load_kwargs=self.session.get_load_kwargs(index),
+                reprocessable=self._fid_reprocessable(spectrum), overwrite=True)
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Export experiment to notebook", str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Wrote {written}. Baseline, referencing and other steps done after loading are "
+            "listed in it but not re-run.", 12000)
+
     def show_welcome(self):
         """Help ▸ Welcome to openNMR…: the settings tour (also shown on
         first run). Remembered as seen as soon as it opens, so a crash or
@@ -1362,6 +1419,15 @@ class MainWindow(QMainWindow):
         )
         processing_report_action.triggered.connect(self._on_processing_report_clicked)
         file_menu.addAction(processing_report_action)
+
+        export_notebook_action = QAction("Export Experiment to &Notebook…", self)
+        export_notebook_action.setToolTip(
+            "Write the selected experiment as a Jupyter notebook that re-reads it with the "
+            "same reader settings and plots it. Baseline correction, referencing and other "
+            "steps done after loading are listed in the notebook but not re-run.")
+        export_notebook_action.triggered.connect(self._on_export_notebook_clicked)
+        file_menu.addAction(export_notebook_action)
+        self.export_notebook_action = export_notebook_action
 
         file_menu.addSeparator()
         self.save_progress_action = QAction("Save Pro&gress…", self)
@@ -1788,6 +1854,24 @@ class MainWindow(QMainWindow):
                                   "openNMR is run.")
         welcome_action.triggered.connect(lambda _checked=False: self.show_welcome())
         help_menu.addAction(welcome_action)
+        from .command_palette import PALETTE_KEY
+        from .shortcut_sheet import SHEET_KEY
+        palette_action = QAction("&Search Commands…", self)
+        palette_action.setShortcut(QKeySequence(PALETTE_KEY))
+        palette_action.setToolTip(
+            "\"Where is…?\": search every menu action, panel, section and control, and go "
+            "straight to it. Ctrl+H (Control+H on a Mac, where Cmd+H is the system's Hide).")
+        palette_action.setProperty("palette_exclude", True)
+        palette_action.triggered.connect(lambda _checked=False: self.show_command_palette())
+        help_menu.addAction(palette_action)
+        shortcuts_action = QAction("&Keyboard Shortcuts…", self)
+        shortcuts_action.setShortcut(QKeySequence(SHEET_KEY))
+        shortcuts_action.setToolTip("Every keyboard shortcut, searchable. F1.")
+        shortcuts_action.setProperty("palette_exclude", False)
+        shortcuts_action.triggered.connect(lambda _checked=False: self.show_shortcut_sheet())
+        help_menu.addAction(shortcuts_action)
+        self.palette_action = palette_action
+        self.shortcuts_action = shortcuts_action
         website_action = QAction("openNMR &website (in progress)", self)
         website_action.triggered.connect(lambda _checked=False: self._open_website())
         help_menu.addAction(website_action)

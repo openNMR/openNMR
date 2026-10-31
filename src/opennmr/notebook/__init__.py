@@ -361,6 +361,10 @@ dw = dnp_workflow
 acc = accessibility
 
 
+from .experiment_notebook import (
+    experiment_notebook, write_experiment_notebook, export_experiment_notebook,
+)
+
 __all__ = [
     "add_inset", "remove_insets", "insets_of", "INSET_DEFAULTS", "INSET_CORNERS",
     "integral_labels", "add_integral_labels", "remove_integral_labels", "normalised_integrals",
@@ -555,4 +559,6 @@ __all__ = [
     # typefaces and Illustrator-safe vector saves
     "fonts", "available_fonts", "font_samples", "plot_font_samples", "use_font",
     "save_vector_safe",
+    # one experiment as a Jupyter notebook
+    "experiment_notebook", "write_experiment_notebook", "export_experiment_notebook",
 ]
