@@ -36,9 +36,9 @@ contrast either way.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 #: Corner radius in px for buttons and text fields. 0 restores square
 #: corners. :data:`CONTAINER_RADIUS` is used for group boxes and panes,
@@ -303,7 +303,7 @@ QProgressBar::chunk {{ border-radius: {max(radius - 2, 0)}px; }}
 
 
 def apply_theme(mode: str = "system", app: QApplication | None = None,
-                radius: int = RADIUS, stylesheet: bool = True) -> str:
+                radius: int = RADIUS, stylesheet: bool = True, fast: bool = False) -> str:
     """Install the palette and stylesheet for ``mode``; return the
     concrete theme (``"light"``/``"dark"``) actually applied.
 
@@ -317,6 +317,12 @@ def apply_theme(mode: str = "system", app: QApplication | None = None,
     once at the end, because a sheet present while thousands of widgets
     are reparented into place re-polishes them over and over (startup
     time; see MainWindow._apply_startup_ui).
+
+    ``fast`` (a change made in Settings while the window is on screen): when
+    the sheet is already installed -- it is the same for every theme, the
+    colours coming from palette() roles -- only re-polish what is on screen,
+    and the rest as it is shown (:func:`restyle`), instead of re-setting the
+    sheet over every widget.
     """
     app = app or QApplication.instance()
     if app is None:
@@ -370,10 +376,120 @@ def apply_theme(mode: str = "system", app: QApplication | None = None,
         return resolved
 
     existing = app.styleSheet() or ""
+    wanted_tail = f"{_MARKER}\n{theme_qss(radius)}".strip()
     if _MARKER in existing:
+        if fast and existing.rstrip().endswith(wanted_tail):
+            # The sheet itself is the same for every theme (colours come from
+            # palette() roles), so a theme change only needs the widgets'
+            # cached colours refreshed -- on screen now, the rest when shown.
+            restyle(app)
+            return resolved
         existing = existing.split(_MARKER)[0]
-    app.setStyleSheet(f"{existing}\n{_MARKER}\n{theme_qss(radius)}".strip())
+    app.setStyleSheet(f"{existing}\n{wanted_tail}".strip())
+    _reset_generation()
     return resolved
+
+
+# ---- fast restyling: what is on screen now, the rest when it is shown ----------
+#
+# Re-setting the application stylesheet re-polishes *every* widget: Qt sends
+# each a StyleChange and re-matches the sheet's rules against it. The main
+# window holds ~7,900 widgets, of which ~75 are on screen, and that took
+# 5-6 s per font-size step or theme change (measured 2026-11-01; most of the
+# widgets are on other tiles, in collapsed sections or in hidden dialogs).
+#
+# A widget styled by the sheet caches its colours and font when polished, so
+# the palette and font change themselves are instant (QApplication.setPalette
+# / setFont, ~10 ms) but are not *seen* until the widget is polished again.
+# restyle() re-polishes only the visible widgets, parents before children
+# (a child's font is resolved from its parent's), and stamps each with the
+# current generation; an application event filter re-polishes any other
+# widget, and its stale ancestors, the moment it is shown. A widget built
+# after the change is polished normally, with the new palette and font.
+#
+# tests/test_fast_interface_restyle.py checks the result against the slow,
+# whole-sheet path: the same font and the same rendered colours for every
+# widget once each page has been shown.
+
+#: Dynamic property holding the restyle generation a widget was last polished in.
+_GENERATION_PROP = "_opennmr_restyle_generation"
+_restyle = {"generation": 0, "filter": None}
+
+
+def _reset_generation() -> None:
+    """After a whole-sheet re-set every widget is current again."""
+    _restyle["generation"] = 0
+
+
+def restyle_generation() -> int:
+    """How many fast restyles have happened since the sheet was last set."""
+    return _restyle["generation"]
+
+
+def _stale(widget) -> bool:
+    return (widget.property(_GENERATION_PROP) or 0) != _restyle["generation"]
+
+
+def _repolish(widget, style) -> None:
+    style.unpolish(widget)
+    style.polish(widget)
+    widget.setProperty(_GENERATION_PROP, _restyle["generation"])
+    QApplication.sendEvent(widget, QEvent(QEvent.Type.StyleChange))
+    widget.update()
+
+
+def _repolish_with_ancestors(widget, style) -> None:
+    chain = []
+    w = widget
+    while w is not None and _stale(w):
+        chain.append(w)
+        w = w.parentWidget()
+    for w in reversed(chain):                   # parents first
+        _repolish(w, style)
+
+
+class _RepolishOnShow(QObject):
+    """Application event filter: a widget polished before the last
+    :func:`restyle` is re-polished when it is shown."""
+
+    def eventFilter(self, obj, event):  # noqa: N802 -- Qt override
+        if (event.type() == QEvent.Type.Show and _restyle["generation"]
+                and isinstance(obj, QWidget)):
+            try:
+                if _stale(obj):
+                    app = QApplication.instance()
+                    if app is not None:
+                        _repolish_with_ancestors(obj, app.style())
+            except RuntimeError:                # deleted while being shown
+                pass
+        return False
+
+
+def _depth(widget) -> int:
+    d = 0
+    while widget is not None:
+        widget = widget.parentWidget()
+        d += 1
+    return d
+
+
+def restyle(app: QApplication | None = None) -> int:
+    """Make a palette or application-font change visible fast: re-polish the
+    widgets on screen now (parents first) and the others when they are shown.
+    Returns how many widgets were re-polished now."""
+    app = app or QApplication.instance()
+    if app is None:
+        return 0
+    _restyle["generation"] += 1
+    if _restyle["filter"] is None:
+        _restyle["filter"] = _RepolishOnShow(app)
+        app.installEventFilter(_restyle["filter"])
+    style = app.style()
+    shown = [w for w in app.allWidgets() if w.isVisible()]
+    shown.sort(key=_depth)
+    for w in shown:
+        _repolish(w, style)
+    return len(shown)
 
 
 def refresh_fonts(app: QApplication | None = None) -> None:

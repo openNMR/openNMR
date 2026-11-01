@@ -157,6 +157,7 @@ from .curve_fit_plot_box import CurveFitPlotBox
 from .plot_options_dialog import PlotOptionsDialog
 from .regularisation_panel import RegularisationPanel
 from .fit_progress_dialog import FitProgress
+from ..core.atomic_write import write_json_atomic
 from .widgets.sideband_hint import sideband_hint_label
 from ..core import fit_progress as core_fit_progress
 from ..notebook import fit_models as nb_fit_models
@@ -1875,9 +1876,38 @@ class MainWindow(QMainWindow):
         website_action = QAction("openNMR &website (in progress)", self)
         website_action.triggered.connect(lambda _checked=False: self._open_website())
         help_menu.addAction(website_action)
+        help_menu.addSeparator()
+        crash_log_action = QAction("Open &Crash Log Folder", self)
+        crash_log_action.setToolTip(
+            "Where unexpected errors are recorded (crash.log). Send that file with a note of "
+            "what you were doing when you report a problem.")
+        crash_log_action.triggered.connect(lambda _checked=False: self.open_crash_log_folder())
+        help_menu.addAction(crash_log_action)
+        self.crash_log_action = crash_log_action
         self.help_menu = help_menu
         self.welcome_action = welcome_action
         self.website_action = website_action
+
+    @staticmethod
+    def crash_log_folder() -> str:
+        """The crash log's folder (``opennmr_crashlog.log_dir``), created if
+        missing."""
+        try:
+            import opennmr_crashlog
+            folder = opennmr_crashlog.log_dir()
+        except ImportError:   # an install from before the crash log existed
+            folder = os.path.join(os.path.expanduser("~"), ".opennmr", "logs")
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
+    def open_crash_log_folder(self) -> None:
+        """Help ▸ Open Crash Log Folder."""
+        try:
+            folder = self.crash_log_folder()
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not open the crash log folder: {exc}", 8000)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def _rebuild_model_menu(self) -> None:
         self._model_menu.clear()
@@ -6557,10 +6587,8 @@ class MainWindow(QMainWindow):
         payload.update(self._current_output_export_kwargs())
         payload.update(self._legend_place_kwargs())
         try:
-            os.makedirs(os.path.dirname(self._PLOT_STYLE_CONFIG_PATH), exist_ok=True)
-            with open(self._PLOT_STYLE_CONFIG_PATH, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True)
-        except OSError as exc:
+            write_json_atomic(self._PLOT_STYLE_CONFIG_PATH, payload, indent=2, sort_keys=True)
+        except (OSError, TypeError, ValueError) as exc:
             QMessageBox.warning(self, "Could not save defaults", str(exc))
             return
         self._on_apply_style_to_all_clicked()
@@ -6773,10 +6801,8 @@ class MainWindow(QMainWindow):
         styles = self._load_figure_styles()
         styles[key] = payload
         try:
-            os.makedirs(os.path.dirname(self._FIGURE_STYLES_PATH), exist_ok=True)
-            with open(self._FIGURE_STYLES_PATH, "w", encoding="utf-8") as f:
-                json.dump(styles, f, indent=2, sort_keys=True)
-        except OSError as exc:
+            write_json_atomic(self._FIGURE_STYLES_PATH, styles, indent=2, sort_keys=True)
+        except (OSError, TypeError, ValueError) as exc:
             QMessageBox.warning(self, "Could not save default", str(exc))
             return False
         self._refresh_settings_type_rows()
@@ -6844,9 +6870,8 @@ class MainWindow(QMainWindow):
         if styles.pop(key, None) is None:
             return
         try:
-            with open(self._FIGURE_STYLES_PATH, "w", encoding="utf-8") as f:
-                json.dump(styles, f, indent=2, sort_keys=True)
-        except OSError as exc:
+            write_json_atomic(self._FIGURE_STYLES_PATH, styles, indent=2, sort_keys=True)
+        except (OSError, TypeError, ValueError) as exc:
             QMessageBox.warning(self, "Could not clear default", str(exc))
         self._refresh_settings_type_rows()
 
@@ -6932,10 +6957,8 @@ class MainWindow(QMainWindow):
 
     def _save_ui_settings(self) -> None:
         try:
-            os.makedirs(os.path.dirname(self._UI_SETTINGS_PATH), exist_ok=True)
-            with open(self._UI_SETTINGS_PATH, "w", encoding="utf-8") as handle:
-                json.dump(self._ui_settings, handle, indent=2, sort_keys=True)
-        except OSError as exc:
+            write_json_atomic(self._UI_SETTINGS_PATH, self._ui_settings, indent=2, sort_keys=True)
+        except (OSError, TypeError, ValueError) as exc:
             self.statusBar().showMessage(f"Could not save settings: {exc}", 8000)
 
     def _build_settings_panel(self) -> QWidget:
@@ -7372,30 +7395,41 @@ class MainWindow(QMainWindow):
         low, high = self.UI_FONT_SIZE_RANGE
         return int(min(max(round(size) if size > 0 else 9, low), high))
 
-    def _apply_ui_font_size(self, size: float | None) -> None:
+    def _apply_ui_font_size(self, size: float | None, fast: bool = False) -> None:
         """Set the whole interface's font size (``None``: back to the
         system's). Through the application font, so every panel, menu,
         dialog and tooltip follows -- and the section titles, which
-        scale from it."""
+        scale from it.
+
+        An application stylesheet freezes the fonts of widgets that already
+        exist, so they must be polished again to see the new size.
+        ``fast`` (a change made in Settings, window on screen): only the widgets on screen
+        now, the rest as each is shown (style.restyle) -- ~0.1 s instead of
+        re-setting the whole sheet, 5-6 s for this window's ~7,900 widgets.
+        Start-up keeps the whole-sheet route (``fast=False``, see
+        _apply_startup_ui), whose geometry tests/test_startup_time.py
+        checks."""
         app = QApplication.instance()
         if app is None:
             return
         font = QFont(self._system_ui_font)
         if size is not None:
             font.setPointSizeF(float(size))
+        if fast and app.font() == font:
+            return
         app.setFont(font)
-        # An application stylesheet freezes the fonts of widgets that
-        # already exist, so this control stops reaching them until the
-        # sheet is re-applied -- see style.refresh_fonts.
-        style_module.refresh_fonts(app)
+        if fast and app.styleSheet():
+            style_module.restyle(app)
+        else:
+            style_module.refresh_fonts(app)
 
     def _on_ui_theme_changed(self, _index: int) -> None:
         mode = self.ui_theme_combo.currentData() or "system"
-        self._apply_ui_theme(mode)
+        self._apply_ui_theme(mode, fast=self.isVisible())
         self._ui_settings["ui_theme"] = mode
         self._save_ui_settings()
 
-    def _apply_ui_theme(self, mode: str) -> str:
+    def _apply_ui_theme(self, mode: str, fast: bool = False) -> str:
         """Install the interface palette for ``mode``.
 
         **The plots are deliberately left alone.** A figure here is the
@@ -7408,8 +7442,13 @@ class MainWindow(QMainWindow):
         the tinting. Changing this later means separating on-screen
         colours from export colours first; one setting cannot serve
         both.
+
+        ``fast``: a change made in Settings with the window on screen --
+        see style.apply_theme and style.restyle (0.1 s instead of 5-6 s).
         """
-        resolved = style_module.apply_theme(mode)
+        # Start-up calls exactly as before (fast only from Settings).
+        resolved = (style_module.apply_theme(mode, fast=True) if fast
+                    else style_module.apply_theme(mode))
         self._polish_option_dialogs()
         return resolved
 
@@ -7448,7 +7487,7 @@ class MainWindow(QMainWindow):
             self.curve_fit_plot_box.apply_settings(self._ui_settings["curve_fit_line"])
 
     def _on_ui_font_size_changed(self, value: int) -> None:
-        self._apply_ui_font_size(value)
+        self._apply_ui_font_size(value, fast=self.isVisible())
         self._ui_settings["ui_font_size"] = int(value)
         self._save_ui_settings()
 
@@ -7458,7 +7497,7 @@ class MainWindow(QMainWindow):
         blocked = self.ui_font_size_spin.blockSignals(True)
         self.ui_font_size_spin.setValue(self._default_ui_point_size())
         self.ui_font_size_spin.blockSignals(blocked)
-        self._apply_ui_font_size(None)
+        self._apply_ui_font_size(None, fast=self.isVisible())
 
     def _set_state_folder(self, folder: str) -> str:
         """Settings ▸ Saving: the default folder for openNMR states
@@ -17034,6 +17073,9 @@ class MainWindow(QMainWindow):
         index = panel.transitions_combo.findData(settings.get("transitions", "all"))
         if index >= 0:
             panel.transitions_combo.setCurrentIndex(index)
+        index = panel.powder_combo.findData(settings.get("powder_scheme") or "auto")
+        if index >= 0:
+            panel.powder_combo.setCurrentIndex(index)
         panel.set_state({"widgets": {}, "sites": site_dicts, "current": 0})
         panel.auto_axis_check.setChecked(True)
         self.combined_sim_model.show_model("peaks")
@@ -25970,9 +26012,11 @@ class MainWindow(QMainWindow):
         entry = dict(config.get(probe) or {})
         entry["max_gradient_g_per_cm"] = {**self._probe_axis_gradients(probe), axis: float(value)}
         config[probe] = entry
-        os.makedirs(os.path.dirname(self._PROBE_CONFIG_PATH), exist_ok=True)
-        with open(self._PROBE_CONFIG_PATH, "w", encoding="utf-8") as handle:
-            json.dump(config, handle, indent=2)
+        try:
+            write_json_atomic(self._PROBE_CONFIG_PATH, config, indent=2)
+        except (OSError, TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "Could not save", str(exc))
+            return
         QMessageBox.information(
             self, "Saved",
             f"Saved {value:g} G/cm as the default max gradient on the {axis} axis for probe "

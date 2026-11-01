@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+from ..core.atomic_write import write_json_atomic
 
 #: Bumped only if a future format change needs old sidecar files to
 #: be recognizably distinguishable from new ones -- nothing currently
@@ -104,10 +105,7 @@ def _write_json(path: str, payload: dict) -> None:
     # Write-to-temp-then-rename is atomic on both POSIX and Windows --
     # a crash or concurrent read mid-write never observes a truncated/
     # half-written sidecar file.
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-    os.replace(tmp_path, path)
+    write_json_atomic(path, payload, indent=2, sort_keys=True)
 
 
 def _read_json(path: str) -> dict | None:

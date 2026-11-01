@@ -35,6 +35,17 @@ os.environ.setdefault("OPENNMR_BACKGROUND_LOAD", "0")
 # tests/test_gui_updates.py drives the check with a patched source.
 os.environ.setdefault("OPENNMR_UPDATE_CHECK", "0")
 
+# No crash log under test: tests call opennmr_launch.main(), which would
+# otherwise take over sys.excepthook and pytest's own fault handler, and
+# write to the real ~/.opennmr/logs. tests/test_crash_log.py turns it on
+# for itself, into a temporary folder.
+os.environ.setdefault("OPENNMR_CRASH_LOG", "0")
+
+# No run-time estimate before Solid-state NMR simulations and fits (and so
+# never a "this will take ..." question waiting for an answer); the
+# estimate's own tests (test_run_time_estimates.py) turn it back on.
+os.environ.setdefault("OPENNMR_CONFIRM_LONG_RUNS", "0")
+
 import matplotlib
 
 matplotlib.use("Agg")

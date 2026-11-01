@@ -38,6 +38,7 @@ import datetime as _dt
 import io
 import json
 import os
+from ..core.atomic_write import write_json_atomic
 
 __all__ = ["StoredIntegrals", "get_stored_integrals", "default_path", "COLUMNS", "EXPORT_FORMATS"]
 
@@ -104,14 +105,8 @@ class StoredIntegrals:
         """Write the internal file."""
         if not self.path:
             return
-        folder = os.path.dirname(self.path)
-        if folder:
-            os.makedirs(folder, exist_ok=True)
         payload = {"columns": [key for key, _ in COLUMNS], "records": self.records}
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
-        os.replace(tmp, self.path)
+        write_json_atomic(self.path, payload, indent=2)
 
     # ---- the rows -------------------------------------------------------
     @staticmethod

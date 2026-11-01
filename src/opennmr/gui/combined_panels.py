@@ -29,6 +29,7 @@ from .widgets.typed_spinbox import TypedSpinBox
 from .fit_progress_dialog import FitProgress
 from .widgets.report_label import ReportLabel
 from . import report_format
+from . import long_run
 from .widgets.advice_box import AdviceBox
 from .widgets.sideband_hint import sideband_hint_label
 from .widgets.ranges_edit import PpmRangesEdit
@@ -71,6 +72,35 @@ def _nuclides():
         except (TypeError, ValueError):
             continue
     return names
+
+
+#: Tooltip for every "Powder averaging" control of the Solid-state NMR panels.
+POWDER_SCHEME_TIP = (
+    "How the powder average samples crystallite orientations.\n\n"
+    "Automatic (default): ZCW for a static pattern; under MAS, Lebedev for a peak without a "
+    "quadrupolar interaction and ZCW for one with. Measured against a converged average: "
+    "MAS sidebands of a CSA are 15x more accurate with Lebedev at an eighth of the "
+    "orientations, but a second-order quadrupolar MAS lineshape with narrow lines is 40x "
+    "worse with the largest Lebedev rule than with ZCW – it still has sharp edges.\n\n"
+    "ZCW: equal-weight points spread evenly over the sphere (Fibonacci sizes).\n"
+    "Lebedev: Lebedev–Laikov quadrature, unequal weights, exact for smooth functions of "
+    "orientation up to its degree; at most 5,810 points on the sphere (the log says when "
+    "Orientations asks for more).\n"
+    "Rectangular (θ/φ): a product grid, uniform in cos θ; kept for comparison.\n\n"
+    "Orientations sets the density for every scheme. The processing log records which "
+    "scheme each peak used.")
+
+
+def powder_scheme_combo() -> QComboBox:
+    """The "Powder averaging" chooser (data: 'auto', 'zcw', 'lebedev',
+    'rectangular' -- the ``powder_scheme`` of simulate_combined/fit_combined)."""
+    combo = QComboBox()
+    combo.addItem("Automatic (ZCW; Lebedev for MAS without quadrupolar)", "auto")
+    combo.addItem("ZCW", "zcw")
+    combo.addItem("Lebedev", "lebedev")
+    combo.addItem("Rectangular (θ/φ)", "rectangular")
+    combo.setToolTip(POWDER_SCHEME_TIP)
+    return combo
 
 
 class InteractionEditor(QGroupBox):
@@ -311,6 +341,8 @@ class CombinedHamiltonianPanel(QWidget):
             "Powder orientation density (auto: 75,025 static, 4,181 MAS). One octant is used "
             "when that is exact; a CSA not aligned with the EFG needs the full sphere.")
         form.addRow("Orientations:", self.orientations_spin)
+        self.powder_combo = powder_scheme_combo()
+        form.addRow("Powder averaging:", self.powder_combo)
         v.addLayout(form)
         self._setup_form = form
 
@@ -1194,7 +1226,8 @@ class CombinedHamiltonianPanel(QWidget):
         transitions = self.transitions_combo.currentData() if spin >= 1 else "all"
         out = {"larmor_Hz": larmor * 1e6, "mas_Hz": mas,
                "order": self.order_combo.currentData(), "transitions": transitions,
-               "n_zcw": self.orientations_spin.value() or None}
+               "n_zcw": self.orientations_spin.value() or None,
+               "powder_scheme": self.powder_combo.currentData()}
         observed = self.observed()
         if any(self.site_nucleus(s) != observed for s in self.site_dicts):
             out["observe"] = observed          # sites of other nuclei are placed on its scale
@@ -1218,9 +1251,14 @@ class CombinedHamiltonianPanel(QWidget):
                 raise ValueError("Axis max must be greater than axis min.")
             axis = np.linspace(self.ppm_min_spin.value(), self.ppm_max_spin.value(),
                                self.points_spin.value())
+            compare = self._compare_orders_wanted(sites)
+            estimate = long_run.check_simulation(self, sites, axis, settings,
+                                                 runs=3 if compare else 1)
+            if estimate is False:
+                return False
             started = time.perf_counter()
             comparison = None
-            if self._compare_orders_wanted(sites):
+            if compare:
                 comparison = {}
                 for order in ("first", "second", "exact"):
                     run = ch.simulate_combined(sites, axis, **{**settings, "order": order})
@@ -1251,6 +1289,9 @@ class CombinedHamiltonianPanel(QWidget):
         edge = max(abs(data[0]), abs(data[-1])) / (np.max(np.abs(data)) or 1.0)
         warn = ("\n⚠ Intensity at the axis edge is {:.0%} of the peak – the pattern is "
                 "clipped; widen the axis.".format(edge)) if edge > 0.01 else ""
+        timing = long_run.report_line(estimate, elapsed)
+        if timing:
+            result["log"] += "\n" + timing
         muted, warn_colour = self.results_label.colours()
         self.results_label.setReport(
             f"Simulated in {elapsed:.2f} s.\n{result['log']}{warn}",
@@ -1271,6 +1312,7 @@ class CombinedHamiltonianPanel(QWidget):
         return {"regime": self.regime_combo.currentData(), "mas_Hz": self.mas_spin.value(),
                 "order": self.order_combo.currentData(),
                 "transitions": self.transitions_combo.currentData(),
+                "powder_scheme": self.powder_combo.currentData(),
                 "larmor_MHz": self.larmor_spin.value()}
 
     def send_to_fit(self) -> None:
@@ -2137,6 +2179,11 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         kwargs = dict(vary=args["vary"], bounds=args["bounds"] or None,
                       fit_regions=args["fit_regions"], fit_baseline=args["fit_baseline"],
                       estimate_amounts=args["estimate_amounts"], **args["settings"])
+        screen = self.screen_orientations_spin.value() or None
+        estimate = long_run.check_fit(self, results, args["sites"], kwargs,
+                                      starts=args["starts"], screen_n_zcw=screen)
+        if estimate is False:
+            return False
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         started = time.perf_counter()
         with FitProgress(self, "Solid-state NMR fit") as fit_progress_box:
@@ -2144,7 +2191,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                 if args["starts"]:
                     fit = cfit.fit_combined_multistart(
                         results, args["sites"], args["starts"], verbose=False,
-                        screen_n_zcw=self.screen_orientations_spin.value() or None, **kwargs)
+                        screen_n_zcw=screen, **kwargs)
                 else:
                     fit = cfit.fit_combined(results, args["sites"], **kwargs)
             except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
@@ -2155,6 +2202,9 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             return False
         QApplication.restoreOverrideCursor()
         fit["elapsed"] = time.perf_counter() - started
+        timing = long_run.report_line(estimate, fit["elapsed"])
+        if timing:
+            fit["log"] = fit.get("log", "") + "\n" + timing
         fit["spectrum"] = spectrum
         fit["spectrum_index"] = index
         fit["site_labels"] = [s.label for s in args["sites"]]
@@ -2581,7 +2631,8 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             if self.site_dicts:
                 self.site_list.setCurrentRow(0)
         for combo, key in ((self.regime_combo, "regime"), (self.order_combo, "order"),
-                           (self.transitions_combo, "transitions")):
+                           (self.transitions_combo, "transitions"),
+                           (self.powder_combo, "powder_scheme")):
             index = combo.findData(settings.get(key))
             if index >= 0:
                 combo.setCurrentIndex(index)

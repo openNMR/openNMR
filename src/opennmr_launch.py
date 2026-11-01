@@ -318,6 +318,16 @@ def main(argv=None) -> int:
         "QT_PLUGIN_PATH", os.path.join(os.path.dirname(PySide6.__file__), "Qt", "plugins"))
     from PySide6.QtWidgets import QApplication
 
+    # Every unexpected error from here on is written to ~/.opennmr/logs/
+    # crash.log -- the installed app has no console to print it to. Never a
+    # reason not to start: an editable install made before the module existed
+    # needs `pip install -e .` again to see it.
+    try:
+        import opennmr_crashlog
+        opennmr_crashlog.install()
+    except Exception:  # noqa: BLE001
+        pass
+
     guard = None
     if not multiple:
         guard = SingleInstance()

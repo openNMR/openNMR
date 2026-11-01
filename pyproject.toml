@@ -48,7 +48,7 @@ opennmr-topspin-install = "opennmr.topspin.install:main"
 package-dir = {"" = "src"}
 # Start-up shim outside the package, so the splash can appear before
 # ``import opennmr`` (several seconds of numpy/scipy/matplotlib).
-py-modules = ["opennmr_launch"]
+py-modules = ["opennmr_launch", "opennmr_crashlog"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

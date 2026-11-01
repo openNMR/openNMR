@@ -64,11 +64,13 @@ from scipy.optimize import curve_fit, nnls
 
 from .fitting import build_region_mask, estimate_baseline_robust, fit_quality
 from .combined_hamiltonian import csa_asymmetry_warning
+from .combined_hamiltonian import _check_scheme, SCHEME_NAMES as _SCHEME_NAMES
 from .combined_hamiltonian import (Site, as_sites, _site_sticks, _broaden_site, broadened_sites,
                                    simulate_combined, resolve_link_dicts, observed_nucleus,
                                    site_axes, placement_notes)
 from .simulations import quadrupolar_ct_isotropic_shift_Hz, QUADRUPOLAR_ORDERS
 from ..core import fit_progress as _fit_progress
+
 
 _BROADENING = ("amount", "fwhm", "eta")
 
@@ -227,7 +229,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
                  mas_Hz=0.0, order="second", transitions="all", rotor_angle="magic",
                  n_zcw=None, fit_regions=None, baseline_regions=None, fit_baseline=False,
                  estimate_amounts=True, max_nfev=None, fit_mas=False, mas_window_Hz=500.0,
-                 mas_scan_points=41, mas_bounds_Hz=None, observe=None):
+                 mas_scan_points=41, mas_bounds_Hz=None, observe=None, powder_scheme=None):
     """
     Fit Solid-state NMR sites to a 1D spectrum.
 
@@ -239,7 +241,9 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
     vary, fixed, bounds : which parameters are free and their bounds --
         see the module docstring for names and forms.
     larmor_Hz : default ``results['SFO1'] * 1e6``.
-    mas_Hz, order, transitions, rotor_angle, n_zcw : as simulate_combined.
+    mas_Hz, order, transitions, rotor_angle, n_zcw, powder_scheme : as
+        simulate_combined (powder_scheme None: chosen per site -- ZCW static;
+        under MAS Lebedev without, ZCW with a quadrupolar interaction).
     fit_regions : [(lo, hi), ...] ppm, or None for the whole spectrum.
     baseline_regions, fit_baseline : a linear baseline is estimated from
         ``baseline_regions`` (default the outer 5% of the spectrum) and
@@ -302,6 +306,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
             mas_lo, mas_hi = mas_Hz - mas_window_Hz, mas_Hz + mas_window_Hz
     if n_zcw is None:
         n_zcw = 2584 if mas_Hz else 28657
+    powder_scheme = _check_scheme(powder_scheme, mas_Hz)
     beta_r = (np.arccos(1 / np.sqrt(3)) if rotor_angle == "magic"
               else np.deg2rad(float(rotor_angle)))
     warnings = []
@@ -387,7 +392,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
                       "lower": max(mas_lo, 1.0), "upper": mas_hi})
 
     sim = dict(larmor_Hz=larmor_Hz, mas_Hz=mas_Hz, order=order, transitions=transitions,
-               beta_r=beta_r, n_zcw=int(n_zcw))
+               beta_r=beta_r, n_zcw=int(n_zcw), powder_scheme=powder_scheme)
     cache = {}
 
     def sticks(i, d, mas=None, n=None):
@@ -398,7 +403,8 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
             if len(cache) > 256:
                 cache.clear()
             comp, _p = _site_sticks(Site.from_dict(d), axes[i][0], axes[i][1], mas,
-                                    sim["order"], sim["transitions"], sim["beta_r"], n)
+                                    sim["order"], sim["transitions"], sim["beta_r"], n,
+                                    powder_scheme=sim["powder_scheme"])
             cache[key] = comp
         return cache[key]
 
@@ -532,9 +538,11 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
         mas_row = next(p for p in parameters if p["name"] == "mas_Hz")
         regime = (f"MAS {mas_Hz:.1f} ± {mas_row['error'] or 0.0:.1f} Hz (fitted; started at "
                   f"{mas_start:g} Hz, allowed {mas_row['lower']:g} to {mas_row['upper']:g} Hz)")
+    scheme_text = ("automatic scheme" if powder_scheme == "auto"
+                   else _SCHEME_NAMES[powder_scheme])
     log = ("Solid-state NMR fit: " + f"{regime}, nu0 = {larmor_Hz / 1e6:.7g} MHz, "
            f"quadrupolar {order}" + ("" if order == "exact" else "-order")
-           + f", transitions {transitions}, {n_zcw} orientations, window "
+           + f", transitions {transitions}, {n_zcw} orientations ({scheme_text}), window "
            + ("whole spectrum" if fit_regions is None else
               ", ".join(f"{max(a, b):g} to {min(a, b):g} ppm" for a, b in fit_regions))
            + (", baseline fitted" if fit_baseline else ", baseline estimated and held") + ".\n"
@@ -550,7 +558,8 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
             "baseline": baseline, "mask": mask, "quality": q, "warnings": warnings, "log": log,
             "settings": {"larmor_Hz": larmor_Hz, "mas_Hz": mas_Hz, "order": order,
                          "transitions": transitions, "rotor_angle": rotor_angle,
-                         "n_zcw": int(n_zcw), "fit_regions": fit_regions,
+                         "n_zcw": int(n_zcw), "powder_scheme": powder_scheme,
+                         "fit_regions": fit_regions,
                          "fit_baseline": fit_baseline, "fit_mas": bool(fit_mas),
                          "mas_Hz_start": mas_start,
                          "mas_window_Hz": float(mas_window_Hz) if fit_mas else None,
@@ -633,7 +642,8 @@ def fit_combined_multistart(results, sites, starts, screen_n_zcw=None, max_start
 
 def starting_model(results, sites, larmor_Hz=None, mas_Hz=0.0, order="second",
                    transitions="all", rotor_angle="magic", n_zcw=None, fit_regions=None,
-                   baseline_regions=None, estimate_amounts=True, observe=None):
+                   baseline_regions=None, estimate_amounts=True, observe=None,
+                   powder_scheme=None):
     """
     The model :func:`fit_combined` starts from, on the data's own axis --
     to see a starting guess against the spectrum before fitting (the
@@ -647,7 +657,7 @@ def starting_model(results, sites, larmor_Hz=None, mas_Hz=0.0, order="second",
 
     ``n_zcw`` : powder orientations (default as fit_combined: 28657
     static, 2584 MAS). A preview can use fewer -- the shape converges
-    long before the fit's default.
+    long before the fit's default. ``powder_scheme`` as fit_combined.
 
     Returns a dict: ``x`` (ascending ppm), ``y`` (data), ``mask`` (the
     fit window), ``start`` (total, with baseline), ``site_spectra``
@@ -665,6 +675,7 @@ def starting_model(results, sites, larmor_Hz=None, mas_Hz=0.0, order="second",
     mas_Hz = float(mas_Hz or 0.0)
     if n_zcw is None:
         n_zcw = 2584 if mas_Hz else 28657
+    powder_scheme = _check_scheme(powder_scheme, mas_Hz)
     beta_r = (np.arccos(1 / np.sqrt(3)) if rotor_angle == "magic"
               else np.deg2rad(float(rotor_angle)))
     x_full = np.asarray(results["x_ppm"], dtype=float)
@@ -691,7 +702,7 @@ def starting_model(results, sites, larmor_Hz=None, mas_Hz=0.0, order="second",
     # shifted (combined_hamiltonian.broadened_sites): hundreds of sites
     # given one CSA preview as fast as one.
     sim = {"mas_Hz": mas_Hz, "order": order, "transitions": transitions, "beta_r": beta_r,
-           "n_zcw": int(n_zcw)}
+           "n_zcw": int(n_zcw), "powder_scheme": powder_scheme}
     built, _used, _notes, _sets, _shared = broadened_sites(
         [Site.from_dict(d) for d in dicts], x, float(larmor_Hz), observe, sim)
     curves = [np.sum(list(b.values()), axis=0) for b in built]
@@ -708,7 +719,7 @@ def starting_model(results, sites, larmor_Hz=None, mas_Hz=0.0, order="second",
     site_spectra = {d["label"]: c * scale for d, c in zip(dicts, curves)}
     start = np.sum(list(site_spectra.values()), axis=0) + baseline
     return {"x": x, "y": y_raw, "mask": mask, "start": start, "site_spectra": site_spectra,
-            "baseline": baseline, "n_zcw": int(n_zcw),
+            "baseline": baseline, "n_zcw": int(n_zcw), "powder_scheme": powder_scheme,
             "amounts": {d["label"]: d["amount"] * scale for d in dicts}}
 
 

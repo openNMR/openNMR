@@ -55,7 +55,7 @@ from scipy.optimize import least_squares
 
 from .combined_fitting import (_default_bounds, _derived, _fmt, _get, _set, fit_combined,
                                site_parameter_names)
-from .combined_hamiltonian import Site, _broaden_site, _site_sticks
+from .combined_hamiltonian import Site, _broaden_site, _site_sticks, _check_scheme
 from .fitting import build_region_mask, fit_quality
 from .utils import _GAMMA_DF
 from ..core import fit_progress as _fit_progress
@@ -79,7 +79,7 @@ class MultiFitCancelled(Exception):
 def make_experiment(results, label=None, nucleus=None, larmor_Hz=None, mas_Hz=0.0,
                     order="second", transitions="all", rotor_angle="magic", n_zcw=None,
                     fit_regions=None, fit_baseline=False, x_value=None, fit_mas=False,
-                    mas_window_Hz=500.0):
+                    mas_window_Hz=500.0, powder_scheme=None):
     """One spectrum to fit, with its own acquisition settings.
 
     ``results`` : ``x_ppm``, ``real_spectrum``, ``SFO1`` (MHz) and
@@ -88,7 +88,8 @@ def make_experiment(results, label=None, nucleus=None, larmor_Hz=None, mas_Hz=0.
     series (temperature, time, ...), for the trend table and plots.
     ``fit_mas``: let this spectrum's MAS rate vary within ``mas_Hz`` ±
     ``mas_window_Hz`` in its own fit (see :func:`fit_combined`); a joint
-    refinement then holds it at that fitted value."""
+    refinement then holds it at that fitted value. ``powder_scheme``: as
+    :func:`fit_combined` (None: the automatic, per-site choice)."""
     nucleus = nucleus or results.get("nuclide")
     if not nucleus:
         raise ValueError(f"{label or 'An experiment'} has no nucleus – pass nucleus=.")
@@ -98,7 +99,8 @@ def make_experiment(results, label=None, nucleus=None, larmor_Hz=None, mas_Hz=0.
             "order": order, "transitions": transitions, "rotor_angle": rotor_angle,
             "n_zcw": n_zcw, "fit_regions": fit_regions, "fit_baseline": bool(fit_baseline),
             "x_value": x_value, "fit_mas": bool(fit_mas) and float(mas_Hz or 0.0) > 0,
-            "mas_window_Hz": float(mas_window_Hz)}
+            "mas_window_Hz": float(mas_window_Hz),
+            "powder_scheme": _check_scheme(powder_scheme, mas_Hz)}
 
 
 def _isotope(nucleus, column):
@@ -572,7 +574,8 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
                                rotor_angle=e["rotor_angle"], n_zcw=e["n_zcw"],
                                fit_regions=e["fit_regions"], fit_baseline=e["fit_baseline"],
                                fit_mas=e.get("fit_mas", False),
-                               mas_window_Hz=e.get("mas_window_Hz", 500.0))
+                               mas_window_Hz=e.get("mas_window_Hz", 500.0),
+                               powder_scheme=e.get("powder_scheme"))
         except (RuntimeError, ValueError) as exc:
             warnings.append(f"{e['label']}: the single-spectrum fit failed ({exc}); its starting "
                             "values were kept")
@@ -645,7 +648,8 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
                   else np.deg2rad(float(e["rotor_angle"])))
         n_zcw = e["n_zcw"] or (2584 if e["mas_Hz"] else 28657)
         data.append({"x": x, "y": y, "mask": mask, "baseline": baseline, "sigma": sigma,
-                     "beta_r": beta_r, "n_zcw": int(n_zcw), "cache": {}})
+                     "beta_r": beta_r, "n_zcw": int(n_zcw), "cache": {},
+                     "powder_scheme": _check_scheme(e.get("powder_scheme"), e["mas_Hz"])})
 
     def curves(i, dicts):
         e, dd = experiments[i], data[i]
@@ -657,7 +661,8 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
                     dd["cache"].clear()
                 dd["cache"][key] = _site_sticks(Site.from_dict(d), dd["x"], e["larmor_Hz"],
                                                 e["mas_Hz"], e["order"], e["transitions"],
-                                                dd["beta_r"], dd["n_zcw"])[0]
+                                                dd["beta_r"], dd["n_zcw"],
+                                                powder_scheme=dd["powder_scheme"])[0]
             out.append(np.sum(list(_broaden_site(Site.from_dict(d), dd["cache"][key],
                                                  dd["x"]).values()), axis=0))
         return out
@@ -772,6 +777,7 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
                "settings": {"larmor_Hz": e["larmor_Hz"], "mas_Hz": e["mas_Hz"],
                             "order": e["order"], "transitions": e["transitions"],
                             "rotor_angle": e["rotor_angle"], "n_zcw": dd["n_zcw"],
+                            "powder_scheme": dd["powder_scheme"],
                             "fit_regions": e["fit_regions"], "fit_baseline": e["fit_baseline"]},
                "nuclide": e["nucleus"], "log": ""}
         out.append(_decorate(fit, e))

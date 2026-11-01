@@ -186,6 +186,15 @@ def run(out_dir: str) -> int:
                 count += 1
             except Exception as exc:  # noqa: BLE001
                 failed[info.name] = f"{type(exc).__name__}: {exc}"
+        # The two start-up modules beside the package: the launcher, and the
+        # crash log it installs (a build that leaves the crash log out still
+        # starts, silently without one -- caught here instead).
+        for name in ("opennmr_launch", "opennmr_crashlog"):
+            try:
+                importlib.import_module(name)
+                count += 1
+            except Exception as exc:  # noqa: BLE001
+                failed[name] = f"{type(exc).__name__}: {exc}"
         if failed:
             raise RuntimeError(f"{len(failed)} module(s) failed to import: "
                                + json.dumps(failed, indent=1))

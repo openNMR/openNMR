@@ -598,21 +598,117 @@ def _j_lines(site, larmor_Hz):
     return np.asarray(f) / larmor_Hz * 1e6, np.asarray(w)
 
 
-def _powder(site, n_zcw, use_symmetry, static):
+#: Powder-averaging schemes the combined engine offers (``powder_scheme``).
+POWDER_SCHEMES = ("zcw", "lebedev", "rectangular")
+#: Display names (logs, GUI).
+SCHEME_NAMES = {"auto": "Automatic", "zcw": "ZCW", "lebedev": "Lebedev",
+                "rectangular": "θ/φ grid"}
+#: The largest Lebedev rule SciPy provides (degree 131).
+LEBEDEV_MAX = 5810
+
+
+def default_powder_scheme(mas_Hz, site=None) -> str:
+    """The automatic choice: ZCW for a static pattern; under MAS, Lebedev
+    for a site without a quadrupolar interaction and ZCW for one with.
+
+    Why (measured 2026-11-01 against a 46368-point ZCW reference, max
+    deviation / maximum):
+
+    * MAS sidebands of a CSA (spin-1/2-like) site: each orientation's
+      sideband intensities are smooth in orientation, which a Lebedev rule
+      integrates exactly to its degree -- Lebedev 302 or 5810 (folded to
+      760 octant points): 1.9e-5; ZCW 4181 (5797 octant points): 2.8e-4.
+    * A second-order quadrupolar MAS central transition is still a
+      histogram with sharp edges, set by the orientation count: at FWHM
+      0.5 ppm, Lebedev 5810 (the largest rule): 1.3e-1; ZCW 4181: 3.5e-3.
+
+    A static lineshape is a histogram too, so ZCW."""
+    if not float(mas_Hz or 0.0) > 0:
+        return "zcw"
+    if site is not None and site.get("quadrupolar"):
+        return "zcw"
+    return "lebedev"
+
+
+def _check_scheme(powder_scheme, mas_Hz=0.0) -> str:
+    """'auto' (for None / '' / 'auto') or one of :data:`POWDER_SCHEMES`."""
+    if powder_scheme in (None, "", "auto"):
+        return "auto"
+    scheme = str(powder_scheme).lower()
+    if scheme not in POWDER_SCHEMES:
+        raise ValueError(f"powder_scheme must be one of {POWDER_SCHEMES} (or None for the "
+                         f"automatic choice), got {powder_scheme!r}.")
+    return scheme
+
+
+def _fold_to_octant(theta, phi, w):
+    """Reflect every point into the first octant (|x|, |y|, |z|) and merge
+    the points that land together, adding their weights. Exact whenever the
+    observable is unchanged by sign flips of the field direction's
+    components (``_octant_is_exact``) -- and, unlike keeping only the
+    points already in the octant, correct for a grid with unequal weights
+    and points on the octant's faces (Lebedev)."""
+    st = np.sin(theta)
+    xyz = np.abs(np.stack([st * np.cos(phi), st * np.sin(phi), np.cos(theta)], -1))
+    keys = np.round(xyz, 10)
+    keys[keys == 0] = 0.0                       # one key for +0 and -0
+    uniq, inverse = np.unique(keys, axis=0, return_inverse=True)
+    weights = np.bincount(inverse.ravel(), weights=w, minlength=len(uniq))
+    t = np.arccos(np.clip(uniq[:, 2], -1.0, 1.0))
+    p = np.arctan2(uniq[:, 1], uniq[:, 0])
+    return t, p, weights / weights.sum()
+
+
+def powder_set_size(n_zcw, scheme="zcw", octant=True, static=True, use_symmetry=True):
+    """Full-sphere orientations a scheme is asked for, for density ``n_zcw``:
+    8 x n_zcw when one octant is averaged (or a static pattern), n_zcw
+    otherwise -- capped at :data:`LEBEDEV_MAX` for Lebedev."""
+    full = int(n_zcw) * (8 if (use_symmetry and (octant or static)) else 1)
+    return min(full, LEBEDEV_MAX) if scheme == "lebedev" else full
+
+
+def _powder(site, n_zcw, use_symmetry, static, scheme="zcw"):
     """(theta, phi, weights, octant). ``n_zcw`` sets the orientation
     *density*: n_zcw points in one octant when that is exact; otherwise
     the full sphere -- with 8x as many points for a static pattern, so
     its sharp edges are sampled as finely (measured: a tilted CSA +
     quadrupolar static pattern was 15% off at 4181 full-sphere points,
     3% at 8x that). A MAS centreband/sideband pattern converges with far
-    fewer, so it keeps n_zcw."""
-    if use_symmetry and _octant_is_exact(site):
-        theta, phi, _ = zcw_angles(8 * int(n_zcw))
-        keep = (theta <= np.pi / 2) & (phi < np.pi / 2)
-        theta, phi = theta[keep], phi[keep]
-        return theta, phi, np.full(theta.size, 1.0 / theta.size), True
-    theta, phi, w = zcw_angles(int(n_zcw) * (8 if static and use_symmetry else 1))
-    return theta, phi, w, False
+    fewer, so it keeps n_zcw.
+
+    ``scheme``: 'zcw' (equal weights, Fibonacci sizes), 'lebedev' (the
+    smallest Lebedev-Laikov rule with that many full-sphere points, at most
+    5810, unequal weights; folded into the octant when that is exact) or
+    'rectangular' (a theta/phi product grid, uniform in cos theta)."""
+    if scheme in (None, "", "auto"):
+        scheme = default_powder_scheme(0.0 if static else 1.0, site)
+    octant = bool(use_symmetry and _octant_is_exact(site))
+    if scheme == "zcw":
+        if octant:
+            theta, phi, _ = zcw_angles(8 * int(n_zcw))
+            keep = (theta <= np.pi / 2) & (phi < np.pi / 2)
+            theta, phi = theta[keep], phi[keep]
+            return theta, phi, np.full(theta.size, 1.0 / theta.size), True
+        theta, phi, w = zcw_angles(int(n_zcw) * (8 if static and use_symmetry else 1))
+        return theta, phi, w, False
+    full = powder_set_size(n_zcw, scheme, octant, static, use_symmetry)
+    if scheme == "lebedev":
+        with warnings.catch_warnings():         # the cap is reported in the log instead
+            warnings.simplefilter("ignore")
+            theta, phi, w = get_powder_grid(0, 0, powder_scheme="lebedev", n_zcw=full)
+        if octant:
+            return (*_fold_to_octant(theta, phi, w), True)
+        return theta, phi, w, False
+    if scheme == "rectangular":
+        if octant:
+            n_theta = max(int(round((full / 8 / 1.5) ** 0.5)), 4)
+            theta, phi, w = get_powder_grid(n_theta, int(round(1.5 * n_theta)),
+                                            powder_scheme="rectangular", use_octant_symmetry=True)
+            return theta, phi, w, True
+        n_theta = max(int(round((full / 2.0) ** 0.5)), 8)
+        theta, phi, w = get_powder_grid(n_theta, 2 * n_theta, powder_scheme="rectangular")
+        return theta, phi, w, False
+    raise ValueError(f"powder_scheme must be one of {POWDER_SCHEMES}, got {scheme!r}.")
 
 
 # ============================================================
@@ -620,7 +716,8 @@ def _powder(site, n_zcw, use_symmetry, static):
 # ============================================================
 
 def _site_sticks(site, ppm_axis, larmor_Hz, mas_Hz, order, transitions, beta_r, n_zcw,
-                 n_gamma=None, n_time=None, max_n_time=65536, use_symmetry=True):
+                 n_gamma=None, n_time=None, max_n_time=65536, use_symmetry=True,
+                 powder_scheme="auto"):
     """One site's unbroadened spectrum per transition group, for amount 1:
     ``({group: sticks binned on ppm_axis}, powder info)``. Everything
     except the broadening and the amount, which are applied afterwards
@@ -629,7 +726,10 @@ def _site_sticks(site, ppm_axis, larmor_Hz, mas_Hz, order, transitions, beta_r, 
     groups = [r["group"] for r in rows]
     comp = {g: np.zeros(len(ppm_axis)) for g in groups}
     j_ppm, j_w = _j_lines(site, larmor_Hz)
-    theta, phi, wts, octant = _powder(site, n_zcw, use_symmetry, static=not mas_Hz)
+    if powder_scheme in (None, "", "auto"):
+        powder_scheme = default_powder_scheme(mas_Hz, site)
+    theta, phi, wts, octant = _powder(site, n_zcw, use_symmetry, static=not mas_Hz,
+                                      scheme=powder_scheme)
     if not mas_Hz:
         b = np.stack([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi),
                       np.cos(theta)], -1)
@@ -639,7 +739,7 @@ def _site_sticks(site, ppm_axis, larmor_Hz, mas_Hz, order, transitions, beta_r, 
         for dj, wj in zip(j_ppm, j_w):
             for col, g in enumerate(groups):
                 comp[g] += _bin_sticks(ppm_axis, position[:, col] + dj, wj * weight[:, col])
-        return comp, {"orientations": len(wts), "octant": octant}
+        return comp, {"orientations": len(wts), "octant": octant, "scheme": powder_scheme}
     g_n = int(n_gamma) if n_gamma else (32 if order == "exact" else 16)
     r, e1, e2 = _rotor_frame(theta, phi)
     gam = 2.0 * np.pi * np.arange(g_n) / g_n
@@ -655,7 +755,7 @@ def _site_sticks(site, ppm_axis, larmor_Hz, mas_Hz, order, transitions, beta_r, 
             for col, g in enumerate(groups):
                 comp[g] += _bin_sticks(ppm_axis, position[:, :, col] + dj, wj * weight[:, :, col])
     return comp, {"orientations": len(wts), "octant": octant, "n_gamma": g_n,
-                  "n_time": prep["n_time"]}
+                  "n_time": prep["n_time"], "scheme": powder_scheme}
 
 
 def _broaden_site(site, comp, ppm_axis):
@@ -722,7 +822,8 @@ def _shifted_group(sites, idx, ppm_axis, larmor_Hz, sim):
     comp, powder = _site_sticks(template, ext, larmor_Hz, sim["mas_Hz"], sim["order"],
                                 sim["transitions"], sim["beta_r"], sim["n_zcw"],
                                 sim.get("n_gamma"), sim.get("n_time"),
-                                sim.get("max_n_time", 65536), sim.get("use_symmetry", True))
+                                sim.get("max_n_time", 65536), sim.get("use_symmetry", True),
+                                powder_scheme=sim.get("powder_scheme", "auto"))
     broadened = _broaden_site(template, comp, ext)
     padded = {g: np.concatenate([[c[0]], c, [c[-1], c[-1]]]) for g, c in broadened.items()}
     out = {}
@@ -780,7 +881,8 @@ def broadened_sites(sites, ppm_axis, larmor_Hz, observe, sim, share=True):
         comp, powder = _site_sticks(site, axis, nu0, sim["mas_Hz"], sim["order"],
                                     sim["transitions"], sim["beta_r"], sim["n_zcw"],
                                     sim.get("n_gamma"), sim.get("n_time"),
-                                    sim.get("max_n_time", 65536), sim.get("use_symmetry", True))
+                                    sim.get("max_n_time", 65536), sim.get("use_symmetry", True),
+                                powder_scheme=sim.get("powder_scheme", "auto"))
         used[site.label] = powder
         out[i] = _broaden_site(site, comp, axis)
         if not powder["octant"] and sim.get("use_symmetry", True):
@@ -792,7 +894,7 @@ def broadened_sites(sites, ppm_axis, larmor_Hz, observe, sim, share=True):
 def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, order="second",
                       transitions="all", rotor_angle="magic", n_zcw=None, n_gamma=None,
                       n_time=None, max_n_time=65536, use_symmetry=True, observe=None,
-                      share_patterns=True):
+                      share_patterns=True, powder_scheme=None):
     """
     Powder spectrum of one or more sites, each with any combination of
     CSA, quadrupolar and J interactions, static (``mas_Hz`` = 0) or
@@ -821,6 +923,13 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
         (see the module notes); otherwise the full sphere, with 8x as
         many for a static pattern so the density is the same.
     n_gamma, n_time, max_n_time : MAS sampling, as quadrupolar_mas_spectrum.
+    powder_scheme : 'zcw' | 'lebedev' | 'rectangular' | None. None (or
+        'auto', the default) chooses per site: ZCW for a static pattern;
+        under MAS, Lebedev for a site without a quadrupolar interaction and
+        ZCW for one with (:func:`default_powder_scheme` says why). ``n_zcw`` is the density for every
+        scheme; Lebedev rules stop at 5810 full-sphere points (the log
+        says when that cap applies). Rectangular is a theta/phi product
+        grid, kept for comparison.
     share_patterns : sites with the same interactions and broadening
         (:func:`shape_key`) are simulated once and shifted to each one's
         δiso -- hundreds of sites given one CSA cost one simulation. The
@@ -856,6 +965,7 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
         raise ValueError("mas_Hz must be >= 0.")
     if n_zcw is None:
         n_zcw = 4181 if mas_Hz else 75025
+    powder_scheme = _check_scheme(powder_scheme, mas_Hz)
     ppm_axis = np.asarray(ppm_axis, dtype=float)
     beta_r = (np.arccos(1.0 / np.sqrt(3.0)) if rotor_angle == "magic"
               else np.deg2rad(float(rotor_angle)))
@@ -865,7 +975,7 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
     used = {}
     sim = {"mas_Hz": mas_Hz, "order": order, "transitions": transitions, "beta_r": beta_r,
            "n_zcw": n_zcw, "n_gamma": n_gamma, "n_time": n_time, "max_n_time": max_n_time,
-           "use_symmetry": use_symmetry}
+           "use_symmetry": use_symmetry, "powder_scheme": powder_scheme}
     broadened, used, more, shared_sets, shared_sites = broadened_sites(
         sites, ppm_axis, larmor_Hz, observe, sim, share=share_patterns)
     notes += more
@@ -882,7 +992,8 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
     peak = float(np.max(total)) if total.size else 0.0
     settings = {"larmor_Hz": larmor_Hz, "mas_Hz": mas_Hz, "order": order,
                 "transitions": transitions, "rotor_angle": rotor_angle, "n_zcw": int(n_zcw),
-                "n_gamma": n_gamma, "use_symmetry": use_symmetry, "observe": observe}
+                "n_gamma": n_gamma, "use_symmetry": use_symmetry, "observe": observe,
+                "powder_scheme": powder_scheme}
     regime = ("static" if not mas_Hz else
               f"MAS {mas_Hz / 1e3:g} kHz" + ("" if rotor_angle == "magic" else f" at {rotor_angle}°"))
     log_lines = sites_log(sites)
@@ -890,6 +1001,13 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
         f"{regime}, nu0 = {larmor_Hz / 1e6:.7g} MHz, quadrupolar {order}-order"
         .replace("exact-order", "exact") + f", transitions {transitions}, "
         + _orientations_text(used) + ".")
+    if any(v.get("scheme") == "lebedev"
+           and powder_set_size(n_zcw, "lebedev", v["octant"], not mas_Hz, use_symmetry)
+           < int(n_zcw) * (8 if (use_symmetry and (v["octant"] or not mas_Hz)) else 1)
+           for v in used.values()):
+        log_lines.append(f"Lebedev: the largest rule ({LEBEDEV_MAX} points on the sphere) was "
+                         f"used; {int(n_zcw):,} orientations asks for more. Use ZCW for a "
+                         f"denser powder average.")
     log_lines += notes
     return {"x_ppm": ppm_axis, "real_spec": total,
             "normalised_real_spec": total / peak if peak > 0 else total,
@@ -974,15 +1092,25 @@ def sites_log(sites) -> list[str]:
 def _orientations_text(used) -> str:
     """'A: 4181 orientations (octant), B: ...' -- or, for many sites, one
     line per distinct powder grid with how many sites used it."""
+    schemes = {v.get("scheme", "zcw") for v in used.values()}
+    if len(schemes) == 1:
+        return (SCHEME_NAMES.get(next(iter(schemes)), "") + " powder average, "
+                + _orientations_list(used, False))
+    return _orientations_list(used, True)
+
+
+def _orientations_list(used, per_site_scheme) -> str:
+    def name(v):
+        return (SCHEME_NAMES.get(v.get("scheme", "zcw"), "") + " ") if per_site_scheme else ""
     if len(used) <= 12:
-        return ", ".join(f"{k}: {v['orientations']} orientations"
+        return ", ".join(f"{k}: {name(v)}{v['orientations']} orientations"
                          + (" (octant)" if v["octant"] else "") for k, v in used.items())
     counts = {}
     for v in used.values():
-        key = (v["orientations"], bool(v["octant"]))
+        key = (name(v), v["orientations"], bool(v["octant"]))
         counts[key] = counts.get(key, 0) + 1
-    return ", ".join(f"{c} sites: {o} orientations" + (" (octant)" if oc else "")
-                     for (o, oc), c in counts.items())
+    return ", ".join(f"{c} sites: {s}{o} orientations" + (" (octant)" if oc else "")
+                     for (s, o, oc), c in counts.items())
 
 
 def combined_axis_limits(sites, larmor_Hz, transitions="all", margin=0.15, n=2584, mas_Hz=0.0,

@@ -47,6 +47,7 @@ import os
 import re
 
 import numpy as np
+from ..core.atomic_write import write_json_atomic
 
 FORMAT_KEY = "openNMR fitted values"
 FORMAT_VERSION = 1
@@ -217,9 +218,8 @@ def save_fitted_values(record_or_result, path, **kwargs) -> str:
     folder = os.path.dirname(path)
     if folder:
         os.makedirs(folder, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(record, handle, indent=2, ensure_ascii=False, default=_json_default)
-        handle.write("\n")
+    write_json_atomic(path, record, trailing_newline=True, indent=2, ensure_ascii=False,
+                      default=_json_default)
     return path
 
 

@@ -62,6 +62,7 @@ import os
 import numpy as np
 
 from . import dft_nmr
+from ..core.atomic_write import write_json_atomic
 
 # ============================================================
 # Reference points
@@ -428,11 +429,7 @@ def save_calibration(cal, name, path=None) -> dict:
     entry = _jsonable(dict(cal, name=str(name),
                            saved=_dt.datetime.now().isoformat(timespec="seconds")))
     cals.insert(0, entry)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"version": 1, "calibrations": cals}, f, indent=1, ensure_ascii=False)
-    os.replace(tmp, path)
+    write_json_atomic(path, {"version": 1, "calibrations": cals}, indent=1, ensure_ascii=False)
     return entry
 
 
@@ -443,8 +440,7 @@ def delete_calibration(name, element=None, path=None) -> bool:
                                     and (element is None or c.get("element") == element))]
     if len(keep) == len(cals):
         return False
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"version": 1, "calibrations": keep}, f, indent=1, ensure_ascii=False)
+    write_json_atomic(path, {"version": 1, "calibrations": keep}, indent=1, ensure_ascii=False)
     return True
 
 

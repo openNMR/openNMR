@@ -26,6 +26,7 @@ import copy
 import io
 import os
 import re
+import time
 
 import numpy as np
 from PySide6.QtCore import Qt
@@ -45,11 +46,11 @@ from ..notebook import fit_ranges
 from ..notebook import combined_fitting as cfit
 from ..notebook import combined_hamiltonian as ch
 from ..notebook import multi_fitting as mf
-from . import data_directory, panel_state
+from . import data_directory, long_run, panel_state
 from .widgets.report_label import ReportLabel
 from .widgets.advice_box import AdviceBox
 from ..notebook import fit_advice
-from .combined_panels import CombinedHamiltonianPanel, _param_label
+from .combined_panels import CombinedHamiltonianPanel, _param_label, powder_scheme_combo
 
 #: Experiment table columns.
 _E_NAME, _E_NUC, _E_NU0, _E_MAS, _E_TRANS, _E_WINDOW, _E_X = range(7)
@@ -331,6 +332,8 @@ class MultiFitPanel(QWidget):
         self.orientations_spin.setToolTip("Powder orientations for fitting (auto: 2,584 MAS, "
                                           "28,657 static).")
         form.addRow("Orientations:", self.orientations_spin)
+        self.powder_combo = powder_scheme_combo()
+        form.addRow("Powder averaging:", self.powder_combo)
         self.fit_baseline_check = QCheckBox("Fit each spectrum's baseline")
         form.addRow("", self.fit_baseline_check)
         # The MAS rate as a fitting parameter, fixed by default (explicit
@@ -945,6 +948,7 @@ class MultiFitPanel(QWidget):
                 "bounds": bounds or None, "amounts": self.amounts_combo.currentData(),
                 "seed": self.seed_combo.currentData(), "order": self.order_combo.currentData(),
                 "n_zcw": self.orientations_spin.value() or None,
+                "powder_scheme": self.powder_combo.currentData(),
                 "fit_baseline": self.fit_baseline_check.isChecked(),
                 "fit_mas": self.fit_mas_check.isChecked(),
                 "mas_window_Hz": float(self.mas_window_spin.value())}
@@ -964,10 +968,25 @@ class MultiFitPanel(QWidget):
                     mas_Hz=e["mas_Hz"], order=args["order"], transitions=e["transitions"],
                     n_zcw=args["n_zcw"], fit_regions=e["fit_regions"],
                     fit_baseline=args["fit_baseline"], x_value=e["x_value"],
-                    fit_mas=args["fit_mas"], mas_window_Hz=args["mas_window_Hz"]))
+                    fit_mas=args["fit_mas"], mas_window_Hz=args["mas_window_Hz"],
+                    powder_scheme=args.get("powder_scheme")))
         except (ValueError, KeyError, IndexError) as exc:
             QMessageBox.warning(self, "Multi-spectrum fit", str(exc))
             return False
+        estimate = None
+        if experiments:
+            first = experiments[0]
+            estimate = long_run.check_fit(
+                self, first["results"], args["sites"][first["nucleus"]],
+                dict(larmor_Hz=first["larmor_Hz"], mas_Hz=first["mas_Hz"], order=first["order"],
+                     transitions=first["transitions"], n_zcw=first["n_zcw"],
+                     powder_scheme=first.get("powder_scheme"), fit_mas=first["fit_mas"],
+                     fit_baseline=first["fit_baseline"]),
+                title="Multi-spectrum fit", experiments=len(experiments),
+                joint=len(experiments) > 1)
+            if estimate is False:
+                return False
+        started = time.perf_counter()
         dialog = None
         if show_progress:
             dialog = QProgressDialog("Fitting…", "Cancel", 0, len(experiments) + 1, self)
@@ -1004,6 +1023,9 @@ class MultiFitPanel(QWidget):
             if dialog is not None:
                 dialog.close()
         QApplication.restoreOverrideCursor()
+        timing = long_run.report_line(estimate, time.perf_counter() - started)
+        if timing:
+            result["run_time"] = timing
         result["keys"] = [e["key"] for e in args["experiments"]]
         result["x_label"] = self.x_label_edit.text().strip() or "x"
         self.result = result
@@ -1096,6 +1118,8 @@ class MultiFitPanel(QWidget):
             lines.append(f"  {row['label']} {row['name']} [{row['group']}]: "
                          + self._fmt(row["value"], row["error"] or 0.0, not row["free"]))
         lines += [f"⚠ {w}" for w in r["warnings"]]
+        if r.get("run_time"):
+            lines.append(r["run_time"])
         self.results_label.setText("\n".join(lines))
         self.show_combo.blockSignals(True)
         self.show_combo.clear()
