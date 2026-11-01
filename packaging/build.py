@@ -53,6 +53,10 @@ MATPLOTLIB_EXPORT_BACKENDS = (
 )
 
 
+def _is_windows() -> bool:
+    return sys.platform.startswith("win")
+
+
 def _tk_available() -> bool:
     """PyInstaller's boot splash is drawn by Tcl/Tk, which a few Python builds
     lack. (It is not supported on macOS at all.)"""
@@ -71,9 +75,17 @@ def _make_boot_splash() -> str | None:
     Qt splash that takes over (``opennmr_launch.render_splash_pixmap``).
 
     Returns its path, or ``None`` when it cannot or should not be made
-    (no Tk, macOS, ``OPENNMR_BUILD_SPLASH=0``); the build then goes ahead
-    without it, and the Qt splash is all the user sees."""
-    if os.environ.get("OPENNMR_BUILD_SPLASH", "1").strip() == "0" or not _tk_available():
+    (no Tk, macOS, ``OPENNMR_BUILD_SPLASH=0``, or Windows unless
+    ``OPENNMR_BUILD_SPLASH=1``); the build then goes ahead without it, and
+    the Qt splash is all the user sees.
+
+    Off by default on Windows: the app is a onedir build, so there is almost
+    nothing to unpack before Python starts, and the Tk window is not
+    DPI-aware -- it showed at a different size and position from the Qt
+    splash, so users saw two splashes swap. Set ``OPENNMR_BUILD_SPLASH=1`` to
+    force it (e.g. for a onefile build, where unpacking takes seconds)."""
+    default = "0" if _is_windows() else "1"
+    if os.environ.get("OPENNMR_BUILD_SPLASH", default).strip() == "0" or not _tk_available():
         return None
     try:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

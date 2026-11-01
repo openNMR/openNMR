@@ -346,7 +346,7 @@ def test_boot_splash_is_skipped_without_tk_or_when_switched_off(monkeypatch):
 def test_boot_splash_image_is_drawn_when_tk_is_there(tmp_path, monkeypatch, qapp):
     build = _load_build()
     monkeypatch.setattr(build, "_tk_available", lambda: True)
-    monkeypatch.delenv("OPENNMR_BUILD_SPLASH", raising=False)
+    monkeypatch.setenv("OPENNMR_BUILD_SPLASH", "1")
     monkeypatch.setattr(build, "BUILD_DIR", str(tmp_path))
     path = build._make_boot_splash()
     assert path and os.path.exists(path)
@@ -379,3 +379,20 @@ def test_build_adds_the_splash_and_keeps_tk_only_then(monkeypatch, splash):
 def test_self_test_closes_the_boot_splash_before_running():
     text = open(os.path.join(ROOT, "packaging", "entrypoint.py"), encoding="utf-8").read()
     assert text.index("pyi_splash.close()") < text.index("selftest_main(sys.argv[2:])")
+
+
+def test_boot_splash_is_off_by_default_on_windows_only(monkeypatch):
+    """The Tk boot splash duplicated the Qt one on Windows (different size,
+    font and position), so it needs an explicit opt-in there."""
+    build = _load_build()
+    monkeypatch.setattr(build, "_tk_available", lambda: True)
+    monkeypatch.delenv("OPENNMR_BUILD_SPLASH", raising=False)
+    monkeypatch.setattr(build, "_is_windows", lambda: True)
+    assert build._make_boot_splash() is None
+
+
+def test_splash_font_is_explicit_on_windows(qapp, monkeypatch):
+    monkeypatch.setattr(launch, "_is_windows", lambda: True)
+    font = launch.splash_font(44, bold=True)
+    assert font.family() == "Segoe UI"
+    assert font.pixelSize() == 44 and font.bold()

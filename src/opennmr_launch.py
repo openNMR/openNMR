@@ -82,6 +82,27 @@ def _logo_path() -> str:
     return ""
 
 
+def _is_windows() -> bool:
+    return sys.platform.startswith("win")
+
+
+def splash_font(pixel_size: int, bold: bool = False):
+    """A splash font that does not depend on the Qt platform plugin.
+
+    A bare ``QFont()`` is the *platform's* default: Segoe UI under the normal
+    Windows plugin, but an arbitrary (condensed) face under ``offscreen``,
+    which is what drew the pre-Python boot splash image at build time.
+    Naming the Windows UI font explicitly makes both renders identical."""
+    from PySide6.QtGui import QFont
+
+    font = QFont()
+    if _is_windows():
+        font.setFamily("Segoe UI")
+    font.setPixelSize(pixel_size)
+    font.setBold(bold)
+    return font
+
+
 def render_splash_pixmap(version: str | None = None, message: str = "Loading…"):
     """The splash picture: logo, name, version and ``message``.
 
@@ -90,7 +111,7 @@ def render_splash_pixmap(version: str | None = None, message: str = "Loading…"
     ``packaging/build.py`` to draw the image PyInstaller's boot splash shows
     before Python itself has started, so the two look like one."""
     from PySide6.QtCore import QRectF, Qt
-    from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
+    from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 
     width, height = SPLASH_SIZE
     version = installed_version() if version is None else version
@@ -112,16 +133,11 @@ def render_splash_pixmap(version: str | None = None, message: str = "Loading…"
                 painter.drawPixmap(28, (height - logo.height()) // 2 - 10, logo)
         text_left = 205
         painter.setPen(QColor("#1f2933"))
-        title = QFont()
-        title.setPixelSize(44)
-        title.setBold(True)
-        painter.setFont(title)
+        painter.setFont(splash_font(44, bold=True))
         painter.drawText(QRectF(text_left, 70, width - text_left - 20, 60),
                          int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                          "openNMR")
-        small = QFont()
-        small.setPixelSize(16)
-        painter.setFont(small)
+        painter.setFont(splash_font(16))
         painter.setPen(QColor("#52606d"))
         if version:
             painter.drawText(QRectF(text_left, 132, width - text_left - 20, 26),
