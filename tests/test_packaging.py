@@ -69,6 +69,8 @@ def test_build_passes_what_a_frozen_app_needs(monkeypatch):
     assert "opennmr" in value_after("--copy-metadata")
     assert "opennmr" in value_after("--collect-submodules")
     assert "pymatgen" in value_after("--collect-data")
+    # scipy's Sobol sampler (Czjzek) loads a .npz beside the module: must be bundled.
+    assert "scipy.stats" in value_after("--collect-data")
     data = value_after("--add-data")
     assert any(d.endswith("opennmr/gui/resources") for d in data)
     assert any(d.endswith("opennmr/topspin/resources") for d in data)
@@ -164,7 +166,7 @@ def test_selftest_passes_from_source(tmp_path, isolated_env, qapp):
     report = json.load(open(out / "report.json", encoding="utf-8"))
     assert report["ok"] and not report["frozen"]
     assert set(report["steps"]) == {"imports", "version", "read_process", "simulate_and_fit",
-                                    "cif_structure", "tls", "figures", "gui"}
+                                    "cif_structure", "tls", "figures", "gui", "sobol"}
     for name in ("figure_1d.png", "figure_2d.png", "figure_csa.png", "gui_main_window.png"):
         assert (out / name).stat().st_size > 1000
     numbers = json.load(open(out / "numbers.json", encoding="utf-8"))
@@ -315,3 +317,19 @@ def test_dmg_is_hfs_plus_and_retried_when_busy(tmp_path, monkeypatch):
     fails["left"] = 1
     mi.macos_dmg("1.2.3")
     assert removed == [out]
+
+
+def test_scipy_sobol_data_file_is_where_collect_data_will_find_it():
+    """The Czjzek sampler needs scipy/stats/_sobol_direction_numbers.npz; the build
+    bundles it via --collect-data scipy.stats, so it must be a data file there."""
+    import scipy.stats
+    path = os.path.join(os.path.dirname(scipy.stats.__file__), "_sobol_direction_numbers.npz")
+    assert os.path.isfile(path)
+
+
+def test_czjzek_sampling_works_and_selftest_has_a_sobol_step():
+    from opennmr.notebook import czjzek
+    cq, eta = czjzek.czjzek_samples(2.0, cq0=3.0, eta0=0.0, n=1024)
+    assert len(cq) == 1024 and (cq >= 0).all() and ((eta >= 0) & (eta <= 1)).all()
+    with open(os.path.join(REPO, "src", "opennmr", "selftest.py"), encoding="utf-8") as handle:
+        assert 'report.run("sobol", sobol)' in handle.read()

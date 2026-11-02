@@ -240,6 +240,16 @@ def run(out_dir: str) -> int:
             raise RuntimeError(f"fit returned {popt}")
         return {"fit": popt.tolist()}
 
+    def sobol():
+        # scipy's Sobol sampler reads a data file at first use, which a frozen
+        # app only has if the build bundled it (Czjzek crashed without it).
+        from opennmr.notebook import czjzek
+        cq, eta = czjzek.czjzek_samples(2.0, cq0=3.0, eta0=0.0, n=1024)
+        numbers["czjzek_sobol"] = [float(np.mean(cq)), float(np.mean(eta))]
+        if len(cq) != 1024 or not np.all(np.isfinite(cq)):
+            raise RuntimeError("Sobol-based Czjzek sampling returned bad values")
+        return {"samples": len(cq)}
+
     def cif_structure():
         from opennmr.notebook import pnmr_simulator
         path = os.path.join(data_dir, "selftest.cif")
@@ -326,6 +336,7 @@ def run(out_dir: str) -> int:
     report.run("version", version)
     report.run("read_process", read_process)
     report.run("simulate_and_fit", simulate_and_fit)
+    report.run("sobol", sobol)
     report.run("cif_structure", cif_structure)
     report.run("tls", tls)
     if report.steps["read_process"]["ok"] and report.steps["simulate_and_fit"]["ok"]:

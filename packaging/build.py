@@ -365,6 +365,12 @@ def main() -> int:
         # pymatgen (Simulate/Fit > pNMR from a CIF) reads its periodic
         # table and other tables from JSON/YAML files at import.
         "--collect-data", "pymatgen",
+        # scipy.stats.qmc.Sobol (the Czjzek / extended Czjzek sampler, exchange
+        # and VT-relaxation multistarts) loads _sobol_direction_numbers.npz from
+        # beside the module at first use; PyInstaller does not ship it, so the
+        # installed app raised FileNotFoundError on opening Simulate > Czjzek
+        # (2026-11-02 report, Windows). selftest's "sobol" step checks it.
+        "--collect-data", "scipy.stats",
         # Never used by the app; keep them (and their size) out.
         "--exclude-module", "PyQt5",
         "--exclude-module", "PySide2",

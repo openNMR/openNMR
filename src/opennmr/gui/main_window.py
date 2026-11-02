@@ -141,7 +141,7 @@ from .simpson_fit_panel import SimpsonFitPanel
 from .export_dialog import ExportDialog
 from .dynamics_panels import ExchangeLineshapePanel, VTRelaxationPanel
 from .jcoupling_panels import (JCouplingFitPanel, JCouplingSimulationPanel, lock_to_spin_system,
-                               seed_spins_from_peaks, SOLUTION_STRONG_BLURB,
+                               seed_spins_from_peaks, SOLUTION_STRONG_BLURB, SOLUTION_SIM_BLURB,
                                STRONG_COUPLING_BLURB)
 from .combined_section import (CombinedModelSection, SOLUTION_MODELS, SOLUTION_TIP,
                                SpinSystemHost)
@@ -2017,6 +2017,58 @@ class MainWindow(QMainWindow):
             f"smallest font — make the window taller/wider, or narrow the side panel.",
             8000,
         )
+
+    def _series_of_slice(self, spectrum):
+        """``(session index, parent)`` of the pseudo-2D series an extracted 1D
+        slice came from, if it is still open; else ``(None, None)``."""
+        if spectrum is None or spectrum.ndim != 1:
+            return None, None
+        parent, _dim = self._slice_source_of(spectrum)
+        if (parent is None or parent.ndim != 2 or not parent.is_pseudo_2d
+                or spectrum.metadata.raw.get("slice_axis") != "f1"):
+            return None, None
+        return self._slice_parent_index(spectrum), parent
+
+    def _refresh_integration_series_hint(self, spectrum=None) -> None:
+        """Offer integrating the whole series when the selection is one slice
+        of an open pseudo-2D (see :meth:`_build_integration_subtab`)."""
+        if not hasattr(self, "integrate_series_button"):
+            return
+        if spectrum is None:
+            index = self._selected_index()
+            spectrum = self.session.spectra[index] if index is not None else None
+        pidx, parent = self._series_of_slice(spectrum)
+        show = pidx is not None
+        self.integrate_series_button.setVisible(show)
+        self.integration_series_hint_label.setVisible(show)
+        if show:
+            name = self.session.label(pidx)
+            n = parent.data.shape[0]
+            self.integration_series_hint_label.setText(
+                f"This is one slice of {name} ({n} slices). Integrating it gives one value: "
+                f"T1/T2 fitting and Export Integration to Pseudo-2D need the whole series.")
+            self.integrate_series_button.setText(
+                f"Integrate all {n} slices of {name} with these regions")
+
+    def _on_integrate_series_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        pidx, _parent = self._series_of_slice(self.session.spectra[index])
+        if pidx is None:
+            return
+        regions = self._read_region_defs()
+        if not regions:
+            QMessageBox.information(self, "Integrate whole series",
+                                    "Add at least one region first.")
+            return
+        self._select_single_row(pidx)
+        # The region table belongs to the selected spectrum: give the series
+        # the slice's regions (full precision), then integrate every slice.
+        self.region_table.setRowCount(0)
+        for lo, hi in regions:
+            self._add_region_row(lo, hi, digits=10)
+        self._on_integrate_regions_clicked()
 
     def _slice_source_of(self, spectrum):
         """``(parent, dim)`` for an extracted slice that still has a
@@ -4434,8 +4486,21 @@ class MainWindow(QMainWindow):
         (e.g. from :func:`_on_pseudo_2d_toggled`'s reload, or tests)."""
         self.session.set_nucleus(index, nucleus)
         self.spectrum_list.item(index).setText(self.session.label(index))
+        # The Compare list names each slice of a pseudo-2D after the
+        # spectrum, nucleus included (user report, 2026-11-02: the override
+        # changed 1D spectra but not a pseudo-2D's plot or slice names).
+        self._rebuild_compare_list([
+            self.compare_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self.compare_list.count())
+        ])
         if index == self._selected_index():
             self._refresh_selection_display(index)
+            spectrum = self.session.spectra[index]
+            if spectrum.ndim == 2:
+                # A 2D / pseudo-2D has no relabel-in-place: its axis label
+                # is drawn with the plot, so draw it again.
+                self._draw_selected_spectrum(spectrum, row=index)
+        self._refresh_compare_view_if_active(switch_tab=False)
         self._schedule_sidecar_save(index)
 
     def _on_rename_spectrum_action(self, index: int) -> None:
@@ -16651,7 +16716,7 @@ class MainWindow(QMainWindow):
         solid_sim_slot = self._sim_spin_host.add_slot(
             "solid", "Solid-state NMR", STRONG_COUPLING_BLURB)
         solution_sim_slot = self._sim_spin_host.add_slot(
-            "solution", "Solution NMR", SOLUTION_STRONG_BLURB)
+            "solution", "Solution NMR", SOLUTION_SIM_BLURB)
         self.combined_sim_model = CombinedModelSection(
             self.combined_sim_panel, solid_sim_slot,
             claim=lambda: self._sim_spin_host.show_in("solid"))
@@ -21024,6 +21089,24 @@ class MainWindow(QMainWindow):
         self.integration_results_label = ReportLabel("")
         self.integration_results_label.setWordWrap(True)
         layout.addWidget(self.integration_results_label)
+
+        # An extracted slice integrates alone: one number, not a series, so
+        # no T1/T2 and nothing to export (user report, 2026-11-02: "Export
+        # Integration to Pseudo-2D always remains greyed out" after phasing
+        # an extracted slice). Its regions live on *its* table, so selecting
+        # the series by hand finds them empty. This does both in one step.
+        self.integration_series_hint_label = QLabel("")
+        self.integration_series_hint_label.setWordWrap(True)
+        self.integration_series_hint_label.setVisible(False)
+        layout.addWidget(self.integration_series_hint_label)
+        self.integrate_series_button = QPushButton("Integrate the whole series with these regions")
+        self.integrate_series_button.setToolTip(
+            "Select the pseudo-2D this slice was extracted from, carry the regions above "
+            "over to it and integrate every slice – what T1/T2 fitting and "
+            "Export Integration to Pseudo-2D need.")
+        self.integrate_series_button.setVisible(False)
+        self.integrate_series_button.clicked.connect(self._on_integrate_series_clicked)
+        layout.addWidget(self.integrate_series_button)
 
         # Isotropic's own counterpart, for a plain region integral: no
         # fitted lineshape exists to reconstruct, so this stacks each
@@ -30497,6 +30580,7 @@ class MainWindow(QMainWindow):
         # its phase back, so the button is hidden otherwise rather than
         # shown-but-failing.
         self.apply_slice_phase_button.setVisible(self._slice_source_of(spectrum)[0] is not None)
+        self._refresh_integration_series_hint(spectrum)
 
         self.magnitude_button.setVisible(spectrum.metadata.vendor == "bruker")
         self.magnitude_button.blockSignals(True)

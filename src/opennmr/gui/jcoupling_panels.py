@@ -45,6 +45,7 @@ from ..io import serialize
 from . import panel_state
 from ..notebook import fitting as notebook_fitting
 from ..notebook import jcoupling_fitting as jfit
+from ..notebook import mixed_j as nmixed
 from ..notebook import simulations as nsim
 from ..notebook import spin_system as nss
 from ..notebook.utils import _GAMMA_DF, compute_BF1_SFO1, find_isotope_info
@@ -980,16 +981,21 @@ class SpinSystemEditor(QWidget):
         self._menu(self.j_table, pos, self._j_name(a, b), f"J {a}-{b}")
 
 
-def _model_combo() -> QComboBox:
+def _model_combo(mixed: bool = False) -> QComboBox:
     combo = QComboBox()
     combo.addItem("First order: sites and coupling groups", "first_order")
     combo.addItem("Spin system: exact, with strong coupling", "spin_system")
+    if mixed:
+        combo.addItem("Mixed: weak and strong sets together", "mixed")
     combo.setToolTip(
         "First order builds each site's multiplet from its coupling groups – fast, handles "
         "natural-abundance satellites and isotopes, but assumes every shift difference is much "
         "larger than J.\n\nSpin system diagonalises the full Hamiltonian of explicit spins: "
         "exact for any shifts and Js (roofing, AB, ABX, AA'BB', virtual coupling), up to about "
-        "12 spins.")
+        "12 spins."
+        + ("\n\nMixed puts both on one spectrum: first-order (weak) sites and exactly solved "
+           "(strong) spin sets, added together. Use it when only some of the multiplets are "
+           "roofed. The sets must not be coupled to each other." if mixed else ""))
     return combo
 
 
@@ -1011,6 +1017,17 @@ SOLUTION_STRONG_BLURB = (
     "difference is much larger than J, first-order peaks and multiplets are quicker.")
 
 
+#: The simulator's blurb in Solution NMR, where weak (first-order), strong
+#: (exact) and mixed spectra are all ordinary (explicit user request, 2026-11-02).
+SOLUTION_SIM_BLURB = (
+    "Solution-state J-coupling. Weak coupling (first order) builds each multiplet from its "
+    "coupling groups and is exact when every shift difference is much larger than J. Strong "
+    "coupling solves every spin's shift and the J between them exactly (roofing, AB quartets, "
+    "ABX, AA'BB', virtual coupling; up to about 12 spins). Mixed puts both on one spectrum: "
+    "weak sites and strong spin sets added together, e.g. an ethyl group beside an aromatic "
+    "AB pair. Choose the model below.")
+
+
 def lock_to_spin_system(panel) -> None:
     """Show a J panel as the exact spin-system model only: its first-order
     mode is Solid-state NMR's J interaction now (explicit user request,
@@ -1023,8 +1040,15 @@ def lock_to_spin_system(panel) -> None:
     panel.blurb_label.setText(STRONG_COUPLING_BLURB)
     # A first-order fit or simulation restored from before (kept fits,
     # the history) still opens as it was made, with the switch shown.
-    panel.model_combo.currentIndexChanged.connect(
-        lambda _i: panel.model_combo.setVisible(panel.model_combo.currentData() != "spin_system"))
+    panel.model_combo.currentIndexChanged.connect(lambda _i: _sync_model_switch(panel))
+
+
+def _sync_model_switch(panel) -> None:
+    """Show the model switch in Solution NMR (weak / strong / mixed), and in
+    Solid-state NMR only for a model restored from before (which opens as it
+    was made)."""
+    panel.model_combo.setVisible(getattr(panel, "host_key", "solid") == "solution"
+                                 or panel.model_combo.currentData() != "spin_system")
 
 
 def seed_spins_from_peaks(panel, site_dicts, nucleus: str) -> bool:
@@ -1132,7 +1156,7 @@ class JCouplingSimulationPanel(QWidget):
         self.lineshape_combo, self.eta_spin = _lineshape_controls(form, self)
         v.addLayout(form)
 
-        self.model_combo = _model_combo()
+        self.model_combo = _model_combo(mixed=True)
         v.addWidget(self.model_combo)
         self.editor = JCouplingSitesEditor("simulate")
         self.spin_editor = SpinSystemEditor("simulate", get_B0=self.field_spin.value)
@@ -1152,6 +1176,36 @@ class JCouplingSimulationPanel(QWidget):
         self.model_stack = QStackedWidget()
         self.model_stack.addWidget(self.editor)
         self.model_stack.addWidget(spin_page)
+        # Mixed: weak sites and strong spin sets on one spectrum (its own
+        # editors: the two pages above keep theirs, untouched).
+        mixed_page = QWidget()
+        mixed_layout = QVBoxLayout(mixed_page)
+        mixed_layout.setContentsMargins(0, 0, 0, 0)
+        mixed_note = QLabel(
+            "Weak sites: first-order multiplets, one row per site (valid when shift differences "
+            "are much larger than J). Strong spins: solved exactly. Spins joined by a J are one "
+            "set; sets with no J between them are solved separately, so any number of strong "
+            "sets can sit beside the weak ones. A weak site and a strong set must not be coupled "
+            "to each other.")
+        mixed_note.setWordWrap(True)
+        mixed_layout.addWidget(mixed_note)
+        mixed_layout.addWidget(QLabel("<b>Weak (first-order) sites</b>"))
+        self.mixed_weak_editor = JCouplingSitesEditor("simulate")
+        mixed_layout.addWidget(self.mixed_weak_editor)
+        mixed_layout.addWidget(QLabel("<b>Strong (exact) spins and the J between them</b>"))
+        self.mixed_strong_editor = SpinSystemEditor("simulate", get_B0=self.field_spin.value)
+        mixed_layout.addWidget(self.mixed_strong_editor)
+        mixed_form = QFormLayout()
+        self.mixed_fwhm_spin = QDoubleSpinBox()
+        self.mixed_fwhm_spin.setRange(0.001, 1e5)
+        self.mixed_fwhm_spin.setDecimals(3)
+        self.mixed_fwhm_spin.setValue(1.0)
+        self.mixed_fwhm_spin.setSuffix(" Hz")
+        self.mixed_fwhm_spin.setToolTip("Width (FWHM) of every line of the strong sets. Each "
+                                        "weak site has its own width in its table row.")
+        mixed_form.addRow("Strong linewidth:", self.mixed_fwhm_spin)
+        mixed_layout.addLayout(mixed_form)
+        self.model_stack.addWidget(mixed_page)
         self.model_combo.currentIndexChanged.connect(self.model_stack.setCurrentIndex)
         v.addWidget(self.model_stack)
 
@@ -1212,16 +1266,29 @@ class JCouplingSimulationPanel(QWidget):
             [{"label": "A", "nuclide": "1H", "shift_ppm": 7.30},
              {"label": "B", "nuclide": "1H", "shift_ppm": 7.26}],
             [{"a": "A", "b": "B", "J_Hz": 8.0}])
+        # An ethyl group (weak: its shifts are far apart) beside an aromatic
+        # AB pair (strong), as the mixed example.
+        self.mixed_weak_editor.add_site(label="CH3", shift=1.25, fwhm_hz=1.0,
+                                        couplings=[{"nuclide": "1H", "n": 2, "J_Hz": 7.0}])
+        self.mixed_weak_editor.add_site(label="CH2", shift=2.65, fwhm_hz=1.0,
+                                        couplings=[{"nuclide": "1H", "n": 3, "J_Hz": 7.0}])
+        self.mixed_strong_editor.set_system(
+            [{"label": "A", "nuclide": "1H", "shift_ppm": 7.30},
+             {"label": "B", "nuclide": "1H", "shift_ppm": 7.26}],
+            [{"a": "A", "b": "B", "J_Hz": 8.0}])
         for signal in (self.nucleus_combo.currentTextChanged, self.field_spin.valueChanged):
             signal.connect(lambda *_: self._update_frequency())
         self.field_spin.valueChanged.connect(lambda _v: self.spin_editor.refresh_info())
+        self.field_spin.valueChanged.connect(lambda _v: self.mixed_strong_editor.refresh_info())
         self.auto_axis_check.toggled.connect(lambda _on: self._sync_axis())
         for w in (self.editor.changed, self.nucleus_combo.currentTextChanged,
                   self.field_spin.valueChanged, self.lineshape_combo.currentIndexChanged,
                   self.eta_spin.valueChanged, self.auto_axis_check.toggled,
                   self.ppm_min_spin.valueChanged, self.ppm_max_spin.valueChanged,
                   self.points_spin.valueChanged, self.spin_editor.changed,
-                  self.model_combo.currentIndexChanged, self.spin_fwhm_spin.valueChanged):
+                  self.model_combo.currentIndexChanged, self.spin_fwhm_spin.valueChanged,
+                  self.mixed_weak_editor.changed, self.mixed_strong_editor.changed,
+                  self.mixed_fwhm_spin.valueChanged):
             w.connect(lambda *_: self._mark_stale())
         self._update_frequency()
         self._sync_axis()
@@ -1234,6 +1301,13 @@ class JCouplingSimulationPanel(QWidget):
         panel_state.restore_default_state(self, state)
         self._update_frequency()
         self._sync_axis()
+
+    def on_hosted_in(self, key: str) -> None:
+        """Called by the SpinSystemHost when the panel moves: Solution NMR
+        shows the weak / strong / mixed switch, Solid-state NMR (where the
+        strong model is Combined's) does not."""
+        self.host_key = key
+        _sync_model_switch(self)
 
     def _sync_axis(self) -> None:
         manual = not self.auto_axis_check.isChecked()
@@ -1269,6 +1343,9 @@ class JCouplingSimulationPanel(QWidget):
     def spin_mode(self) -> bool:
         return self.model_combo.currentData() == "spin_system"
 
+    def mixed_mode(self) -> bool:
+        return self.model_combo.currentData() == "mixed"
+
     def _axis_from(self, lo_list, hi_list, min_width):
         if self.auto_axis_check.isChecked():
             ppm_min, ppm_max = min(lo_list), max(hi_list)
@@ -1302,9 +1379,51 @@ class JCouplingSimulationPanel(QWidget):
                 "lineshape": self.lineshape_combo.currentData(), "eta": self.eta_spin.value(),
                 "nucleus": nucleus, "B0_tesla": self.field_spin.value(), "transitions": t}
 
+    def _mixed_arguments(self) -> dict:
+        nucleus = self.nucleus_combo.currentText().strip()
+        larmor = self.larmor_Hz()
+        weak_editor, strong_editor = self.mixed_weak_editor, self.mixed_strong_editor
+        weak = weak_editor.sites(larmor) if weak_editor.sites_table.rowCount() else []
+        spins = strong_editor.spins() if strong_editor.spins_table.rowCount() else []
+        couplings = strong_editor.couplings() if spins else []
+        if not weak and not spins:
+            raise ValueError("Add at least one weak site or one strong spin.")
+        fwhm_ppm = self.mixed_fwhm_spin.value() / larmor * 1e6
+        lo, hi, widths = [], [], []
+        for s in weak:
+            freqs, _w = nsim.combine_jcouplings(s["couplings"])
+            sticks = s["center_ppm"] + freqs / larmor * 1e6
+            lo.append(sticks.min() - 10 * s["fwhm"])
+            hi.append(sticks.max() + 10 * s["fwhm"])
+            widths.append(s["fwhm"])
+        n_sets = 0
+        for set_spins, set_couplings in (nmixed.split_spin_system(spins, couplings) if spins
+                                         else []):
+            if not any(sp["nuclide"] == nucleus for sp in set_spins):
+                continue
+            n_sets += 1
+            t = nss.spin_system_transitions(set_spins, set_couplings, self.field_spin.value(),
+                                            observe=nucleus)
+            strong = t["intensity"] > 1e-4 * t["intensity"].max()
+            lo.append(t["stick_ppm"][strong].min() - 10 * fwhm_ppm)
+            hi.append(t["stick_ppm"][strong].max() + 10 * fwhm_ppm)
+            widths.append(fwhm_ppm)
+        if spins and not n_sets and not weak:
+            raise ValueError(f"The strong spins have no {nucleus} spin to observe – change "
+                             f"Observe, or a spin's nucleus.")
+        ppm_min, ppm_max, n = self._axis_from(lo, hi, min(widths))
+        return {"model": "mixed", "sites": weak, "spins": spins, "couplings": couplings,
+                "fwhm_Hz": self.mixed_fwhm_spin.value(), "larmor_Hz": larmor,
+                "ppm_min": ppm_min, "ppm_max": ppm_max, "n_points": n,
+                "lineshape": self.lineshape_combo.currentData(), "eta": self.eta_spin.value(),
+                "nucleus": nucleus, "B0_tesla": self.field_spin.value(),
+                "min_width_ppm": min(widths)}
+
     def arguments(self) -> dict:
         """What simulate() passes to the simulator (plus the axis). Raises
         ValueError for anything unreadable."""
+        if self.mixed_mode():
+            return self._mixed_arguments()
         if self.spin_mode():
             return self._spin_arguments()
         larmor = self.larmor_Hz()
@@ -1345,6 +1464,8 @@ class JCouplingSimulationPanel(QWidget):
         try:
             if a["model"] == "spin_system":
                 return self._simulate_spin_system(a)
+            if a["model"] == "mixed":
+                return self._simulate_mixed(a)
             return self._simulate_first_order(a)
         finally:
             QApplication.restoreOverrideCursor()
@@ -1359,7 +1480,8 @@ class JCouplingSimulationPanel(QWidget):
         if edge > 0.01:
             lines.append(f"⚠ {edge:.0%} of the peak height is at the edge of the axis: part of "
                          f"a multiplet is cut off. Widen the axis or use Auto.")
-        width = (a["fwhm_Hz"] / a["larmor_Hz"] * 1e6 if a["model"] == "spin_system"
+        width = (a["min_width_ppm"] if a["model"] == "mixed"
+                 else a["fwhm_Hz"] / a["larmor_Hz"] * 1e6 if a["model"] == "spin_system"
                  else min(s["fwhm"] for s in a["sites"]))
         spacing = (a["ppm_max"] - a["ppm_min"]) / (a["n_points"] - 1)
         if width / spacing < 3:
@@ -1396,20 +1518,15 @@ class JCouplingSimulationPanel(QWidget):
                "spins": a["spins"], "couplings": a["couplings"]}
         return self._finish(a, np.asarray(result["real_spec"], dtype=float), axis, raw, lines)
 
-    def _simulate_first_order(self, a) -> bool:
-        axis = np.linspace(a["ppm_min"], a["ppm_max"], a["n_points"])
-        # Each site keeps its own linewidth (the per-site 'fwhm' key).
-        result = nsim.multi_site_jcoupled_spectrum(
-            _as_simulator_sites(a["sites"]), a["larmor_Hz"], axis, fwhm=a["sites"][0]["fwhm"],
-            lineshape=a["lineshape"], eta=a["eta"])
-        data = np.asarray(result["real_spec"], dtype=float)
+    @staticmethod
+    def _weak_site_lines(nucleus, sites, site_results) -> list[str]:
         lines = []
-        for s, r in zip(a["sites"], result["sites"]):
+        for s, r in zip(sites, site_results):
             if s["couplings"]:
                 topo = [{"nuclide": c["nuclide"], "n": c["n"],
                          "spin": find_isotope_info(c["nuclide"])["spin"],
                          "bond_label": c.get("bond_label")} for c in s["couplings"]]
-                mult, js = jfit.jcoupling_chemist_notation(a["nucleus"], topo,
+                mult, js = jfit.jcoupling_chemist_notation(nucleus, topo,
                                                            [c["J_Hz"] for c in s["couplings"]])
                 pattern = f"{mult}, {', '.join(js)}"
             else:
@@ -1418,6 +1535,48 @@ class JCouplingSimulationPanel(QWidget):
             major = int(np.sum(w >= 1e-3 * w.max()))
             lines.append(f"{s['label']}: δ {s['center_ppm']:g} ppm ({pattern}); "
                          f"{major} lines, intensity {s['relative_intensity']:g}.")
+        return lines
+
+    def _simulate_mixed(self, a) -> bool:
+        axis = np.linspace(a["ppm_min"], a["ppm_max"], a["n_points"])
+        result = nmixed.mixed_j_spectrum(
+            axis, a["larmor_Hz"], a["B0_tesla"], weak_sites=_as_simulator_sites(a["sites"]),
+            strong_spins=a["spins"], strong_couplings=a["couplings"],
+            strong_fwhm_Hz=a["fwhm_Hz"], observe=a["nucleus"], lineshape=a["lineshape"],
+            eta=a["eta"], weak_fwhm=a["sites"][0]["fwhm"] if a["sites"] else None)
+        lines = []
+        if result["weak"] is not None:
+            lines.append("Weak (first order):")
+            lines += ["  " + t for t in self._weak_site_lines(a["nucleus"], a["sites"],
+                                                              result["weak"]["sites"])]
+        for entry in result["strong"]:
+            sub = [s for s in a["spins"] if s["label"] in entry["labels"]]
+            sub_j = [c for c in a["couplings"] if c["a"] in entry["labels"]]
+            t = entry["result"]["transitions"]
+            w = entry["result"]["stick_intensity"]
+            lines.append(f"Strong set {', '.join(entry['labels'])}: {t['n_observed']} observed "
+                         f"{a['nucleus']} spin(s), {int(np.sum(w >= 1e-3 * w.max()))} lines, "
+                         f"exact (largest block {t['max_block']} × {t['max_block']}).")
+            weak_pairs = [f"{c['a']}–{c['b']} ({c['ratio']:.2g})" for c in
+                          nss.coupling_strengths(sub, sub_j, a["B0_tesla"]) if c["ratio"] < 10]
+            if weak_pairs:
+                lines.append("  Strongly coupled, |Δν/J| < 10: " + ", ".join(weak_pairs) + ".")
+        for labels in result["skipped"]:
+            lines.append(f"Set {', '.join(labels)} has no {a['nucleus']} spin: not shown.")
+        raw = {"kind": "jcoupling_mixed", "B0_tesla": a["B0_tesla"],
+               "lineshape": a["lineshape"], "eta": a["eta"], "fwhm_Hz": a["fwhm_Hz"],
+               "sites": json.loads(json.dumps(a["sites"], default=float)),
+               "spins": a["spins"], "couplings": a["couplings"]}
+        return self._finish(a, np.asarray(result["real_spec"], dtype=float), axis, raw, lines)
+
+    def _simulate_first_order(self, a) -> bool:
+        axis = np.linspace(a["ppm_min"], a["ppm_max"], a["n_points"])
+        # Each site keeps its own linewidth (the per-site 'fwhm' key).
+        result = nsim.multi_site_jcoupled_spectrum(
+            _as_simulator_sites(a["sites"]), a["larmor_Hz"], axis, fwhm=a["sites"][0]["fwhm"],
+            lineshape=a["lineshape"], eta=a["eta"])
+        data = np.asarray(result["real_spec"], dtype=float)
+        lines = self._weak_site_lines(a["nucleus"], a["sites"], result["sites"])
         raw = {"kind": "jcoupling", "B0_tesla": a["B0_tesla"], "lineshape": a["lineshape"],
                "eta": a["eta"], "sites": json.loads(json.dumps(a["sites"], default=float))}
         return self._finish(a, data, axis, raw, lines)
@@ -1426,13 +1585,21 @@ class JCouplingSimulationPanel(QWidget):
         if self.spectrum is None:
             return
         a = self._last_args
-        items = a["spins"] if a["model"] == "spin_system" else a["sites"]
+        items = (a["sites"] + a["spins"] if a["model"] == "mixed"
+                 else a["spins"] if a["model"] == "spin_system" else a["sites"])
         names = ", ".join(x["label"] for x in items)
-        kind = "spin system" if a["model"] == "spin_system" else "J-coupling"
+        kind = {"spin_system": "spin system", "mixed": "mixed weak/strong J-coupling"}.get(
+            a["model"], "J-coupling")
         self._add_to_open(self.spectrum, f"Simulated {kind} {a['nucleus']} ({names})")
 
     def send_to_fit(self) -> None:
         if self._send_to_fit is None:
+            return
+        if self.mixed_mode():
+            QMessageBox.information(
+                self, "Send to Fit",
+                "Fit ▸ J-coupling fits one model at a time. Switch the model to Weak "
+                "(first order) or Strong (spin system) to send it as a starting model.")
             return
         try:
             arguments = self.arguments()
@@ -1443,6 +1610,24 @@ class JCouplingSimulationPanel(QWidget):
 
     def notebook_code(self) -> str:
         a = self._last_args or self.arguments()
+        if a["model"] == "mixed":
+            return "\n".join([
+                "import numpy as np",
+                "import opennmr.notebook as nmr",
+                "",
+                f"larmor_Hz = {a['larmor_Hz']!r}   # {a['nucleus']} at {a['B0_tesla']:g} T",
+                f"ppm_axis = np.linspace({a['ppm_min']!r}, {a['ppm_max']!r}, {a['n_points']})",
+                "# Weak sites: first-order multiplets (fwhm in ppm).",
+                f"weak_sites = {json.dumps(_as_simulator_sites(a['sites']), indent=4, default=float)}",
+                "# Strong spins: solved exactly; spins joined by a J form one set.",
+                f"spins = {json.dumps(a['spins'], indent=4)}",
+                f"couplings = {json.dumps(a['couplings'], indent=4)}",
+                "spec = nmr.mixed_j_spectrum(",
+                "    ppm_axis, larmor_Hz, B0_tesla=" + repr(a['B0_tesla']) + ",",
+                "    weak_sites=weak_sites, strong_spins=spins, strong_couplings=couplings,",
+                f"    strong_fwhm_Hz={a['fwhm_Hz']!r}, observe={a['nucleus']!r},",
+                f"    lineshape={a['lineshape']!r}, eta={a['eta']!r})",
+            ])
         if a["model"] == "spin_system":
             return "\n".join([
                 "import numpy as np",

@@ -175,6 +175,8 @@ from .spin_system import (
     coupling_strengths, fit_spin_system_spectrum, evaluate_spin_system_fit, fitted_system,
     equivalent_solutions,
 )
+# Weak (first-order) and strong (exact) J-coupled sets on one spectrum.
+from .mixed_j import mixed_j_spectrum, split_spin_system
 
 from .notes import experiment_notes, set_experiment_notes, notes_location, notes_first_line
 from .stored_integrals import StoredIntegrals, get_stored_integrals
@@ -452,6 +454,8 @@ __all__ = [
     "expand_spin_system", "block_sizes", "spin_system_transitions", "spin_system_spectrum",
     "coupling_strengths", "fit_spin_system_spectrum", "evaluate_spin_system_fit",
     "fitted_system", "equivalent_solutions",
+    # mixed_j (weak and strong J on one spectrum)
+    "mixed_j_spectrum", "split_spin_system",
     # csa_fitting
     "csa_model_full", "build_csa_model", "fit_csa_spectrum", "evaluate_csa_fit",
     "print_csa_fit_report", "NMR1dplot_with_csa_fit", "NMRCSAFitWorkflow",

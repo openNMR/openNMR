@@ -120,6 +120,9 @@ class SpinSystemHost(QObject):
         label = getattr(self.panel, "blurb_label", None)
         if label is not None:
             label.setText(target.blurb)
+        hook = getattr(self.panel, "on_hosted_in", None)
+        if callable(hook):
+            hook(key)
         target.hold()
         for other in self.slots.values():
             if other is not target:
