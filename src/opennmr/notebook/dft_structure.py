@@ -614,9 +614,11 @@ def plot_dft_structure(calc, records, frame="cell", tensor="shift_aniso", region
     what = {"cell": "unit cell", "radius": f"within {float(radius):g} Å",
             "molecule": "molecule",
             "range": _describe_range(span) if span is not None else ""}[region_used]
-    figure.suptitle(f"{', '.join(r['label'] for r in records[:4])}"
-                    f"{' …' if len(records) > 4 else ''}: {TENSOR_KINDS[tensor].split(' (')[0]} "
-                    f"on the structure ({what}, {frame_title})", fontsize=fontsize * 0.85)
+    from ..plotting.labels import mathtext_safe
+    figure.suptitle(mathtext_safe(
+        f"{', '.join(r['label'] for r in records[:4])}"
+        f"{' …' if len(records) > 4 else ''}: {TENSOR_KINDS[tensor].split(' (')[0]} "
+        f"on the structure ({what}, {frame_title})"), fontsize=fontsize * 0.85)
     try:
         make_room_for_legend(ax)
     except Exception:  # a backend without a renderer: the legend may overhang

@@ -80,6 +80,22 @@ def safe_label(text) -> str:
     return text if label_problem(text) is None else text.replace(r"\$", "$").replace("$", r"\$")
 
 
+#: Characters Arial (and most publication faces) do not have, with the
+#: mathtext that draws them from the figure's maths font instead.
+_NO_GLYPH = {"∥": r"$\parallel$", "⊥": r"$\perp$"}
+
+
+def mathtext_safe(text) -> str:
+    """``text`` with characters that common faces lack (∥, ⊥) written as
+    mathtext, so matplotlib draws them instead of warning "Glyph 8741
+    (PARALLEL TO) missing from font(s) Arial" and leaving a gap. For text
+    drawn on a figure only: the same string stays as typed in logs and notes."""
+    text = "" if text is None else str(text)
+    for char, math in _NO_GLYPH.items():
+        text = text.replace(char, math)
+    return text
+
+
 # ============================================================
 # Legend line width, and names written on the traces themselves
 # ============================================================

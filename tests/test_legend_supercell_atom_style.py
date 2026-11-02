@@ -505,3 +505,19 @@ def test_gui_tensor_style_axes_and_atoms(gui):
     assert canvas.style_settings()["tensor_style"]["atom_colours"] == {}
     dialog._reset()
     assert _ax3d(window)._axis3don and _ax3d(window).zaxis.label.get_visible()
+
+
+def test_parallel_sign_in_a_figure_title_is_drawn_as_mathtext():
+    """Arial has no ∥ (U+2225): "Glyph 8741 (PARALLEL TO) missing from font(s)
+    Arial" (2026-11-02). The text is drawn as mathtext; logs and notes keep the sign."""
+    from opennmr.plotting.labels import mathtext_safe
+    out = mathtext_safe("cell frame (a ∥ x, b in xy), c ⊥ ab")
+    assert "∥" not in out and "⊥" not in out and r"$\parallel$" in out
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig = plt.figure()
+    fig.suptitle(out)
+    fig.canvas.draw()                              # parses: no ValueError from mathtext
+    plt.close(fig)
+    assert mathtext_safe(None) == "" and mathtext_safe("plain") == "plain"

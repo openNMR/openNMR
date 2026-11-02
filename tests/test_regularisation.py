@@ -192,3 +192,35 @@ def test_bad_input_is_refused():
         reg.log_grid(1.0, 0.5, 10)
     with pytest.raises(ValueError):
         reg.regularise([1, 2, 3], [3, 2, 1], kernel="nope")
+
+
+@pytest.mark.parametrize("kernel", ["t1_ir", "t1_sr", "t2"])
+def test_regularisation_figure_has_no_unicode_subscripts_in_any_text(kernel):
+    """Arial has no glyph for the Unicode subscripts (U+2080-2089), so "T₁" must be
+    drawn as mathtext: matplotlib warned "Glyph 8321 missing from font(s) Arial"
+    at tight_layout (2026-11-02). Every text on the figure is checked; the layout
+    call itself is left to do its job of keeping the export uncut."""
+    import warnings
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    t = np.linspace(1e-3, 3.0, 60)
+    y = (1 - np.exp(-t / 0.4)) if kernel == "t1_sr" else (
+        1 - 2 * np.exp(-t / 0.4)) if kernel == "t1_ir" else np.exp(-t / 0.4)
+    result = reg.regularise(t, y, kernel=kernel)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        fig = reg.plot_regularisation(result, show_nnls=True)
+        fig.tight_layout()                  # still called, and still warning-free
+        fig.canvas.draw()
+    texts = [a.get_title() for a in fig.axes] + [a.get_xlabel() for a in fig.axes] \
+        + [a.get_ylabel() for a in fig.axes]
+    for a in fig.axes:
+        leg = a.get_legend()
+        if leg is not None:
+            texts += [t_.get_text() for t_ in leg.get_texts()]
+    bad = [x for x in texts if any("₀" <= c <= "₉" for c in x)]
+    assert not bad, bad
+    assert any("T_{" in x for x in texts)       # the symbol is there, as mathtext
+    plt.close(fig)

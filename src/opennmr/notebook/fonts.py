@@ -9,7 +9,8 @@ and the GUI agree on what is available.
 Notebook use::
 
     from opennmr.notebook import fonts
-    fonts.available_fonts()              # ['Arial', 'Calibri', ...]
+    fonts.available_fonts()              # ['Arial', 'Calibri', ...] (no novelty faces)
+    fonts.available_fonts(publication=False)   # ... and Jokerman, Papyrus and the like
     fonts.font_samples()                 # an HTML table of samples, in Jupyter
     fonts.plot_font_samples(["Arial", "Times New Roman"])   # a figure instead
     with fonts.use_font("Times New Roman"):
@@ -34,10 +35,47 @@ _NOT_TEXT = ("symbol", "webdings", "wingdings", "emoji", "marlett", "holomdl2",
              "segmdl2", "segoe fluent icons", "segoe mdl2", "dingbat", "cmex", "cmsy")
 
 
-def available_fonts(text_only: bool = True) -> list[str]:
+#: Decorative, novelty, handwriting and display faces: not what a publication or
+#: a talk should be set in (explicit user request, 2026-11-02: no Jokerman and
+#: other silly typefaces among the choices). Matched whole, ignoring case; the
+#: words below catch the families of the same kind that are not listed.
+NOVELTY_FONTS = frozenset(name.casefold() for name in (
+    "Algerian", "Bauhaus 93", "Berlin Sans FB", "Berlin Sans FB Demi", "Bernard MT Condensed",
+    "Blackadder ITC", "Bradley Hand ITC", "Bradley Hand", "Broadway", "Brush Script MT",
+    "Castellar", "Chalkboard", "Chalkboard SE", "Chalkduster", "Chiller", "Colonna MT",
+    "Comic Sans MS", "Comic Neue", "Cooper Black", "Curlz MT", "Edwardian Script ITC",
+    "Engravers MT", "Felix Titling", "Forte", "Freestyle Script", "French Script MT",
+    "Gabriola", "Gigi", "Gloucester MT Extra Condensed", "Goudy Stout", "Harlow Solid Italic",
+    "Harrington", "Herculanum", "Imprint MT Shadow", "Informal Roman", "Ink Free", "Jokerman",
+    "Juice ITC", "Kristen ITC", "Kunstler Script", "Luminari", "Magneto",
+    "Marker Felt", "Matura MT Script Capitals", "Mistral", "Modern No. 20", "Monotype Corsiva",
+    "MV Boli", "Niagara Engraved", "Niagara Solid", "Noteworthy", "Old English Text MT", "Onyx",
+    "Papyrus", "Parchment", "Party LET", "Playbill", "Poor Richard", "Pristina", "Rage Italic",
+    "Ravie", "Savoye LET", "Showcard Gothic", "Snap ITC", "Snell Roundhand", "Stencil",
+    "Tempus Sans ITC", "Trattatello", "Viner Hand ITC", "Vivaldi", "Vladimir Script",
+    "Wide Latin", "Zapfino", "Apple Chancery",
+))
+
+#: Words that mark a decorative family whatever its exact name.
+_NOVELTY_WORDS = ("script", "handwriting", "calligraphy", "blackletter", "chancery",
+                  "graffiti", "cartoon", "comic")
+
+
+def is_novelty_font(name: str) -> bool:
+    """Whether ``name`` is a decorative / novelty / handwriting face
+    (see :data:`NOVELTY_FONTS`). Generic families and the faces a figure is
+    normally set in are not."""
+    lowered = (name or "").strip().casefold()
+    return lowered in NOVELTY_FONTS or any(word in lowered for word in _NOVELTY_WORDS)
+
+
+def available_fonts(text_only: bool = True, publication: bool = True) -> list[str]:
     """Every font family matplotlib can use on this computer, sorted,
     without duplicates (each family once, whatever its weights and
-    styles). ``text_only`` drops symbol/emoji/icon fonts."""
+    styles). ``text_only`` drops symbol/emoji/icon fonts; ``publication``
+    (the default) also drops decorative and novelty faces such as Jokerman
+    or Papyrus (:func:`is_novelty_font`) -- ``publication=False`` lists them
+    too. A figure that already names one still draws in it."""
     from matplotlib import font_manager
     names = set()
     for entry in font_manager.fontManager.ttflist:
@@ -45,6 +83,8 @@ def available_fonts(text_only: bool = True) -> list[str]:
         if not name or name.startswith("."):
             continue
         if text_only and any(bad in name.lower() for bad in _NOT_TEXT):
+            continue
+        if publication and is_novelty_font(name):
             continue
         names.add(name)
     return sorted(names, key=str.casefold)

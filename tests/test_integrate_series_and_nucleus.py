@@ -91,3 +91,42 @@ def test_changing_the_nucleus_of_a_pseudo_2d_updates_its_plot_and_slices(qapp, t
     # ... and so does the axis label of the plot already on screen.
     labels = " ".join(ax.get_xlabel() for ax in window.canvas.figure.axes)
     assert "Li" in labels and "{H}" not in labels
+
+
+def test_suggesting_the_nucleus_from_the_menu_needs_no_message_box(qapp, tmp_path, monkeypatch):
+    """The confirmation box crashed the Windows app (segmentation fault inside
+    QMessageBox.question, 2026-11-02): the menu item names the nucleus and applies it."""
+    import dataclasses
+
+    from PySide6.QtWidgets import QMessageBox
+    window = _window(tmp_path, monkeypatch)
+    window.session.set_nucleus(0, "189Os")
+    meta = dataclasses.replace(window.session.spectra[0].metadata, sfo1=16.54845 * 2.35)
+    window.session.spectra[0] = dataclasses.replace(window.session.spectra[0], metadata=meta)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a message box was opened")
+    for name in ("question", "information", "warning", "critical"):
+        monkeypatch.setattr(QMessageBox, name, boom)
+    text, enabled = window._suggest_nucleus_menu_item(0)
+    assert enabled and "7Li" in text
+    window._on_suggest_nucleus_action(0, confirm=False)
+    assert window.session.spectra[0].metadata.nucleus == "7Li"
+    assert "7Li" in window.statusBar().currentMessage()
+    text, enabled = window._suggest_nucleus_menu_item(0)          # now it is already right
+    assert not enabled and "already 7Li" in text
+
+
+def test_the_menu_item_is_disabled_when_nothing_can_be_suggested(qapp, tmp_path, monkeypatch):
+    import dataclasses
+
+    from PySide6.QtWidgets import QMessageBox
+    window = _window(tmp_path, monkeypatch)
+    meta = dataclasses.replace(window.session.spectra[0].metadata, sfo1=None)
+    window.session.spectra[0] = dataclasses.replace(window.session.spectra[0], metadata=meta)
+    monkeypatch.setattr(QMessageBox, "information",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("box")))
+    text, enabled = window._suggest_nucleus_menu_item(0)
+    assert not enabled and "SFO1" in text
+    window._on_suggest_nucleus_action(0, confirm=False)           # a status-bar note, no box
+    assert "No nucleus suggestion" in window.statusBar().currentMessage()

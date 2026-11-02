@@ -232,3 +232,36 @@ def test_the_canvas_italicises_plain_axis_labels(qapp):
     canvas.show_external_plot(draw, kind="curve")
     ax = canvas.figure.axes[0]
     assert ax.get_xlabel() == "$T$ (K)" and ax.get_ylabel() == "$T_{1}$ (s)"
+
+
+def test_novelty_typefaces_are_not_offered_but_still_work():
+    """No Jokerman and other silly typefaces among the choices (2026-11-02)."""
+    for silly in ("Jokerman", "Comic Sans MS", "Papyrus", "Curlz MT", "Brush Script MT",
+                  "Segoe Script", "Lucida Handwriting", "Chiller", "Vivaldi", "Zapfino"):
+        assert fonts.is_novelty_font(silly), silly
+    for serious in ("Arial", "Times New Roman", "Helvetica", "Calibri", "Cambria", "DejaVu Sans",
+                    "Liberation Serif", "Latin Modern Roman", "Palatino Linotype", "Georgia",
+                    "Courier New", "Segoe UI", "Verdana", "Garamond", "Century Schoolbook"):
+        assert not fonts.is_novelty_font(serious), serious
+    offered = set(fonts.available_fonts())
+    everything = set(fonts.available_fonts(publication=False))
+    assert offered <= everything
+    assert not any(fonts.is_novelty_font(n) for n in offered)
+    assert all(fonts.is_novelty_font(n) for n in everything - offered)
+    # A figure that names one is not broken by the list: it is still "available".
+    assert fonts.font_available("serif") and fonts.font_available("DejaVu Sans")
+
+
+def test_the_font_pickers_leave_novelty_faces_out_and_keep_a_saved_one(qapp, monkeypatch):
+    from opennmr.gui.main_window import MainWindow
+    from opennmr.notebook import fonts as nb_fonts
+    window = MainWindow()
+    for combo in (window.output_font_family_combo, window.integral_labels_font_combo):
+        names = [combo.itemText(i) for i in range(combo.count())]
+        assert not any(nb_fonts.is_novelty_font(n) for n in names), names
+    # A figure saved in one of them, and installed here, still shows its own plain name.
+    monkeypatch.setattr(nb_fonts, "font_available", lambda name: True)
+    window.canvas.set_style(font_family="Jokerman")
+    window._load_style_controls_from(window.canvas)
+    combo = window.output_font_family_combo
+    assert combo.currentData() == "Jokerman" and combo.currentText() == "Jokerman"

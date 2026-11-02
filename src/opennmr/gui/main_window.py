@@ -4400,7 +4400,16 @@ class MainWindow(QMainWindow):
             "legend, a DOSY overlay's legend, the processing report.")
         menu.addSeparator()
         override_action = menu.addAction("Override nucleus…")
-        suggest_action = menu.addAction("Suggest nucleus (500 MHz console / 100 MHz magnet)…")
+        # The suggestion is worked out here and named on the item, so choosing
+        # it applies it with no confirmation box: that box crashed the app on
+        # Windows (segmentation fault inside QMessageBox.question, 2026-11-02).
+        suggest_text, suggest_enabled = self._suggest_nucleus_menu_item(index)
+        suggest_action = menu.addAction(suggest_text)
+        suggest_action.setEnabled(suggest_enabled)
+        suggest_action.setToolTip(
+            "A nuclide picked from a 500 MHz console's table but run on a 100 MHz magnet is "
+            "recorded under the wrong name; this finds the real one from the recorded SFO1. "
+            "Override nucleus… sets any other.")
         mass_action = menu.addAction("Set sample mass…")
         pulse_sequence_action = menu.addAction("Show Pulse Sequence…")
         pulse_sequence_action.setToolTip(
@@ -4456,7 +4465,7 @@ class MainWindow(QMainWindow):
         elif chosen is override_action:
             self._on_override_nucleus_action(index)
         elif chosen is suggest_action:
-            self._on_suggest_nucleus_action(index)
+            self._on_suggest_nucleus_action(index, confirm=False)
         elif chosen is pulse_sequence_action:
             self._show_pulse_sequence(index)
         elif chosen is mass_action:
@@ -4561,13 +4570,42 @@ class MainWindow(QMainWindow):
         if ok and text.strip():
             self._set_nucleus(index, text.strip())
 
-    def _on_suggest_nucleus_action(self, index: int) -> None:
+    def _suggest_nucleus_menu_item(self, index: int) -> tuple[str, bool]:
+        """The right-click item's text, and whether it can be used."""
+        try:
+            suggestion = self.session.suggest_nucleus(index)
+        except Exception:  # noqa: BLE001 -- a menu must always open
+            suggestion = None
+        if suggestion is None:
+            return ("Suggest nucleus (500 MHz console / 100 MHz magnet): "
+                    "needs a recorded nucleus and SFO1", False)
+        current = self.session.spectra[index].metadata.nucleus or "?"
+        if suggestion == current:
+            return (f"Nucleus is already {suggestion} (500 MHz console / 100 MHz magnet check)",
+                    False)
+        return (f"Set nucleus to {suggestion} (500 MHz console / 100 MHz magnet, from SFO1)", True)
+
+    def _on_suggest_nucleus_action(self, index: int, confirm: bool = True) -> None:
+        """Apply the 500 MHz-console / 100 MHz-magnet nucleus suggestion.
+        ``confirm`` asks first (a message box); the right-click menu passes
+        False, since its item already names the nucleus."""
         suggestion = self.session.suggest_nucleus(index)
         if suggestion is None:
-            QMessageBox.information(
-                self, "No suggestion available",
-                "Need a recorded nucleus and SFO1 to suggest from.",
-            )
+            if confirm:
+                QMessageBox.information(
+                    self, "No suggestion available",
+                    "Need a recorded nucleus and SFO1 to suggest from.",
+                )
+            else:
+                self.statusBar().showMessage(
+                    "No nucleus suggestion: needs a recorded nucleus and SFO1.", 8000)
+            return
+        if not confirm:
+            previous = self.session.spectra[index].metadata.nucleus
+            self._set_nucleus(index, suggestion)
+            self.statusBar().showMessage(
+                f"Nucleus set to {suggestion} (was {previous}). Override nucleus… sets another.",
+                8000)
             return
         reply = QMessageBox.question(
             self, "Suggested nucleus",
@@ -6503,8 +6541,11 @@ class MainWindow(QMainWindow):
             # A face saved on a computer that has it, opened on one that
             # does not: shown as it is (matplotlib falls back), not
             # silently replaced by another.
+            # (A decorative face the picker does not list, but is installed,
+            # keeps its plain name: the figure was made in it.)
             self.output_font_family_combo.addItem(
-                f"{settings['font_family']} (not installed here)", settings["font_family"])
+                settings["font_family"] if nb_fonts.font_available(settings["font_family"])
+                else f"{settings['font_family']} (not installed here)", settings["font_family"])
             family = self.output_font_family_combo.count() - 1
         if family >= 0:
             self.output_font_family_combo.setCurrentIndex(family)

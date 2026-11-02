@@ -705,7 +705,9 @@ def plot_regularisation(result, fig=None, time_unit="ms", colour="#0072B2",
         ax.legend()
     ax.set_xlabel(_italic_label(f"{result['axis']} ({unit})"))
     ax.set_ylabel(_italic_label("Amplitude"))
-    ax.set_title(f"{result['axis']} distribution")
+    # Through the label helper like every other text here: "T₁" typed with a
+    # Unicode subscript has no glyph in Arial (UserWarning, 2026-11-02).
+    ax.set_title(_italic_label(f"{result['axis']} distribution"))
     i = 1
     if show_cumulative:
         ax = axes[i]

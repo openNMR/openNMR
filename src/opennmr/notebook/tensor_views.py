@@ -627,7 +627,8 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
         what.append(f"{larmor / 1e6:.4g} MHz, {order} order")
     if frame and frame.get("title"):
         what.append(frame["title"])
-    figure.suptitle(" · ".join(what), fontsize=fontsize * 0.9)
+    from ..plotting.labels import mathtext_safe
+    figure.suptitle(mathtext_safe(" · ".join(what)), fontsize=fontsize * 0.9)
 
     where = (frame.get("title") or "the chosen frame") if frame else "site frame"
     notes.insert(0, f"Radius = |frequency| for B0 along that direction ({where}); colour = the "

@@ -2642,6 +2642,9 @@ class _FakeAction(str):
     def setToolTip(self, _text) -> None:
         pass
 
+    def setEnabled(self, _value) -> None:
+        pass
+
     def setCheckable(self, _value) -> None:
         pass
 
