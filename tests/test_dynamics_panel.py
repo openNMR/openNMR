@@ -82,3 +82,19 @@ def test_results_follow_the_fit_button_and_kept_fits_follow_results(qapp):
     assert row(window.relaxation_fit_params_label) < row(window._kept_curve_fits_section)
     assert row(window._curve_settings_section) < run
     assert row(window._kept_curve_fits_section) < row(window._score_section)
+
+
+def test_window_overflowing_multiplier_is_refused_not_infinite(qapp):
+    """2026-11-06: a multiplier of 1000 over many slices overflowed to inf,
+    with numpy's warning on the console. It is now refused, with the reason."""
+    import warnings
+    window = MainWindow()
+    spectrum = _make_pseudo2d_relaxation_spectrum(list(np.linspace(0.001, 1.0, 200)))
+    window.delay_source_combo.setCurrentIndex(2)
+    _set_delay_unit(window, "s")
+    window.delay_step_spin.setValue(0.1)
+    window.delay_multiplier_spin.setValue(1000.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with pytest.raises(ValueError, match="larger than any number"):
+            window._resolve_independent_values(spectrum, is_diffusion=False)

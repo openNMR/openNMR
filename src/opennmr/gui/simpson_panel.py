@@ -891,6 +891,32 @@ class SimpsonPanel(QWidget):
         self.heatmap_x_combo, self.heatmap_y_combo, self.heatmap_z_combo = (
             QComboBox(), QComboBox(), QComboBox())
         self._heatmap_table_rows = []
+        self.heatmap_skip_spin = TypedSpinBox()
+        self.heatmap_skip_spin.setRange(-1, 100000)
+        self.heatmap_skip_spin.setValue(-1)
+        self.heatmap_skip_spin.setSpecialValueText("auto")
+        self.heatmap_skip_spin.setToolTip(
+            "Lines at the top of the file to pass over (a title, notes, settings). auto: the "
+            "data are the rows of numbers running to the end of the file, and everything above "
+            "them is passed over. The line under the plot says what was found.")
+        self.heatmap_header_combo = QComboBox()
+        for key, text in (("auto", "Auto-detect"), ("names", "Names the columns"),
+                          ("data", "Is data (no names)")):
+            self.heatmap_header_combo.addItem(text, key)
+        self.heatmap_header_combo.setToolTip(
+            "Whether the first row (after any skipped lines – with auto, the line just above the "
+            "numbers) names the columns. Auto-detect: yes when it holds one name per column, "
+            "e.g. O1 O2 Re Im, # O1 O2 Re Im, or tab-separated names with spaces in them. "
+            "Without names the columns are c1, c2 …")
+        for widget in (self.heatmap_skip_spin, self.heatmap_header_combo):
+            signal = (widget.valueChanged if widget is self.heatmap_skip_spin
+                      else widget.currentIndexChanged)
+            signal.connect(lambda *_a: self.paths() and self._on_heatmap_read_columns())
+        for text, widget in (("Lines to skip:", self.heatmap_skip_spin),
+                             ("First row:", self.heatmap_header_combo)):
+            label = QLabel(text)
+            form.addRow(label, widget)
+            self._heatmap_table_rows.append((label, widget))
         for text, combo in (("x column:", self.heatmap_x_combo),
                             ("y column:", self.heatmap_y_combo),
                             ("Colour column:", self.heatmap_z_combo)):
@@ -982,16 +1008,26 @@ class SimpsonPanel(QWidget):
             label.setVisible(not table)
             widget.setVisible(not table)
 
+    def heatmap_table_kwargs(self) -> dict:
+        """``skip_rows`` and ``header`` for the table readers."""
+        skip = self.heatmap_skip_spin.value()
+        header = {"auto": "auto", "names": True, "data": False}[
+            self.heatmap_header_combo.currentData()]
+        return {"skip_rows": None if skip < 0 else skip, "header": header}
+
     def _on_heatmap_read_columns(self) -> list[str] | None:
         paths = self._chosen_paths()
         if not paths:
             self._say("Add the table file first.")
             return None
         try:
-            names = simpson_series.SIMPSONread_scan(paths[0])["names"]
+            table = simpson_series.SIMPSONread_scan(paths[0], **self.heatmap_table_kwargs())
         except Exception as exc:  # noqa: BLE001 -- shown to the user
             self.heatmap_preview_label.setText(str(exc))
+            for combo in (self.heatmap_x_combo, self.heatmap_y_combo, self.heatmap_z_combo):
+                combo.clear()
             return None
+        names = table["names"]
         if len(names) < 3:
             self.heatmap_preview_label.setText(
                 f"{os.path.basename(paths[0])} has {len(names)} column(s); a heatmap needs x, y "
@@ -1005,7 +1041,15 @@ class SimpsonPanel(QWidget):
             combo.addItems(names)
             combo.setCurrentIndex(names.index(keep) if keep in names else k)
             combo.blockSignals(False)
-        self.heatmap_preview_label.setText(f"Columns: {', '.join(names)}.")
+        found = []
+        if table["skipped"]:
+            found.append(f"passed over {table['skipped']} line(s) at the top")
+        found.append(f"names from line {table['header_line']}" if table["header_line"]
+                     else "no names in the file")
+        found.append(f"data from line {table['first_data_line']}")
+        self.heatmap_preview_label.setText(
+            f"Columns: {', '.join(names)} ({'; '.join(found)}; "
+            f"{len(table['columns'][names[0]])} rows).")
         return names
 
     @staticmethod
@@ -1027,7 +1071,7 @@ class SimpsonPanel(QWidget):
                 raise ValueError(self.heatmap_preview_label.text() or "Could not read the columns.")
             grid = simpson_series.SIMPSONscan_from_table(
                 paths[0], self.heatmap_x_combo.currentText(), self.heatmap_y_combo.currentText(),
-                self.heatmap_z_combo.currentText())
+                self.heatmap_z_combo.currentText(), **self.heatmap_table_kwargs())
         else:
             grid = simpson_series.SIMPSONscan_from_files(
                 paths, x_number=self.heatmap_x_number_spin.value(),
@@ -1099,7 +1143,9 @@ class SimpsonPanel(QWidget):
             read = (f"grid = nmr.SIMPSONscan_from_table({(paths[0] if paths else 'scan.txt')!r}, "
                     f"{self.heatmap_x_combo.currentText() or 0!r}, "
                     f"{self.heatmap_y_combo.currentText() or 1!r}, "
-                    f"{self.heatmap_z_combo.currentText() or 2!r})")
+                    f"{self.heatmap_z_combo.currentText() or 2!r}"
+                    + "".join(f", {k}={v!r}" for k, v in self.heatmap_table_kwargs().items()
+                              if v not in (None, "auto")) + ")")
             lines = ["import opennmr.notebook as nmr", "", read]
         else:
             lines = ["import opennmr.notebook as nmr", "", f"files = {paths!r}",

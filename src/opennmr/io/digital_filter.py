@@ -88,13 +88,16 @@ def _fft_positive(data: np.ndarray) -> np.ndarray:
     A positive exponential is an inverse FFT, so this undoes numpy's
     own 1/N scaling to keep amplitudes unchanged."""
     n = float(data.shape[-1])
-    return np.fft.fftshift(np.fft.ifft(data, axis=-1).astype(data.dtype), -1) * n
+    # copy=False: the transform is already data's dtype for complex128
+    # input, and the default astype copied the whole array again for
+    # nothing (bytes unchanged either way).
+    return np.fft.fftshift(np.fft.ifft(data, axis=-1).astype(data.dtype, copy=False), -1) * n
 
 
 def _ifft_positive(data: np.ndarray) -> np.ndarray:
     """Inverse of :func:`_fft_positive`."""
     n = 1.0 / float(data.shape[-1])
-    return np.fft.fft(np.fft.ifftshift(data, -1), axis=-1).astype(data.dtype) * n
+    return np.fft.fft(np.fft.ifftshift(data, -1), axis=-1).astype(data.dtype, copy=False) * n
 
 
 def _frequency_shift(data: np.ndarray, points: float) -> np.ndarray:

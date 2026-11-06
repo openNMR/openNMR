@@ -77,6 +77,7 @@ from .jcampdx import parse_jcampdx_params, read_acqus_files
 from ..processing import ft as processing_ft
 from ..processing import windows as processing_windows
 from ..core.registry import find_gamma
+from ..core.load_progress import megabytes as _megabytes, stage as _stage
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 # Re-exported deliberately: this lives in ``core`` so ``processing`` can
 # use it too (``processing`` must not import ``io`` -- this module
@@ -1184,7 +1185,9 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     if _raw_fid_cache is not None:
         data = _raw_fid_cache
     else:
+        _stage(f"Reading ser {_megabytes(os.path.join(path, 'ser'))}")
         data = _read_raw_2d_data(path, dic)
+        _stage("Removing the digital filter")
         data = _remove_digital_filter(dic, data).astype(np.complex128)
         data = np.conj(data)  # see _CONJUGATE_QUADRATURE_NOTE below
     fid_raw = data  # the truly raw FID (every row/slice) -- see metadata.raw["fid_raw"]'s own comment below
@@ -1368,6 +1371,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             window_unsupported_note = str(exc)
     if zero_fill == 0:
         si2 = fid_f2.shape[-1]      # zero_fill=0: do not zero-fill (GUI: None)
+    _stage(f"Fourier transform (F2, {fid_f2.shape[0]} rows)")
     fid_f2 = processing_ft.zero_fill(fid_f2, si2)
     _, spectrum = processing_ft.fft_spectrum(fid_f2, 1.0 / sw)
 
@@ -1422,6 +1426,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         y_index = np.arange(1, spectrum.shape[0] + 1)
         y_axis = NMRAxis(kind="index", index=y_index)
     else:
+        _stage("Fourier transform (F1)")
         # truncate_f1 -- applied to raw row *pairs* when FnMODE calls
         # for hypercomplex decoding (fn_mode 4/5/6: 2 raw rows per t1
         # increment), else directly (fn_mode 0-3: 1 raw row per

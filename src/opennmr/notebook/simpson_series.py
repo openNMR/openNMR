@@ -453,15 +453,18 @@ def stepped_values(start: float, step: float | None = None, multiplier: float = 
         if (stop - start) * step < 0:
             raise ValueError(f"A step of {step:g} from {start:g} never reaches {stop:g}.")
         tolerance = 1e-9 * max(abs(stop), abs(start), abs(step))
-        out = [start]
-        k = 1
-        while k < 1_000_000:
-            value = float(start_step_values(start, step, m, k + 1)[-1])
-            if (value - stop) * np.sign(step) > tolerance:
-                break
-            out.append(value)
-            k += 1
-        return np.asarray(out, dtype=float)
+        # Longer and longer runs until one passes Stop: each value is
+        # computed once per run, not the whole series again for every value.
+        n = 16
+        while True:
+            values = start_step_values(start, step, m, n)
+            beyond = (values - stop) * np.sign(step) > tolerance
+            if beyond.any():
+                return values[:int(np.argmax(beyond))]
+            if n >= 1_000_000:
+                raise ValueError(f"A million values from {start:g} in steps of {step:g} "
+                                 f"(multiplier {m:g}) do not reach {stop:g}.")
+            n = min(2 * n, 1_000_000)
     if n_default is None:
         raise ValueError("Give Stop or a number of points.")
     return start_step_values(start, step, m, int(n_default))
@@ -643,47 +646,160 @@ def SIMPSONplot_curve(curve: dict, part: str = "real", normalise: str | None = N
 # that was not simulated is left empty (not invented), and one simulated
 # twice is refused rather than one of them silently winning.
 
-def SIMPSONread_scan(path: str) -> dict:
+def _numbers(text: str):
+    """The row's numbers, or None if any token is not one."""
+    try:
+        return [float(t) for t in text.replace(",", " ").split()]
+    except ValueError:
+        return None
+
+
+def _strip_comment(text: str) -> str:
+    for prefix in sorted(_COMMENT, key=len, reverse=True):
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text
+
+
+def _split_names(text: str, width: int):
+    """Column names from a header line, if it names exactly ``width``
+    columns: split on tabs, then commas, then any space -- so a tab- or
+    comma-separated header may hold names with spaces ("Offset 1 (kHz)").
+    A leading comment mark (``# O1 O2 Re``) is allowed. None otherwise."""
+    text = _strip_comment(text.strip())
+    for sep in ("\t", ",", None):
+        if sep is not None and sep not in text:
+            continue
+        tokens = [t.strip() for t in text.split(sep)]
+        tokens = [t for t in tokens if t]
+        if len(tokens) == width:
+            return tokens
+    return None
+
+
+def SIMPSONread_scan(path: str, skip_rows: int | None = None, header="auto") -> dict:
     """A table of numbers, one row per simulated combination.
 
-    The first non-comment line names the columns when it is not all numbers
-    (``O1 O2 Re Im``); otherwise they are called ``c1, c2, ...``. Spaces,
-    tabs or commas separate. Returns ``{"names", "columns" (name -> array),
-    "path"}``."""
+    ``skip_rows`` : lines at the top of the file to pass over (a title, a
+    note, the simulation's settings). ``None`` (default) finds them: the
+    data are the rows of numbers, all of the same width, running to the
+    end of the file, and everything above them is passed over.
+    ``header`` : whether the line just above the data (or, with
+    ``skip_rows``, the first line after the skipped ones) names the
+    columns -- ``"auto"`` (default: yes when it holds one name per column,
+    e.g. ``O1 O2 Re Im``, ``# O1 O2 Re Im`` or a tab-separated
+    ``Offset 1 (kHz)<tab>Offset 2 (kHz)<tab>Re``), ``True`` (it must) or
+    ``False`` (the columns are called ``c1, c2, ...``).
+
+    Spaces, tabs or commas separate numbers; blank lines, and lines
+    starting # ! % ; or // among the data, are passed over.
+
+    Returns ``{"names", "columns" (name -> array), "path", "skipped" (lines
+    passed over above the data, header not counted), "header_line" (its
+    1-based line number, or None), "first_data_line"}``."""
     path = str(path)
-    names = None
-    rows: list[list[float]] = []
+    name = os.path.basename(path)
+    if header not in ("auto", True, False):
+        raise ValueError("header must be 'auto', True or False.")
+    if skip_rows is not None and int(skip_rows) < 0:
+        raise ValueError("skip_rows must be 0 or more (or None to find them).")
     with open(path, "r", errors="ignore") as handle:
-        for number, line in enumerate(handle, start=1):
-            text = line.strip()
-            if not text or text.startswith(_COMMENT):
+        lines = [line.rstrip("\r\n") for line in handle]
+
+    def is_content(text):
+        text = text.strip()
+        return bool(text) and not text.startswith(_COMMENT)
+
+    if skip_rows is None:
+        # Walk up from the end over rows of numbers of one width.
+        start, width = None, None
+        for k in range(len(lines) - 1, -1, -1):
+            text = lines[k].strip()
+            if not is_content(text):
                 continue
-            tokens = text.replace(",", " ").split()
-            try:
-                rows.append([float(t) for t in tokens])
-            except ValueError:
-                if names is None and not rows:
-                    names = tokens
-                    continue
-                raise ValueError(f"{os.path.basename(path)} line {number}: {text!r} is not a "
-                                 "row of numbers.") from None
+            row = _numbers(text)
+            if row is None or (width is not None and len(row) != width):
+                break
+            width, start = len(row), k
+        if start is None:
+            last = next((k for k in range(len(lines) - 1, -1, -1) if is_content(lines[k])), None)
+            if last is None:
+                raise ValueError(f"{name} holds no numbers.")
+            raise ValueError(f"{name} line {last + 1}: {lines[last].strip()!r} is not a row of "
+                             "numbers (the data must run to the end of the file).")
+        above = next((k for k in range(start - 1, -1, -1) if lines[k].strip()), None)
+        data_above = next((k for k in range(start - 1, -1, -1) if is_content(lines[k])), None)
+        if data_above is not None:
+            other = _numbers(lines[data_above].strip())
+            if other is not None:
+                # A row of numbers is data, never a title to pass over.
+                raise ValueError(f"{name}: the rows do not all have the same number of columns "
+                                 f"(line {data_above + 1} has {len(other)}, line {start + 1} has "
+                                 f"{width}).")
+        header_line = None
+        names = None
+        if header is not False and above is not None:
+            names = _split_names(lines[above], width)
+            if names is not None and _numbers(_strip_comment(lines[above].strip())) is not None:
+                names = None                     # a row of numbers of another width
+            if names is not None:
+                header_line = above
+        if header is True and names is None:
+            raise ValueError(f"{name}: no line with one name per column ({width}) just above "
+                             f"the data (line {start + 1}).")
+        top = header_line if header_line is not None else start
+        skipped = sum(1 for k in range(top) if lines[k].strip())
+    else:
+        skip = int(skip_rows)
+        if skip >= len(lines):
+            raise ValueError(f"{name} has only {len(lines)} line(s); cannot skip {skip}.")
+        start = skip
+        names = None
+        header_line = None
+        first = next((k for k in range(skip, len(lines)) if lines[k].strip()), None)
+        if first is None:
+            raise ValueError(f"{name} holds no numbers after line {skip}.")
+        first_numbers = _numbers(_strip_comment(lines[first].strip()))
+        if header is True or (header == "auto" and first_numbers is None):
+            header_line = first
+            start = first + 1
+        skipped = skip
+        width = None
+    rows: list[list[float]] = []
+    first_data = None
+    for k in range(start, len(lines)):
+        text = lines[k].strip()
+        if not is_content(text):
+            continue
+        row = _numbers(text)
+        if row is None:
+            raise ValueError(f"{name} line {k + 1}: {text!r} is not a row of numbers"
+                             + (" (set the lines to skip, or whether the first row names the "
+                                "columns)" if skip_rows is not None else "") + ".")
+        if first_data is None:
+            first_data = k + 1
+        rows.append(row)
     if not rows:
-        raise ValueError(f"{os.path.basename(path)} holds no numbers.")
+        raise ValueError(f"{name} holds no numbers.")
     widths = {len(r) for r in rows}
     if len(widths) != 1:
-        raise ValueError(f"{os.path.basename(path)}: the rows do not all have the same number "
-                         f"of columns ({sorted(widths)}).")
+        raise ValueError(f"{name}: the rows do not all have the same number of columns "
+                         f"({sorted(widths)}).")
     width = widths.pop()
+    if header_line is not None and names is None:
+        names = _split_names(lines[header_line], width)
+        if names is None:
+            raise ValueError(f"{name} line {header_line + 1}: {lines[header_line].strip()!r} does "
+                             f"not name {width} columns.")
     if names is None:
         names = [f"c{k + 1}" for k in range(width)]
-    elif len(names) != width:
-        raise ValueError(f"{os.path.basename(path)}: the header names {len(names)} columns but "
-                         f"the rows have {width}.")
     if len(set(names)) != len(names):
-        raise ValueError(f"{os.path.basename(path)}: two columns have the same name.")
+        raise ValueError(f"{name}: two columns have the same name.")
     data = np.asarray(rows, dtype=float)
     return {"names": list(names), "columns": {n: data[:, k] for k, n in enumerate(names)},
-            "path": path}
+            "path": path, "skipped": int(skipped),
+            "header_line": None if header_line is None else header_line + 1,
+            "first_data_line": first_data}
 
 
 def _distinct(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -721,10 +837,12 @@ def scan_grid(x, y, z, xname: str = "x", yname: str = "y", zname: str = "z") -> 
 
 
 def SIMPSONscan_from_table(path: str, x: str | int = 0, y: str | int = 1,
-                           z: str | int = 2) -> dict:
+                           z: str | int = 2, skip_rows: int | None = None,
+                           header="auto") -> dict:
     """A grid (:func:`scan_grid`) from a table file (:func:`SIMPSONread_scan`).
-    ``x``, ``y``, ``z`` : column names, or 0-based column numbers."""
-    table = SIMPSONread_scan(path)
+    ``x``, ``y``, ``z`` : column names, or 0-based column numbers.
+    ``skip_rows``, ``header`` : as for :func:`SIMPSONread_scan`."""
+    table = SIMPSONread_scan(path, skip_rows=skip_rows, header=header)
     names = table["names"]
 
     def pick(key):

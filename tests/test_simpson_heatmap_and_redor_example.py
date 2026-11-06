@@ -88,16 +88,26 @@ def test_rounded_scan_values_collapse():
     assert grid["xs"].size == 2 and grid["missing"] == 0
 
 
-@pytest.mark.parametrize("bad, match", [
-    ("O1 O2 Re\n1 2 3 4\n", "header names 3"),
-    ("1 2 3\n1 2\n", "same number of columns"),
-    ("O1 O2 Re\n1 2 x\n", "line 2"),
+@pytest.mark.parametrize("bad, kwargs, match", [
+    ("O1 O2 Re\n1 2 3 4\n", {"header": True}, "one name per column"),
+    ("O1 O2 Re\n1 2 3 4\n", {"skip_rows": 0, "header": True}, "does not name 4 columns"),
+    ("1 2 3\n1 2\n", {}, "same number of columns"),
+    ("1 2 3\n# note\n1 2\n", {}, "line 1 has 3, line 3 has 2"),
+    ("1 2 3\n1 2\n", {"skip_rows": 0}, "same number of columns"),
+    ("O1 O2 Re\n1 2 x\n", {}, "line 2"),
 ])
-def test_bad_tables_say_why(tmp_path, bad, match):
+def test_bad_tables_say_why(tmp_path, bad, kwargs, match):
     path = tmp_path / "bad.txt"
     path.write_text(bad)
     with pytest.raises(ValueError, match=match):
-        nmr.SIMPSONread_scan(str(path))
+        nmr.SIMPSONread_scan(str(path), **kwargs)
+
+
+def test_a_header_that_does_not_fit_is_passed_over_and_said(tmp_path):
+    path = tmp_path / "scan.txt"
+    path.write_text("O1 O2 Re\n1 2 3 4\n5 6 7 8\n")
+    table = nmr.SIMPSONread_scan(str(path))
+    assert table["names"] == ["c1", "c2", "c3", "c4"] and table["skipped"] == 1
 
 
 def test_unknown_column_names_the_choices(tmp_path):
@@ -221,3 +231,82 @@ def test_gui_heatmap_settings_are_kept(qapp, tmp_path):  # noqa: F811
     other.set_state(panel.get_state())
     assert other.heatmap_x_combo.currentText() == "O2"
     assert other.heatmap_cmap_combo.currentText() == "magma"
+
+
+# ---- lines above the data: titles, comments, headers (2026-11-06, 16:04) -------------
+
+_BODY = "".join(f"{o1:g} {o2:g} {_value(o1, o2):.8f} 0\n" for o2 in O2 for o1 in O1)
+
+
+@pytest.mark.parametrize("top, names, skipped", [
+    ("", ["c1", "c2", "c3", "c4"], 0),
+    ("O1 O2 Re Im\n", ["O1", "O2", "Re", "Im"], 0),
+    ("# O1 O2 Re Im\n", ["O1", "O2", "Re", "Im"], 0),
+    ("Offset scan, CSA wide, 10 kHz steps\nO1 O2 Re Im\n", ["O1", "O2", "Re", "Im"], 1),
+    ("Simulation run 2026-02-23 by Joe\n\n", ["c1", "c2", "c3", "c4"], 1),
+    ("Offset 1 (kHz)\tOffset 2 (kHz)\tRe\tIm\n",
+     ["Offset 1 (kHz)", "Offset 2 (kHz)", "Re", "Im"], 0),
+    ("np 15\nsw 1e5\nO1,O2,Re,Im\n", ["O1", "O2", "Re", "Im"], 2),
+])
+def test_lines_above_the_data_are_found(tmp_path, top, names, skipped):
+    path = tmp_path / "scan.txt"
+    path.write_text(top + _BODY)
+    table = nmr.SIMPSONread_scan(str(path))
+    assert table["names"] == names and table["skipped"] == skipped
+    assert len(table["columns"][names[0]]) == O1.size * O2.size
+
+
+def test_skip_and_header_can_be_given(tmp_path):
+    path = tmp_path / "scan.txt"
+    path.write_text("a title that has four words\nO1 O2 Re Im\n" + _BODY)
+    # Auto-detect takes the line above the numbers as names.
+    assert nmr.SIMPSONread_scan(str(path))["names"] == ["O1", "O2", "Re", "Im"]
+    table = nmr.SIMPSONread_scan(str(path), skip_rows=1, header=True)
+    assert table["names"] == ["O1", "O2", "Re", "Im"] and table["header_line"] == 2
+    table = nmr.SIMPSONread_scan(str(path), skip_rows=2, header=False)
+    assert table["names"] == ["c1", "c2", "c3", "c4"] and table["first_data_line"] == 3
+    table = nmr.SIMPSONread_scan(str(path), header=False)
+    assert table["names"][0] == "c1" and table["skipped"] == 2
+    with pytest.raises(ValueError, match="not a row of numbers"):
+        nmr.SIMPSONread_scan(str(path), skip_rows=0, header=False)
+    with pytest.raises(ValueError, match="not a row of numbers"):
+        nmr.SIMPSONread_scan(str(path), skip_rows=0, header=True)   # line 2 is not data
+    with pytest.raises(ValueError, match="cannot skip"):
+        nmr.SIMPSONread_scan(str(path), skip_rows=999)
+
+
+def test_header_true_needs_names(tmp_path):
+    path = tmp_path / "scan.txt"
+    path.write_text(_BODY)
+    with pytest.raises(ValueError, match="one name per column"):
+        nmr.SIMPSONread_scan(str(path), header=True)
+
+
+def test_trailing_text_is_reported(tmp_path):
+    path = tmp_path / "scan.txt"
+    path.write_text("O1 O2 Re Im\n" + _BODY + "END\n")
+    with pytest.raises(ValueError, match="run to the end"):
+        nmr.SIMPSONread_scan(str(path))
+
+
+def test_gui_skip_and_header_controls(qapp, tmp_path):  # noqa: F811
+    path = tmp_path / "scan.txt"
+    path.write_text("Offset scan\nO1 O2 Re Im\n" + _BODY)
+    window = MainWindow()
+    panel = window.simpson_panel
+    panel.add_paths([str(path)])
+    panel.heatmap_read_button.click()
+    text = panel.heatmap_preview_label.text()
+    assert "O1, O2, Re, Im" in text and "passed over 1 line" in text and "line 2" in text
+    panel.heatmap_header_combo.setCurrentIndex(panel.heatmap_header_combo.findData("data"))
+    assert panel.heatmap_x_combo.itemText(0) == "c1"            # re-read at once
+    panel.heatmap_skip_spin.setValue(2)
+    panel.heatmap_x_combo.setCurrentText("c2")
+    panel.heatmap_y_combo.setCurrentText("c1")
+    panel.plot_heatmap_button.click()
+    assert np.array_equal(panel.grid["xs"], O2) and np.array_equal(panel.grid["ys"], O1)
+    code = panel.heatmap_notebook_code()
+    assert "skip_rows=2" in code and "header=False" in code
+    namespace = {}
+    exec(code, namespace)
+    assert np.allclose(namespace["grid"]["Z"], panel.grid["Z"])

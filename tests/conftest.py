@@ -75,6 +75,9 @@ def _isolate_interface_settings(tmp_path, monkeypatch):
     # The update helper's log and result (read, and removed, when Settings
     # opens): never the user's own, which a test run would otherwise consume.
     monkeypatch.setenv("OPENNMR_STATE_DIR", str(tmp_path / "update_state"))
+    # Saved copies of slow reads (io.load_cache): never the user's own
+    # cache folder, and never one test's copy served to another.
+    monkeypatch.setenv("OPENNMR_CACHE_DIR", str(tmp_path / "load_cache"))
     main_window = sys.modules.get("opennmr.gui.main_window")
     if main_window is not None:
         monkeypatch.setattr(main_window.MainWindow, "_UI_SETTINGS_PATH",

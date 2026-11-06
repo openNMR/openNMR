@@ -23,18 +23,24 @@ Design points, each with the reason:
   the finished spectrum back by signal. It never touches
   :class:`~opennmr.gui.session.Session`, whose lists the GUI thread
   mutates, and never touches a widget or a figure.
-* **Cancellation is between stages, not mid-FFT.** A flag checked
-  before and after the read is honest; interrupting a running
-  transform is not, so the result is simply discarded instead.
+* **Cancellation is between stages, not mid-FFT.** The reader reports
+  its stages (:mod:`opennmr.core.load_progress`) and a cancelled read
+  stops at the next one; interrupting a running transform is not
+  honest, so a stage already under way finishes first.
+* **Slow reads are kept** (:mod:`opennmr.io.load_cache`): opening the
+  same experiment, read the same way, again uses the saved copy.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 
 from PySide6.QtCore import Q_ARG, QMetaObject, QObject, QThread, Qt, Signal, Slot
 
 from .. import io
+from ..core import load_progress
+from ..io import load_cache
 
 #: Set to ``0``/``false``/``no`` to make every load synchronous. Worth
 #: having for CI determinism and for debugging a load that misbehaves --
@@ -69,10 +75,28 @@ class SpectrumReader(QObject):
     #: ``(path, vendor, message)``. The message, not the exception, so
     #: nothing exception-shaped crosses the thread boundary.
     failed = Signal(str, str, str)
+    #: ``(path, text)``: the stage the read has reached.
+    progress = Signal(str, str)
+    #: ``(path, vendor)``: a read cancelled by request (see
+    #: :meth:`BackgroundLoader.cancel_pending`), emitted instead of the others.
+    cancelled = Signal(str, str)
+    #: ``(path, info)`` just before :attr:`finished`: ``info`` from
+    #: :func:`opennmr.io.load_cache.load` (seconds, from_copy ...).
+    timing = Signal(str, object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._cancelled = False
+        #: Requests to drop, by id (see BackgroundLoader). Shared with the
+        #: GUI thread, hence the lock.
+        self._dropped: set[int] = set()
+        self._lock = threading.Lock()
+
+    def _is_dropped(self, request) -> bool:
+        if request is None:
+            return False
+        with self._lock:
+            return request in self._dropped
 
     def cancel(self) -> None:
         """Ask for the in-flight read to be discarded.
@@ -88,16 +112,37 @@ class SpectrumReader(QObject):
         """Load ``path`` and emit the result. Never raises: a failure
         becomes :attr:`failed`, because an exception escaping a slot on
         a worker thread has nowhere useful to go."""
+        kwargs = dict(kwargs or {})
+        request = kwargs.pop("_request_id", None)
         if self._cancelled:
             return
+        if self._is_dropped(request):
+            self.cancelled.emit(path, vendor)
+            return
+
+        def report(text: str) -> None:
+            if self._cancelled or self._is_dropped(request):
+                raise load_progress.LoadCancelled()
+            self.progress.emit(path, text)
+
         try:
-            spectrum = io.load(path, vendor=vendor, **(kwargs or {}))
+            with load_progress.reporting(report):
+                spectrum, info = load_cache.load(path, vendor, kwargs)
+        except load_progress.LoadCancelled:
+            if not self._cancelled:
+                self.cancelled.emit(path, vendor)
+            return
         except Exception as exc:  # noqa: BLE001 -- reported, not raised, see docstring
             if not self._cancelled:
                 self.failed.emit(path, vendor, str(exc))
             return
-        if not self._cancelled:
-            self.finished.emit(path, vendor, spectrum)
+        if self._cancelled:
+            return
+        if self._is_dropped(request):
+            self.cancelled.emit(path, vendor)
+            return
+        self.timing.emit(path, info)
+        self.finished.emit(path, vendor, spectrum)
 
 
 class BackgroundLoader(QObject):
@@ -114,6 +159,9 @@ class BackgroundLoader(QObject):
     #: Re-emitted from the worker, on the GUI thread.
     finished = Signal(str, str, object)
     failed = Signal(str, str, str)
+    progress = Signal(str, str)
+    cancelled = Signal(str, str)
+    timing = Signal(str, object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -122,18 +170,46 @@ class BackgroundLoader(QObject):
         self._reader.moveToThread(self._thread)
         self._reader.finished.connect(self.finished)
         self._reader.failed.connect(self.failed)
+        self._reader.progress.connect(self.progress)
+        self._reader.cancelled.connect(self.cancelled)
+        self._reader.timing.connect(self.timing)
+        self._next_request = 0
+        self._queued: set[int] = set()
+        # Bound slots of this (GUI-thread) object: queued to the GUI
+        # thread, so _queued is only ever touched there.
+        self._reader.finished.connect(self._settle)
+        self._reader.failed.connect(self._settle)
+        self._reader.cancelled.connect(self._settle)
         self._thread.start()
+
+    @Slot()
+    def _settle(self) -> None:
+        # One request answered (they are answered in order, one thread).
+        if self._queued:
+            self._queued.discard(min(self._queued))
 
     def load(self, path: str, vendor: str, kwargs: dict | None = None) -> None:
         """Queue a read. Returns immediately; watch the signals."""
         self._reader._cancelled = False
+        self._next_request += 1
+        request = self._next_request
+        self._queued.add(request)
+        kwargs = dict(kwargs or {})
+        kwargs["_request_id"] = request
         # QueuedConnection by virtue of the thread affinity difference:
         # invoking through the event loop is what actually gets the work
         # onto the worker thread rather than running it here.
         QMetaObject.invokeMethod(
             self._reader, "read", Qt.ConnectionType.QueuedConnection,
-            Q_ARG(str, path), Q_ARG(str, vendor), Q_ARG("QVariant", kwargs or {}),
+            Q_ARG(str, path), Q_ARG(str, vendor), Q_ARG("QVariant", kwargs),
         )
+
+    def cancel_pending(self) -> None:
+        """Drop every read queued or running now: each stops at its next
+        stage and answers with :attr:`cancelled`. Reads queued after this
+        are not affected."""
+        with self._reader._lock:
+            self._reader._dropped |= set(self._queued)
 
     def cancel(self) -> None:
         self._reader.cancel()

@@ -80,6 +80,8 @@ def load(path: str, vendor: str | None = None, **kwargs) -> NMRSpectrum:
         raise ValueError(
             f"Unknown vendor {vendor!r}. Registered vendors: {registered_vendors()}."
         )
+    from ..core.load_progress import stage
+    stage(f"Reading {os.path.basename(os.path.normpath(path))}")
     return _REGISTRY[vendor].read(path, **kwargs)
 
 

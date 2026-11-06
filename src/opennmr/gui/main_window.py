@@ -698,6 +698,10 @@ class MainWindow(QMainWindow):
         # message clears only when the last one lands.
         self._loader = None
         self._pending_loads = 0
+        #: What the last read of each path reported (seconds, saved copy).
+        self._load_infos: dict[str, dict] = {}
+        #: The status-bar row shown while experiments open (created on first use).
+        self._load_progress = None
         #: Canonical paths whose background read has been dispatched
         #: but has not reached the session yet -- see _open_one.
         self._pending_load_paths: set[str] = set()
@@ -3542,9 +3546,110 @@ class MainWindow(QMainWindow):
             return False
         self._pending_loads += 1
         self._pending_load_paths.add(Session._path_key(path))
-        self.statusBar().showMessage(f"Loading {os.path.basename(path)}…")
+        self._show_load_progress(path, "Waiting to open" if self._pending_loads > 1
+                                 else "Opening")
         loader.load(path, vendor, self._initial_load_kwargs(path, vendor))
         return True
+
+    # ---- the progress row shown while experiments open ---------------------
+    def _load_progress_row(self):
+        """The status-bar row (stage, elapsed time, a busy bar, Cancel),
+        made on first use."""
+        if self._load_progress is None:
+            from PySide6.QtCore import QElapsedTimer
+            from PySide6.QtWidgets import QProgressBar
+            row = QWidget()
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            label = QLabel("")
+            bar = QProgressBar()
+            bar.setRange(0, 0)                       # busy: no honest percentage exists
+            bar.setFixedWidth(120)
+            bar.setMaximumHeight(14)
+            bar.setTextVisible(False)
+            cancel = QToolButton()
+            cancel.setText("Cancel")
+            cancel.setToolTip("Stop opening: the read stops after the step it is on.")
+            cancel.clicked.connect(self._on_cancel_loading)
+            for widget in (label, bar, cancel):
+                layout.addWidget(widget)
+            self.statusBar().addPermanentWidget(row)
+            row.hide()
+            clock = QElapsedTimer()
+            ticker = QTimer(self)
+            ticker.setInterval(500)
+            ticker.timeout.connect(self._refresh_load_progress)
+            self._load_progress = {"row": row, "label": label, "bar": bar, "cancel": cancel,
+                                   "clock": clock, "ticker": ticker, "name": "", "stage": ""}
+        return self._load_progress
+
+    def _show_load_progress(self, path: str, stage: str, cancellable: bool = True) -> None:
+        progress = self._load_progress_row()
+        name = os.path.basename(os.path.normpath(path))
+        if progress["name"] != name or not progress["row"].isVisible():
+            progress["clock"].start()
+        progress["name"], progress["stage"] = name, stage
+        progress["cancel"].setEnabled(cancellable)
+        progress["row"].show()
+        if not progress["ticker"].isActive():
+            progress["ticker"].start()
+        self._refresh_load_progress()
+
+    def _refresh_load_progress(self) -> None:
+        progress = self._load_progress
+        if progress is None:
+            return
+        seconds = progress["clock"].elapsed() / 1000.0 if progress["clock"].isValid() else 0.0
+        waiting = max(0, self._pending_loads - 1)
+        text = f"{progress['name']}: {progress['stage']}… {seconds:.0f} s"
+        if waiting:
+            text += f" (+{waiting} waiting)"
+        progress["label"].setText(text)
+
+    def _hide_load_progress(self) -> None:
+        progress = self._load_progress
+        if progress is None or self._pending_loads:
+            return
+        progress["ticker"].stop()
+        progress["row"].hide()
+
+    def _on_load_progress(self, path: str, text: str) -> None:
+        self._show_load_progress(path, text)
+
+    def _on_load_timing(self, path: str, info) -> None:
+        self._load_infos[Session._path_key(path)] = dict(info or {})
+
+    def _on_cancel_loading(self) -> None:
+        if self._loader is not None:
+            self._loader.cancel_pending()
+        progress = self._load_progress
+        if progress is not None:
+            progress["stage"] = "stopping after this step"
+            progress["cancel"].setEnabled(False)
+            self._refresh_load_progress()
+
+    def _on_background_load_cancelled(self, path: str, _vendor: str) -> None:
+        self._pending_loads = max(0, self._pending_loads - 1)
+        self._pending_load_paths.discard(Session._path_key(path))
+        self._hide_load_progress()
+        self.statusBar().showMessage(
+            f"Stopped opening {os.path.basename(os.path.normpath(path))}.", 6000)
+
+    def _load_time_message(self, path: str) -> str | None:
+        """"Opened X in 12 s …" from what the read reported, if it was slow
+        enough to be worth saying."""
+        info = self._load_infos.pop(Session._path_key(path), None)
+        if not info:
+            return None
+        name = os.path.basename(os.path.normpath(path))
+        if info.get("from_copy"):
+            first = info.get("first_seconds")
+            return (f"Opened {name} from its saved copy in {info['seconds']:.1f} s"
+                    + (f" (reading it took {first:.0f} s)" if first else "") + ".")
+        if info.get("kept"):
+            return (f"Read {name} in {info['seconds']:.0f} s. A copy is kept, so it opens "
+                    "quickly next time (Settings ▸ Data).")
+        return None
 
     def _background_loader(self):
         """The window's own loader thread, started on first use.
@@ -3559,6 +3664,9 @@ class MainWindow(QMainWindow):
                 self._loader = BackgroundLoader(self)
                 self._loader.finished.connect(self._on_background_load_finished)
                 self._loader.failed.connect(self._on_background_load_failed)
+                self._loader.progress.connect(self._on_load_progress)
+                self._loader.cancelled.connect(self._on_background_load_cancelled)
+                self._loader.timing.connect(self._on_load_timing)
             except Exception:  # noqa: BLE001 -- fall back to loading synchronously
                 self._loader = None
         return self._loader
@@ -3568,13 +3676,29 @@ class MainWindow(QMainWindow):
         self._pending_load_paths.discard(Session._path_key(path))
         if not self._pending_loads:
             self.statusBar().clearMessage()
-        self._load(path, vendor, preloaded=spectrum)
+        # The rest is on this thread and holds the window (drawing a large
+        # contour takes seconds): say so before it starts, not after.
+        self._pending_loads += 1                 # keeps the row up meanwhile
+        self._show_load_progress(path, "Drawing", cancellable=False)
+        # repaint() paints now, without running the event loop -- which
+        # could start another finished load inside this one.
+        self._load_progress["row"].repaint()
+        try:
+            self._load(path, vendor, preloaded=spectrum)
+        finally:
+            self._pending_loads -= 1
+            self._hide_load_progress()
+        message = self._load_time_message(path)
+        if message:
+            self.statusBar().showMessage(message, 10000)
 
     def _on_background_load_failed(self, path: str, vendor: str, message: str) -> None:
         self._pending_loads = max(0, self._pending_loads - 1)
         self._pending_load_paths.discard(Session._path_key(path))
+        self._load_infos.pop(Session._path_key(path), None)
         if not self._pending_loads:
             self.statusBar().clearMessage()
+        self._hide_load_progress()
         QMessageBox.critical(self, "Failed to load spectrum", message)
 
     #: Saved-processing keys that map onto a reader parameter, so the
@@ -7062,6 +7186,81 @@ class MainWindow(QMainWindow):
     #: is unreadable; above 28 the side panel cannot fit a form row.
     UI_FONT_SIZE_RANGE = (7, 28)
 
+    #: Default size limit for the saved copies of slow-to-open experiments.
+    LOAD_CACHE_DEFAULT_GB = 5.0
+
+    def _build_load_cache_settings(self, form: QFormLayout) -> None:
+        """Settings ▸ Data: keep copies of slow-to-open experiments
+        (:mod:`opennmr.io.load_cache`), how much room they may take, and a
+        way to clear them."""
+        settings = self._ui_settings
+        self.load_cache_checkbox = QCheckBox(
+            "Keep a copy of experiments that are slow to open, so they open quickly next time")
+        self.load_cache_checkbox.setToolTip(
+            "An experiment that took 2 s or more to read and process is kept, as read, in "
+            "this computer's own cache folder (never beside the data, so nothing is "
+            "uploaded to OneDrive). Opening it again the same way reads the copy instead.\n\n"
+            "The copy is used only if nothing it depends on has changed: every file of the "
+            "experiment (name, size, time), every setting it was read with, and the openNMR "
+            "version. Your processing in openNMR is applied on top as usual.")
+        self.load_cache_checkbox.setChecked(bool(settings.get("load_cache_enabled", True)))
+        self.load_cache_checkbox.toggled.connect(self._on_load_cache_settings_changed)
+        form.addRow("", self.load_cache_checkbox)
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        self.load_cache_size_spin = QDoubleSpinBox()
+        self.load_cache_size_spin.setRange(0.5, 2000.0)
+        self.load_cache_size_spin.setDecimals(1)
+        self.load_cache_size_spin.setSuffix(" GB")
+        self.load_cache_size_spin.setValue(float(settings.get("load_cache_max_gb",
+                                                              self.LOAD_CACHE_DEFAULT_GB)))
+        self.load_cache_size_spin.setToolTip(
+            "Most room the copies may take; the least recently opened go first. A large 2D "
+            "can take 1–2 GB.")
+        self.load_cache_size_spin.editingFinished.connect(self._on_load_cache_settings_changed)
+        row_layout.addWidget(self.load_cache_size_spin)
+        self.load_cache_clear_button = QPushButton("Clear")
+        self.load_cache_clear_button.clicked.connect(self._on_clear_load_cache)
+        row_layout.addWidget(self.load_cache_clear_button, 1)
+        form.addRow("Copies may use:", row)
+        self.load_cache_location_label = QLabel("")
+        self.load_cache_location_label.setWordWrap(True)
+        self.load_cache_location_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addRow("", self.load_cache_location_label)
+        self._apply_load_cache_settings()
+
+    def _apply_load_cache_settings(self) -> None:
+        from ..io import load_cache
+        load_cache.configure(enabled=self.load_cache_checkbox.isChecked(),
+                             max_bytes=int(self.load_cache_size_spin.value() * 1024 ** 3))
+        self._refresh_load_cache_label()
+
+    def _refresh_load_cache_label(self) -> None:
+        from ..io import load_cache
+        used = load_cache.total_bytes()
+        self.load_cache_location_label.setText(
+            f"{used / 1024 ** 3:.2f} GB in {load_cache.cache_dir()}")
+        self.load_cache_clear_button.setText(f"Clear ({used / 1024 ** 3:.2f} GB)")
+        self.load_cache_clear_button.setEnabled(used > 0)
+
+    def _on_load_cache_settings_changed(self, *_args) -> None:
+        self._ui_settings["load_cache_enabled"] = self.load_cache_checkbox.isChecked()
+        self._ui_settings["load_cache_max_gb"] = float(self.load_cache_size_spin.value())
+        self._save_ui_settings()
+        self._apply_load_cache_settings()
+        from ..io import load_cache
+        load_cache.prune(int(self.load_cache_size_spin.value() * 1024 ** 3))
+        self._refresh_load_cache_label()
+
+    def _on_clear_load_cache(self) -> None:
+        from ..io import load_cache
+        freed = load_cache.clear()
+        self._refresh_load_cache_label()
+        self.statusBar().showMessage(f"Removed the saved copies ({freed / 1024 ** 3:.2f} GB).",
+                                     6000)
+
     def _load_ui_settings(self) -> dict:
         try:
             with open(self._UI_SETTINGS_PATH, encoding="utf-8") as handle:
@@ -7351,6 +7550,7 @@ class MainWindow(QMainWindow):
         self.topspin_processing_checkbox.setChecked(self._topspin_processing_on_open())
         self.topspin_processing_checkbox.toggled.connect(self._on_topspin_processing_toggled)
         data_form.addRow("", self.topspin_processing_checkbox)
+        self._build_load_cache_settings(data_form)
         layout.addWidget(CollapsibleSection("Data", content=data))
         if data_directory.default_data_directory() and \
                 self.data_folder_browse_at_start_checkbox.isChecked():

@@ -305,3 +305,45 @@ def test_gui_curve_settings_are_kept(qapp, tmp_path):  # noqa: F811
     assert other.curve_x_combo.currentData() == "typed"
     assert other.curve_typed_edit.text() == "0 1 2"
     assert other.curve_typed_edit.isVisibleTo(other)
+
+
+# ---- a large step multiplier (2026-11-06: "overflow encountered in power") -------------
+
+import warnings  # noqa: E402
+
+from opennmr.processing.relaxation import start_step_values  # noqa: E402
+
+
+def test_overflowing_multiplier_is_refused_without_a_warning():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                 # numpy's RuntimeWarning would fail
+        with pytest.raises(ValueError, match="larger than any number"):
+            start_step_values(0.0, 1.0, 1000.0, 200)
+        with pytest.raises(ValueError, match="value 104 of 200"):
+            start_step_values(0.0, 1.0, 1000.0, 200)  # 1000**103 / 999 ~ 1e306 is the last
+        assert np.isfinite(start_step_values(0.0, 1.0, 1000.0, 100)).all()
+
+
+def test_a_large_multiplier_with_stop_is_fine():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        values = nmr.stepped_values(1, step=1, multiplier=1000, stop=1e7)
+    assert np.allclose(values, [1, 2, 1002, 1001002])
+
+
+def test_a_series_that_never_reaches_stop_is_refused():
+    with pytest.raises(ValueError, match="do not reach"):
+        nmr.stepped_values(0, step=1, multiplier=0.5, stop=5)    # converges to 2
+
+
+def test_gui_curve_with_an_overflowing_multiplier(qapp, tmp_path, _no_modal_dialogs):  # noqa: F811
+    window = MainWindow()
+    panel = window.simpson_panel
+    panel.add_paths([sf._write(tmp_path / "long.fid", "FID", np.ones(200, dtype=complex),
+                               sw=10000.0)])
+    panel.curve_x_combo.setCurrentIndex(panel.curve_x_combo.findData("steps"))
+    panel.curve_multiplier_spin.setValue(1000.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        panel.plot_curve_button.click()
+    assert _no_modal_dialogs and "larger than any number" in _no_modal_dialogs[-1][1]

@@ -974,12 +974,28 @@ def _max_abs_bin(data, coords, n_bins, axis):
     bin_size = n // n_bins
     trimmed_n = bin_size * n_bins
     if trimmed_n != n:
-        data = np.take(data, np.arange(trimmed_n), axis=axis)
+        # A slice, not np.take with an index list: the same values, but
+        # take's fancy indexing copied the whole array element by element
+        # (2.2 s of a 512 x 131072 EXSY's 20 s load, 2026-11-06).
+        index = [slice(None)] * data.ndim
+        index[axis] = slice(0, trimmed_n)
+        data = data[tuple(index)]
     new_shape = data.shape[:axis] + (n_bins, bin_size) + data.shape[axis + 1:]
     reshaped = data.reshape(new_shape)
-    peak_index = np.argmax(np.abs(reshaped), axis=axis + 1, keepdims=True)
-    reduced = np.take_along_axis(reshaped, peak_index, axis=axis + 1)
-    reduced = np.squeeze(reduced, axis=axis + 1)
+    if np.iscomplexobj(reshaped):
+        peak_index = np.argmax(np.abs(reshaped), axis=axis + 1, keepdims=True)
+        reduced = np.take_along_axis(reshaped, peak_index, axis=axis + 1)
+        reduced = np.squeeze(reduced, axis=axis + 1)
+    else:
+        # The signed value of largest magnitude is the bin's maximum or its
+        # minimum, whichever is further from zero: two fast reductions
+        # instead of abs (a full-size copy), argmax and take_along_axis --
+        # about 3x faster on a 512 x 131072 EXSY (2026-11-06). The one
+        # difference: a bin whose largest and smallest are exactly equal
+        # and opposite now keeps the positive one, not whichever came first.
+        high = reshaped.max(axis=axis + 1)
+        low = reshaped.min(axis=axis + 1)
+        reduced = np.where(high >= -low, high, low)
     reduced_coords = coords[:trimmed_n].reshape(n_bins, bin_size)[:, bin_size // 2]
     return reduced, reduced_coords
 

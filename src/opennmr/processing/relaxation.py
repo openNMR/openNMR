@@ -2362,4 +2362,15 @@ def start_step_values(start: float, step: float, multiplier: float, n: int) -> n
     k = np.arange(int(n), dtype=float)
     if abs(multiplier - 1.0) < 1e-12:
         return start + step * k
-    return start + step * (multiplier ** k - 1.0) / (multiplier - 1.0)
+    # A large multiplier over many values passes the largest float
+    # (~1.8e308): 1000**199 for 200 points. That is refused with the reason,
+    # not returned as inf (with numpy's overflow warning on the console).
+    with np.errstate(over="ignore", invalid="ignore"):
+        values = start + step * (multiplier ** k - 1.0) / (multiplier - 1.0)
+    if not np.all(np.isfinite(values)):
+        first = int(np.argmax(~np.isfinite(values)))
+        raise ValueError(
+            f"With a step multiplier of {multiplier:g}, value {first + 1} of {int(n)} is larger "
+            "than any number can hold (about 1.8e308). Use fewer values or a smaller "
+            "multiplier.")
+    return values
