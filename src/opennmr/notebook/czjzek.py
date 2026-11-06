@@ -1161,7 +1161,9 @@ def plot_czjzek_distribution(sites, spectrum=None, layout="right", figure=None, 
     ["labels"], ["xlabel"]}`` -- data and fit (drawn as the Fit view draws
     them, with ``component_style``), or ``y`` alone for a simulation.
     ``layout`` : ``"right"`` (heat map, then the spectrum in a column to
-    its right) or ``"top"`` (the spectrum in a row above it).
+    its right), ``"top"`` (the spectrum in a row above it) or
+    ``"spectrum"`` (the spectrum alone, no map -- ``spectrum`` is then
+    required, and the map is not computed at all).
     ``figure`` : draw into this figure (cleared); otherwise a new one.
     ``show_mean`` : mark ⟨C_Q⟩ and ⟨η_Q⟩ of the (mixture) distribution.
     ``site_contours`` : with several sites, outline each one's own
@@ -1170,18 +1172,30 @@ def plot_czjzek_distribution(sites, spectrum=None, layout="right", figure=None, 
     names it; without a spectrum, a legend does).
 
     Returns the figure; its axes are ``figure.czjzek_axes`` =
-    ``{"map", "spectrum", "colorbar"}``.
+    ``{"map", "spectrum", "colorbar"}`` (``"map"`` and ``"colorbar"``
+    are ``None`` for ``layout="spectrum"``).
     """
     import matplotlib.pyplot as plt
-    from ..plotting.style import apply_spine_style, apply_tick_style
-    from .fit_display import draw_fit_components
+    from ..plotting.style import apply_tick_style
 
-    if layout not in ("right", "top"):
-        raise ValueError("layout must be 'right' or 'top'.")
+    if layout not in ("right", "top", "spectrum"):
+        raise ValueError("layout must be 'right', 'top' or 'spectrum'.")
+    if layout == "spectrum" and spectrum is None:
+        raise ValueError("layout='spectrum' draws the spectrum alone: pass spectrum=.")
     if figure is None:
-        figure = plt.figure(figsize=(7.5, 3.6) if layout == "right" else (4.5, 6.5))
+        figure = plt.figure(figsize={"right": (7.5, 3.6), "top": (4.5, 6.5),
+                                     "spectrum": (6.0, 3.6)}[layout])
     else:
         figure.clear()
+    if layout == "spectrum":
+        ax_spec = figure.add_subplot(111)
+        _draw_czjzek_spectrum_panel(ax_spec, spectrum, fontsize, component_style, xlabel)
+        figure.czjzek_axes = {"map": None, "spectrum": ax_spec, "colorbar": None}
+        try:
+            figure.tight_layout()
+        except Exception:  # noqa: BLE001 -- layout is cosmetic; never lose the figure over it
+            pass
+        return figure
     cq_edges, eta_edges, density = czjzek_mixture_map(sites, cq_max_MHz, n_cq, n_eta)
     has_spec = spectrum is not None
     # The colour bar gets its own grid slot (not figure.colorbar(ax=...)),
@@ -1265,28 +1279,37 @@ def plot_czjzek_distribution(sites, spectrum=None, layout="right", figure=None, 
             legend.set_zorder(10)
 
     if has_spec:
-        x = np.asarray(spectrum["x"], dtype=float)
-        y = np.asarray(spectrum["y"], dtype=float)
-        if spectrum.get("y_fit") is not None:
-            draw_fit_components(ax_spec, x, y, np.asarray(spectrum["y_fit"], dtype=float),
-                                components=spectrum.get("components"),
-                                labels=spectrum.get("labels"), style=component_style,
-                                auto_hide_single=True)
-            ax_spec.legend(frameon=False, fontsize=fontsize * 0.75)
-        else:
-            ax_spec.plot(x, y, color=(component_style or {}).get("data_colour", "black"),
-                         linewidth=1.5)
-        ax_spec.set_xlim(float(np.max(x)), float(np.min(x)))
-        ax_spec.set_yticks([])
-        ax_spec.set_xlabel(_italic_label(xlabel or spectrum.get("xlabel") or "Shift (ppm)"), fontsize=fontsize)
-        apply_spine_style(ax_spec, top=False, right=False, bottom=True, left=False)
-        apply_tick_style(ax_spec, axis="x", labelsize=fontsize * 0.9)
+        _draw_czjzek_spectrum_panel(ax_spec, spectrum, fontsize, component_style, xlabel)
     figure.czjzek_axes = {"map": ax_map, "spectrum": ax_spec, "colorbar": cbar_ax}
     try:
         figure.tight_layout()
     except Exception:  # noqa: BLE001 -- layout is cosmetic; never lose the figure over it
         pass
     return figure
+
+
+def _draw_czjzek_spectrum_panel(ax_spec, spectrum, fontsize, component_style, xlabel) -> None:
+    """The spectrum (or data, fit and sites) panel of
+    :func:`plot_czjzek_distribution`, beside the map or on its own."""
+    from ..plotting.style import apply_spine_style, apply_tick_style
+    from .fit_display import draw_fit_components
+    x = np.asarray(spectrum["x"], dtype=float)
+    y = np.asarray(spectrum["y"], dtype=float)
+    if spectrum.get("y_fit") is not None:
+        draw_fit_components(ax_spec, x, y, np.asarray(spectrum["y_fit"], dtype=float),
+                            components=spectrum.get("components"),
+                            labels=spectrum.get("labels"), style=component_style,
+                            auto_hide_single=True)
+        ax_spec.legend(frameon=False, fontsize=fontsize * 0.75)
+    else:
+        ax_spec.plot(x, y, color=(component_style or {}).get("data_colour", "black"),
+                     linewidth=1.5)
+    ax_spec.set_xlim(float(np.max(x)), float(np.min(x)))
+    ax_spec.set_yticks([])
+    ax_spec.set_xlabel(_italic_label(xlabel or spectrum.get("xlabel") or "Shift (ppm)"),
+                       fontsize=fontsize)
+    apply_spine_style(ax_spec, top=False, right=False, bottom=True, left=False)
+    apply_tick_style(ax_spec, axis="x", labelsize=fontsize * 0.9)
 
 
 def plot_czjzek_fit(results, popt, pcov, fit_info, layout="right", site=None, figure=None,

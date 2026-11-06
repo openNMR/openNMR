@@ -9390,6 +9390,99 @@ class MplCanvas(QWidget):
         self._fit_y_to_data(self.ax, y_range=(float(np.nanmin(y)), float(np.nanmax(y))))
         self.canvas.draw_idle()
 
+    def _intensity_view_axes(self):
+        """The axes whose y is the intensity of one 1D trace: the
+        Processing preview's spectrum panel when that is up, else a
+        plain 1D spectrum. ``None`` for anything else (a contour's y is
+        a shift, a Compare has its own stacking)."""
+        spec_ax = self._processing_preview_spec_ax
+        if spec_ax is not None and spec_ax.lines:
+            return spec_ax
+        if (self._current_1d_spectrum is not None and self._contour_spectrum is None
+                and self._compare_axes is None and self.ax is not None and self.ax.lines):
+            return self.ax
+        return None
+
+    @staticmethod
+    def _intensity_view_stats(ax):
+        """``low``/``high`` of the trace (``ax.lines[0]``, at full
+        resolution) inside the visible x range, its baseline ``level``
+        (the median -- most points of a spectrum are baseline) and its
+        ``reach``, the furthest any point gets from that level."""
+        line = ax.lines[0]
+        full = getattr(line, "_opennmr_full_res", None)
+        x = np.asarray(full[0] if full is not None else line.get_xdata(), dtype=float)
+        y = np.asarray(full[1] if full is not None else line.get_ydata(), dtype=float)
+        if x.shape != y.shape or y.ndim != 1 or y.size < 2:
+            return None
+        lo, hi = sorted(ax.get_xlim())
+        keep = (x >= lo) & (x <= hi) & np.isfinite(y)
+        if np.count_nonzero(keep) < 2:
+            keep = np.isfinite(y)
+            if np.count_nonzero(keep) < 2:
+                return None
+        y = y[keep]
+        level = float(np.median(y))
+        return {"low": float(np.min(y)), "high": float(np.max(y)), "level": level,
+                "reach": float(np.max(np.abs(y - level)))}
+
+    def capture_intensity_view(self):
+        """What :meth:`follow_intensity_view` needs to carry the y view
+        across a change of the trace's *values* (a baseline correction):
+        the view and the trace as they are now. ``None`` when there is
+        no 1D intensity axes on show."""
+        ax = self._intensity_view_axes()
+        if ax is None:
+            return None
+        stats = self._intensity_view_stats(ax)
+        if stats is None:
+            return None
+        v0, v1 = sorted(ax.get_ylim())
+        stats["view"] = (float(v0), float(v1))
+        # Everything visible was on screen: the view showed the whole
+        # trace, rather than a deliberate intensity zoom.
+        stats["whole"] = bool(v0 <= stats["low"] and v1 >= stats["high"])
+        return stats
+
+    def follow_intensity_view(self, captured) -> bool:
+        """Re-place the y view after the trace's values changed under it.
+
+        A baseline correction moves the whole trace up or down (and,
+        since every trace is drawn scaled to its own largest point, can
+        rescale it too), while a kept y view stays where it was -- so
+        the baseline landed halfway up the plot with the peaks cut off.
+
+        * The whole trace was on show: refit, so the whole corrected
+          trace is on show, with the usual gaps.
+        * The user had zoomed into the intensity: keep that zoom on the
+          same part of the trace -- the baseline stays at the same
+          height on screen and the tallest visible feature the same size
+          -- rather than on the same raw numbers.
+
+        ``captured`` comes from :meth:`capture_intensity_view` before the
+        change. Computed from it alone, so calling this twice for the
+        same data gives the same view. Returns whether anything moved."""
+        if not captured:
+            return False
+        ax = self._intensity_view_axes()
+        if ax is None:
+            return False
+        stats = self._intensity_view_stats(ax)
+        if stats is None:
+            return False
+        if captured.get("whole", True):
+            self._fit_y_to_data(ax, y_range=(stats["low"], stats["high"]))
+        else:
+            old_reach, new_reach = captured["reach"], stats["reach"]
+            scale = new_reach / old_reach if old_reach > 0 and new_reach > 0 else 1.0
+            if not np.isfinite(scale):
+                scale = 1.0
+            v0, v1 = captured["view"]
+            ax.set_ylim(stats["level"] + (v0 - captured["level"]) * scale,
+                        stats["level"] + (v1 - captured["level"]) * scale)
+        self.canvas.draw_idle()
+        return True
+
     @staticmethod
     def _clip_sideways_only(ax, line) -> None:
         """Clip ``line`` to ``ax``'s own x-range but not its height."""

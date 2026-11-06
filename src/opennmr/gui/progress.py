@@ -14,7 +14,7 @@ import os
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QFontDatabase
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout,
 )
 
@@ -251,3 +251,70 @@ class SimulationHistoryDialog(QDialog):
     def selected(self):
         item = self.list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+
+class ClearHistoryDialog(QDialog):
+    """Confirm File ▸ Clear All History….
+
+    A plain QDialog rather than a QMessageBox: the QMessageBox this
+    replaces (warning icon, ``setCheckBox``, a DestructiveRole button)
+    crashed the Windows build natively inside its own ``exec()`` --
+    "Windows fatal exception: access violation", with nothing of ours
+    on the stack above it. Every widget here is parented to the dialog
+    at construction, so nothing changes owner while it is open, and
+    there is no ``setCheckBox`` hand-over at all.
+
+    ``files``: the openNMR files in the experiment folder that would be
+    deleted, or ``None`` for a spectrum with no folder of its own (only
+    its in-memory history goes; no "keep notes" choice then)."""
+
+    def __init__(self, parent=None, label: str = "", files: list[str] | None = None) -> None:
+        super().__init__(parent)
+        on_disk = files is not None
+        self.setWindowTitle("Clear all history")
+        self.setMinimumWidth(480)
+        layout = QVBoxLayout(self)
+        title = QLabel(self)
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        title.setText(f"Clear all history of {label}?" if on_disk
+                      else f"Clear the history of {label}?")
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        if on_disk:
+            listing = "\n".join("  " + os.path.basename(path) for path in files) \
+                or "  (none written yet)"
+            text = ("This permanently deletes openNMR's files in the experiment folder:\n"
+                    f"{listing}\n\n"
+                    "Every save point, the processing log, and all processing, referencing, fits "
+                    "and analysis kept for it are lost, and it is re-opened as its data files "
+                    "alone say. The data files themselves are not touched.\n\n"
+                    "This cannot be undone (Undo and Load Progress cannot bring it back).")
+        else:
+            text = ("It has no folder of its own, so this forgets its in-memory log, save points "
+                    "and undo steps. Its data stay as they are now. This cannot be undone.")
+        body = QLabel(self)
+        body.setTextFormat(Qt.TextFormat.PlainText)
+        body.setText(text)
+        body.setWordWrap(True)
+        layout.addWidget(body)
+        self.keep_notes_check = QCheckBox("Keep its title and notes", self)
+        self.keep_notes_check.setChecked(True)
+        self.keep_notes_check.setVisible(on_disk)
+        layout.addWidget(self.keep_notes_check)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, self)
+        self.clear_button = buttons.addButton("Clear All History",
+                                              QDialogButtonBox.ButtonRole.AcceptRole)
+        # Cancel is the safe default: Enter must never delete anything.
+        self.clear_button.setAutoDefault(False)
+        cancel = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        cancel.setDefault(True)
+        cancel.setFocus()
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def keep_notes(self) -> bool:
+        return self.keep_notes_check.isChecked()

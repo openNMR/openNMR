@@ -44,6 +44,13 @@ SIM_GRID_DEFAULT = (12, 4)
 
 _LAYOUTS = (("Spectrum to the right", "right"), ("Spectrum above", "top"))
 
+#: What Simulate ▸ Czjzek draws. The spectrum alone is the default
+#: (explicit user request, 2026-11-06: the map is liked, but not every
+#: user wants it); the map is one choice away.
+_SIM_LAYOUTS = (("Spectrum only", "spectrum"),
+                ("Spectrum with the map, spectrum to the right", "right"),
+                ("Spectrum with the map, spectrum above", "top"))
+
 #: The two distribution models (explicit user request: a central C_Q).
 _MODELS = (("Czjzek (random EFG centred on zero)", "czjzek"),
            ("Extended Czjzek (mean EFG (C_Q0, η_Q0) + random part)", "extended"))
@@ -683,8 +690,8 @@ class CzjzekSimPanel(QWidget):
         v = QVBoxLayout(self)
         blurb = QLabel(
             "The powder spectrum of a site whose quadrupolar coupling is spread over a Czjzek "
-            "distribution (glasses, disordered solids), with the distribution of environments "
-            "(C_Q along x, η_Q along y) drawn as a heat map beside it.")
+            "distribution (glasses, disordered solids). Choose 'Show' to draw the distribution "
+            "of environments (C_Q along x, η_Q along y) as a heat map beside it.")
         blurb.setWordWrap(True)
         v.addWidget(blurb)
         form = QFormLayout()
@@ -777,9 +784,12 @@ class CzjzekSimPanel(QWidget):
             "otherwise every cell is a full simulation, timed before it starts.")
         form.addRow("Grid:", grid)
         self.layout_combo = QComboBox()
-        for text, data in _LAYOUTS:
+        for text, data in _SIM_LAYOUTS:
             self.layout_combo.addItem(text, data)
-        form.addRow("Map layout:", self.layout_combo)
+        self.layout_combo.setToolTip(
+            "The simulated spectrum alone (the default), or with the (C_Q, η_Q) distribution "
+            "map beside or below it.")
+        form.addRow("Show:", self.layout_combo)
         v.addLayout(form)
         buttons = QHBoxLayout()
         self.simulate_button = QPushButton("Simulate")
@@ -943,6 +953,7 @@ class CzjzekSimPanel(QWidget):
         except Exception:  # noqa: BLE001 -- a label must not sink a plot
             xlabel = None
         layout = self.layout_combo.currentData()
+        self._last_layout = layout
 
         def draw(figure):
             look = self._style() or {}
@@ -953,6 +964,13 @@ class CzjzekSimPanel(QWidget):
                 fontsize=float(look.get("labelsize") or 12.0))
         self._draw(draw)
         return sim
+
+    def plot_kind(self) -> str:
+        """The Plot Style kind of the last drawing: a spectrum alone is
+        a spectrum plot ("compare", as the other simulated overlays); a
+        map is a "2d" plot (its colour scale)."""
+        layout = getattr(self, "_last_layout", None) or self.layout_combo.currentData()
+        return "compare" if layout == "spectrum" else "2d"
 
     def larmor_mhz(self) -> float | None:
         """The spectrometer frequency the simulation uses (MHz), for

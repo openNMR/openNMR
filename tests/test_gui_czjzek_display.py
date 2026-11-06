@@ -317,6 +317,8 @@ def test_czjzek_send_and_simulate(window):
                       "larmor_MHz": 130.3, "mas_Hz": 0.0, "transitions": "ct", "order": "second",
                       "ppm_range": (-150.0, 100.0)})
     sim.grid_cq_spin.setValue(32)
+    # The spectrum alone is the default now; ask for the map.
+    sim.layout_combo.setCurrentIndex(sim.layout_combo.findData("right"))
     result = sim.simulate()
     assert result["sigma"] == 2.5
     assert "⟨C_Q⟩" in sim.results_label.text()

@@ -638,6 +638,9 @@ class MainWindow(QMainWindow):
         self._live_reprocess_timer.setSingleShot(True)
         self._live_reprocess_timer.timeout.connect(self._run_debounced_multi_row_reprocess)
         self._live_reprocess_pending_index: int | None = None
+        # The y views to carry across a baseline correction that has not
+        # reached the screen yet (see _capture_baseline_view).
+        self._baseline_view_follow: dict | None = None
         # Same debounce reasoning as _live_reprocess_timer just above,
         # for a different job: writing this experiment's own sidecar
         # files (see io.persistence) to disk after any live control/
@@ -1478,7 +1481,13 @@ class MainWindow(QMainWindow):
             "opennmr_log.txt, opennmr_metadata.json, opennmr_processing.json and its save "
             "points) and re-open it without any earlier processing. Its data files are not "
             "touched. Cannot be undone.")
-        self.clear_history_action.triggered.connect(self._on_clear_history_clicked)
+        # Opened once the menu has fully closed, not from inside the
+        # menu's own event dispatch: the confirmation is modal, and
+        # starting a modal loop mid-dispatch is one of the two suspects
+        # for the native crash described in ClearHistoryDialog (the
+        # other, the QMessageBox itself, is gone).
+        self.clear_history_action.triggered.connect(
+            lambda *_: QTimer.singleShot(0, self._on_clear_history_clicked))
         file_menu.addAction(self.clear_history_action)
         self.simulation_history_action = QAction("Simulation &History…", self)
         self.simulation_history_action.setToolTip(
@@ -12381,36 +12390,18 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         on_disk = self._history_on_disk(spectrum)
         files = io_history.experiment_files(spectrum.metadata.source_path) if on_disk else []
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Clear all history")
-        if on_disk:
-            listing = "\n".join("  " + os.path.basename(path) for path in files) or "  (none written yet)"
-            box.setText(f"Clear all history of {self.session.label(index)}?")
-            box.setInformativeText(
-                "This permanently deletes openNMR's files in the experiment folder:\n"
-                f"{listing}\n\n"
-                "Every save point, the processing log, and all processing, referencing, fits "
-                "and analysis kept for it are lost, and it is re-opened as its data files "
-                "alone say. The data files themselves are not touched.\n\n"
-                "This cannot be undone (Undo and Load Progress cannot bring it back).")
-        else:
-            box.setText(f"Clear the history of {self.session.label(index)}?")
-            box.setInformativeText(
-                "It has no folder of its own, so this forgets its in-memory log, save points "
-                "and undo steps. Its data stay as they are now. This cannot be undone.")
-        keep_notes = QCheckBox("Keep its title and notes")
-        keep_notes.setChecked(True)
-        if on_disk:
-            box.setCheckBox(keep_notes)
-        box.setStandardButtons(QMessageBox.StandardButton.Cancel)
-        clear_button = box.addButton("Clear All History", QMessageBox.ButtonRole.DestructiveRole)
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        box.exec()
-        if box.clickedButton() is not clear_button:
-            return
+        # A plain dialog, not a QMessageBox: that one crashed the Windows
+        # build natively inside exec() (see ClearHistoryDialog).
+        dialog = progress_dialogs.ClearHistoryDialog(
+            self, label=self.session.label(index), files=files if on_disk else None)
         try:
-            deleted = self._clear_all_history(index, keep_notes=keep_notes.isChecked())
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            keep_notes = dialog.keep_notes()
+        finally:
+            dialog.deleteLater()
+        try:
+            deleted = self._clear_all_history(index, keep_notes=keep_notes)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Couldn't clear the history", str(exc))
             return
@@ -12635,6 +12626,8 @@ class MainWindow(QMainWindow):
                     self._refresh_processing_preview_if_active(preserve_view=True)
             elif on_processing_preview:
                 self._refresh_processing_preview_phase_only()
+        # The baseline correction this settle applied is on screen now.
+        self._follow_baseline_view(index)
 
     #: A contour rebuild at or under this (seconds) is cheap enough to
     #: run *during* a phase drag, giving live feedback; anything slower
@@ -12706,6 +12699,11 @@ class MainWindow(QMainWindow):
         if spectrum.ndim != 2:
             return
         self._redraw_2d_preserving_view(spectrum)
+        # Finished here only when no recompute is still to come: with
+        # one pending, the corrected data are not in yet.
+        self._follow_baseline_view(index, finish=not (
+            self._live_reprocess_timer.isActive()
+            or self._live_reprocess_pending_index == index))
 
     def _redraw_2d_preserving_view(self, spectrum) -> None:
         """Rebuild ``self.canvas``'s contour for ``spectrum`` without
@@ -14674,12 +14672,20 @@ class MainWindow(QMainWindow):
                 "sinusoidal": f"{int(raw.get('baseline_harmonics', 1) or 1)} harmonic(s)"}[method]
         box.show_automatic(auto["params"], auto["exact"], what)
 
-    def _after_manual_baseline_change(self, index, spectrum) -> None:
+    def _after_manual_baseline_change(self, index, spectrum, follow_view: bool = False) -> None:
+        """``follow_view``: a one-off fit, whose result the view should
+        follow (see :meth:`_capture_baseline_view`). Not for stepping a
+        coefficient by hand -- there the trace moving against a fixed
+        view is exactly what is being watched."""
         self._schedule_sidecar_save(index)
         if self.baseline_correct_button.isChecked():
+            if follow_view:
+                self._capture_baseline_view(index)
             self._apply_phase_preview()
         self._warn_about_baseline_choice(spectrum)
         self._refresh_baseline_preview()
+        if follow_view:
+            self._follow_baseline_view_now()
 
     def _on_manual_baseline_regions_edited(self, regions) -> None:
         context = self._manual_baseline_context()
@@ -14857,7 +14863,7 @@ class MainWindow(QMainWindow):
             f"(the noise level, if the regions hold only baseline).")
         self.processing_status_label.setText(
             "Manual baseline: " + nb_manual_baseline.describe_manual_baseline(model, values, 4))
-        self._after_manual_baseline_change(index, spectrum)
+        self._after_manual_baseline_change(index, spectrum, follow_view=True)
 
     def _restore_manual_baseline_controls(self, spectrum) -> None:
         """Put this spectrum's manual-baseline state into the box (on
@@ -15283,9 +15289,59 @@ class MainWindow(QMainWindow):
         spectrum.metadata.raw["baseline_points"] = points if points > 0 else None
         self._schedule_sidecar_save(index)
         if self.baseline_correct_button.isChecked():
+            self._capture_baseline_view(index)
             self._apply_phase_preview()
         self._warn_about_baseline_choice(spectrum)
         self._refresh_baseline_preview()
+        self._follow_baseline_view_now()
+
+    def _capture_baseline_view(self, index: int) -> None:
+        """Note the y views now, before a baseline correction changes
+        the trace under them, so they can follow it once it is drawn
+        (:meth:`MplCanvas.follow_intensity_view`). Otherwise the kept
+        view stays on the old numbers: the corrected spectrum then sat
+        with its baseline halfway up the plot and its peaks cut off.
+
+        A second change before the first has been drawn keeps the first
+        capture -- that is the view the user was looking at."""
+        pending = self._baseline_view_follow
+        if pending is not None and pending["index"] == index:
+            return
+        self._baseline_view_follow = {
+            "index": index,
+            "canvas": self.canvas.capture_intensity_view(),
+            "preview": self.processing_preview_canvas.capture_intensity_view(),
+        }
+
+    def _follow_baseline_view(self, index: int | None = None, finish: bool = True) -> None:
+        """Carry the views :meth:`_capture_baseline_view` noted onto the
+        corrected trace now on show. ``finish``: the correction has
+        reached the screen, so forget the capture. Idempotent for the
+        same data, so a view refreshed early (before a deferred
+        recompute lands) is simply re-placed when it does."""
+        pending = self._baseline_view_follow
+        if pending is None:
+            return
+        if pending["index"] != self._selected_index():
+            self._baseline_view_follow = None
+            return
+        if index is not None and index != pending["index"]:
+            return
+        self.canvas.follow_intensity_view(pending["canvas"])
+        self.processing_preview_canvas.follow_intensity_view(pending["preview"])
+        if finish:
+            self._baseline_view_follow = None
+
+    def _follow_baseline_view_now(self) -> None:
+        """After a baseline control changed: a 1D is redrawn there and
+        then, so follow and finish; a 2D or pseudo-2D applies the
+        correction in a debounced recompute, so whatever is redrawn now
+        follows, and the settle (:meth:`_run_debounced_multi_row_reprocess`
+        / :meth:`_run_debounced_canvas_2d_refresh`) finishes it."""
+        deferred = (self._phase_mode in ("pseudo2d", "2d")
+                    and (self._live_reprocess_timer.isActive()
+                         or self._canvas_2d_refresh_timer.isActive()))
+        self._follow_baseline_view(finish=not deferred)
 
     def _on_baseline_correct_toggled(self, checked: bool) -> None:
         """Subtract (or restore, if unchecked) a robust baseline
@@ -15313,8 +15369,10 @@ class MainWindow(QMainWindow):
             # warning is to be read while the correction can still be
             # reconsidered.
             self._warn_about_baseline_choice(spectrum)
+        self._capture_baseline_view(index)
         self._apply_phase_preview()
         self._refresh_baseline_preview()
+        self._follow_baseline_view_now()
 
     def _on_phase_target_changed(self) -> None:
         """The pseudo-2D slice or the 2D F1/F2 dimension picked in the
@@ -16720,11 +16778,13 @@ class MainWindow(QMainWindow):
         lock_to_spin_system(self.jcoupling_sim_panel)
         retired.addWidget(self._build_simulate_csa_subtab())
         retired.addWidget(self._build_simulate_quadrupolar_subtab())
-        # A Czjzek-distributed site, with its (C_Q, η_Q) map beside the
-        # spectrum (explicit user request); notebook.czjzek.
+        # A Czjzek-distributed site: its spectrum alone by default, or
+        # with its (C_Q, η_Q) map beside it (explicit user requests);
+        # notebook.czjzek.
         self.czjzek_sim_panel = CzjzekSimPanel(
             draw=lambda draw: (self._draw_tensor_picture(
-                                   draw, hz_per_ppm=self.czjzek_sim_panel.larmor_mhz(), kind="2d"),
+                                   draw, hz_per_ppm=self.czjzek_sim_panel.larmor_mhz(),
+                                   kind=self.czjzek_sim_panel.plot_kind()),
                                self._journal_simulation("czjzek"),
                                setattr(self.simulation_canvas, "simulation_spectrum",
                                        self.czjzek_sim_panel.make_spectrum())),
@@ -30031,6 +30091,7 @@ class MainWindow(QMainWindow):
         # disarming a half-finished pick because someone typed a mass
         # would be its own small annoyance.
         self._reset_transient_interaction_modes()
+        self._baseline_view_follow = None   # captured on the outgoing spectrum
         self._save_current_analysis_state()
         # Flush any still-pending sidecar save for the *outgoing*
         # spectrum synchronously, rather than leaving it in the
