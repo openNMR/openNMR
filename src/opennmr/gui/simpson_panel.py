@@ -9,6 +9,16 @@ Three things SIMPSON writes, three ways to use them:
 * **Points from FIDs** (efficiencies) -- the first few points of a series of
   FIDs, plotted against a quantity whose name and label you choose, or
   combined (``A + B - 0.3*C``).
+* **A curve from one file** (REDOR-like) -- every point of one file as y,
+  against x values from the file (k / SW or MAS rate), a typed list, a list
+  file or start/step -- the same choices as the vdlist in Dynamics.
+
+* **A heatmap of two swept quantities** -- a table with one row per
+  combination (columns such as ``O1 O2 Re``, header optional), or one FID per
+  combination with the two values in each file name.
+
+Pulse shapes (``save_shape``) are plotted as nu1, phase and the frequency
+sweep against time, with the pulse length from the file name or typed.
 
 A spectrum, or one made by transforming a SIMPSON FID, can be sent to
 Fit > SIMPSON spectrum to fit experimental data against it.
@@ -47,6 +57,11 @@ KINDS = (("auto", "Detect from the file"), ("spe", "Spectrum (frequency domain)"
 X_SOURCES = (("filenames", "Number in each file name"),
              ("steps", "Start + step"),
              ("typed", "Typed into the table"))
+CURVE_X_SOURCES = (("file", "From the file (k / rate, or its x column)"),
+                   ("index", "Point number (0, 1, 2 …)"),
+                   ("typed", "Typed list"),
+                   ("list", "List file × factor"),
+                   ("steps", "Start + step"))
 
 
 class SimpsonPanel(QWidget):
@@ -73,12 +88,16 @@ class SimpsonPanel(QWidget):
         #: The last spectrum read here (for Send to Fit without adding).
         self.spectrum = None
         self.series: dict | None = None
+        self.curve: dict | None = None
+        self.grid: dict | None = None
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._build_files_box())
         layout.addWidget(self._build_axis_box())
         layout.addWidget(self._build_spectra_box())
         layout.addWidget(self._build_points_box())
+        layout.addWidget(self._build_curve_box())
+        layout.addWidget(self._build_heatmap_box())
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
@@ -257,6 +276,21 @@ class SimpsonPanel(QWidget):
         row.addStretch(1)
         v.addLayout(row)
         row = QHBoxLayout()
+        row.addWidget(QLabel("Pulse length (shapes):"))
+        self.shape_duration_spin = QDoubleSpinBox()
+        self.shape_duration_spin.setRange(0.0, 1e7)
+        self.shape_duration_spin.setDecimals(4)
+        self.shape_duration_spin.setSuffix(" µs")
+        self.shape_duration_spin.setSpecialValueText("from file name")
+        self.shape_duration_spin.setToolTip(
+            "Length of a pulse shape (.shape, from save_shape), for its time axis, frequency "
+            "sweep and adiabaticity. \"from file name\" reads it from names such as "
+            "inv_pow_10.0us_…shape. Each of the N points lasts length / N, as in SIMPSON's "
+            "pulse_shaped.")
+        row.addWidget(self.shape_duration_spin)
+        row.addStretch(1)
+        v.addLayout(row)
+        row = QHBoxLayout()
         self.plot_button = QPushButton("Plot")
         self.plot_button.setToolTip("Read the selected file (or the first) and show it, without "
                                     "adding it to Open experiments.")
@@ -305,15 +339,24 @@ class SimpsonPanel(QWidget):
 
         self._draw_plot(draw)
 
-    def _plot_shape(self, path: str) -> None:
+    def shape_profile(self, path: str) -> dict:
+        """The pulse shape at ``path``, with this panel's pulse length."""
         from ..notebook import simpson as simpson_nb
-        simpson_nb.SIMPSONread_shape(path)  # raises with a clear message if malformed
+        duration = self.shape_duration_spin.value() or None
+        return simpson_nb.SIMPSONshape_profile(path, duration)
+
+    def _plot_shape(self, path: str) -> str:
+        from ..notebook import simpson as simpson_nb
+        profile = self.shape_profile(path)  # raises with a clear message if malformed
+        duration = profile["duration_us"]
 
         def draw(fig):
-            _fig, (ax_amplitude, _ax_phase) = simpson_nb.SIMPSONplot_shape(path, fig=fig)
-            return ax_amplitude
+            _fig, axes = simpson_nb.SIMPSONplot_shape(path, duration_us=duration, fig=fig,
+                                                      show_offset=True)
+            return axes[0]
 
         self._draw_plot(draw)
+        return simpson_nb.SIMPSONdescribe_shape(profile)
 
     def _on_plot(self) -> None:
         paths = self._chosen_paths()
@@ -329,8 +372,8 @@ class SimpsonPanel(QWidget):
                           "a spectrum, so it cannot be added to Open experiments.")
                 return
             if role == "shape":
-                self._plot_shape(paths[0])
-                self._say(f"Plotted the pulse shape {name} (amplitude and phase).")
+                summary = self._plot_shape(paths[0])
+                self._say(f"Plotted the pulse shape {name}: {summary}")
                 return
             n_elements = simpson_io.describe(paths[0]).get("elements", 1)
             self.element_spin.setMaximum(max(n_elements, 1))
@@ -568,6 +611,506 @@ class SimpsonPanel(QWidget):
                                                    part=self.part_combo.currentData())
             self._say(f"Saved {path}.")
 
+    # ------------------------------------------------------------------
+    # 5. One file as a curve (REDOR-like)
+    # ------------------------------------------------------------------
+    def _build_curve_box(self) -> QGroupBox:
+        box = QGroupBox("5. Curve from one file (REDOR-like)")
+        v = QVBoxLayout(box)
+        note = QLabel("Every point of the selected file (or the first) as y – the real "
+                      "column, by default – against x values you choose: e.g. a REDOR "
+                      "curve saved as real, imaginary (zeros) and the MAS rate.")
+        note.setWordWrap(True)
+        v.addWidget(note)
+        form = QFormLayout()
+        self.curve_x_combo = QComboBox()
+        for key, text in CURVE_X_SOURCES:
+            self.curve_x_combo.addItem(text, key)
+        self.curve_x_combo.setToolTip(
+            "From the file: point k at k / rate – the rate is the SIMP header's SW, or the "
+            "MAS rate written in the file (a third column, or a 'mas = …' line); or the file's "
+            "own x column.\nPoint number: 0, 1, 2 …\nTyped list / List file / Start + step: as "
+            "for the vdlist in Dynamics. A list longer than the data is fine (the extra values "
+            "are not used); a shorter one is refused.")
+        self.curve_x_combo.currentIndexChanged.connect(lambda _i: self._sync_curve_controls())
+        form.addRow("x values:", self.curve_x_combo)
+
+        self.curve_time_unit_combo = QComboBox()
+        for key, text in (("ms", "ms"), ("us", "µs"), ("s", "s")):
+            self.curve_time_unit_combo.addItem(text, key)
+        self.curve_time_unit_label = QLabel("Time unit:")
+        form.addRow(self.curve_time_unit_label, self.curve_time_unit_combo)
+
+        self.curve_typed_edit = QLineEdit()
+        self.curve_typed_edit.setPlaceholderText("e.g. 0, 0.4, 0.8, 1.2  (10m = 0.01)")
+        self.curve_typed_edit.setToolTip("One value per point, comma- or space-separated. A "
+                                         "Bruker suffix (10m, 500u) is honoured.")
+        self.curve_typed_label = QLabel("List:")
+        form.addRow(self.curve_typed_label, self.curve_typed_edit)
+
+        file_row = QHBoxLayout()
+        self.curve_list_edit = QLineEdit()
+        self.curve_list_edit.setPlaceholderText("a one-column file of numbers")
+        self.curve_list_browse = QPushButton("Browse…")
+        self.curve_list_browse.clicked.connect(self._on_curve_browse_list)
+        file_row.addWidget(self.curve_list_edit, 1)
+        file_row.addWidget(self.curve_list_browse)
+        self.curve_list_label = QLabel("List file:")
+        form.addRow(self.curve_list_label, file_row)
+        self.curve_factor_spin = QDoubleSpinBox()
+        self.curve_factor_spin.setRange(-1e12, 1e12)
+        self.curve_factor_spin.setDecimals(6)
+        self.curve_factor_spin.setValue(1.0)
+        self.curve_factor_spin.setToolTip("Every value in the list file is multiplied by this.")
+        self.curve_factor_label = QLabel("Factor:")
+        form.addRow(self.curve_factor_label, self.curve_factor_spin)
+
+        self.curve_start_spin = QDoubleSpinBox()
+        self.curve_step_spin = QDoubleSpinBox()
+        for spin in (self.curve_start_spin, self.curve_step_spin):
+            spin.setRange(-1e12, 1e12)
+            spin.setDecimals(6)
+        self.curve_step_spin.setValue(1.0)
+        self.curve_stop_edit = QLineEdit()
+        self.curve_stop_edit.setPlaceholderText("optional")
+        self.curve_points_edit = QLineEdit()
+        self.curve_points_edit.setPlaceholderText("optional (default: one per point)")
+        self.curve_multiplier_spin = QDoubleSpinBox()
+        self.curve_multiplier_spin.setRange(0.0001, 10000.0)
+        self.curve_multiplier_spin.setDecimals(4)
+        self.curve_multiplier_spin.setValue(1.0)
+        self.curve_multiplier_spin.setToolTip(
+            "Each step is this many times the one before: 1 gives equal steps; 2 with start "
+            "0.1, step 0.1 gives 0.1, 0.2, 0.4, 0.8 …")
+        self.curve_stop_edit.setToolTip(
+            "Stop alone: values from Start up to and including Stop. Stop and Points: that many "
+            "values from Start to exactly Stop (the step is worked out). Neither: one value per "
+            "point of the file.")
+        self.curve_points_edit.setToolTip(self.curve_stop_edit.toolTip())
+        self._curve_step_rows = []
+        for text, widget in (("Start:", self.curve_start_spin), ("Step:", self.curve_step_spin),
+                             ("Stop:", self.curve_stop_edit), ("Points:", self.curve_points_edit),
+                             ("Step multiplier:", self.curve_multiplier_spin)):
+            label = QLabel(text)
+            form.addRow(label, widget)
+            self._curve_step_rows.append((label, widget))
+
+        self.curve_xname_edit = QLineEdit("t")
+        self.curve_xname_edit.setToolTip("Short name for x: the column heading in the saved CSV.")
+        form.addRow("Quantity name:", self.curve_xname_edit)
+        self.curve_xlabel_edit = QLineEdit()
+        self.curve_xlabel_edit.setPlaceholderText("default: t (ms) from the file, else the name")
+        self.curve_xlabel_edit.setToolTip("The x-axis text. Symbols such as t or NτR are "
+                                          "italicised.")
+        form.addRow("Axis label:", self.curve_xlabel_edit)
+        self.curve_part_combo = QComboBox()
+        for part in ("real", "imag", "magnitude"):
+            self.curve_part_combo.addItem(part, part)
+        form.addRow("Part:", self.curve_part_combo)
+        self.curve_normalise_combo = QComboBox()
+        for key, text in (("", "As stored"), ("first", "Divide by the first point (S/S₀)"),
+                          ("max", "Divide by the largest value")):
+            self.curve_normalise_combo.addItem(text, key)
+        form.addRow("Scale:", self.curve_normalise_combo)
+        self.curve_ylabel_edit = QLineEdit()
+        self.curve_ylabel_edit.setPlaceholderText("default: Intensity, or S/S₀")
+        form.addRow("y label:", self.curve_ylabel_edit)
+        v.addLayout(form)
+        self.curve_preview_label = QLabel("")
+        self.curve_preview_label.setWordWrap(True)
+        v.addWidget(self.curve_preview_label)
+        row = QHBoxLayout()
+        self.plot_curve_button = QPushButton("Plot curve")
+        self.plot_curve_button.clicked.connect(self._on_plot_curve)
+        self.save_curve_button = QPushButton("Save curve (CSV)…")
+        self.save_curve_button.clicked.connect(self._on_save_curve)
+        self.copy_curve_code_button = QPushButton("Copy notebook code")
+        self.copy_curve_code_button.clicked.connect(
+            lambda: (QGuiApplication.clipboard().setText(self.curve_notebook_code()),
+                     self._say("Notebook code copied.")))
+        for b in (self.plot_curve_button, self.save_curve_button, self.copy_curve_code_button):
+            row.addWidget(b)
+        v.addLayout(row)
+        self._sync_curve_controls()
+        return box
+
+    def _sync_curve_controls(self) -> None:
+        mode = self.curve_x_combo.currentData()
+        for widget, label, shown in (
+                (self.curve_time_unit_combo, self.curve_time_unit_label, mode == "file"),
+                (self.curve_typed_edit, self.curve_typed_label, mode == "typed"),
+                (self.curve_factor_spin, self.curve_factor_label, mode == "list")):
+            widget.setVisible(shown)
+            label.setVisible(shown)
+        for w in (self.curve_list_edit, self.curve_list_browse):
+            w.setVisible(mode == "list")
+        self.curve_list_label.setVisible(mode == "list")
+        for label, widget in self._curve_step_rows:
+            label.setVisible(mode == "steps")
+            widget.setVisible(mode == "steps")
+
+    def _on_curve_browse_list(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "List file", "", "All files (*)")
+        if path:
+            self.curve_list_edit.setText(path)
+
+    @staticmethod
+    def _optional_number(edit: QLineEdit, name: str, integer: bool = False):
+        text = edit.text().strip().replace(",", ".")
+        if not text:
+            return None
+        try:
+            return int(text) if integer else float(text)
+        except ValueError:
+            raise ValueError(f"{name}: {text!r} is not {'a whole number' if integer else 'a number'}.") from None
+
+    def curve_kwargs(self) -> dict:
+        """The :func:`opennmr.notebook.simpson_series.SIMPSONcurve` arguments
+        (beside the path) these controls describe."""
+        mode = self.curve_x_combo.currentData()
+        kwargs: dict = {"xname": self.curve_xname_edit.text().strip() or "x",
+                        "xlabel": self.curve_xlabel_edit.text().strip() or None}
+        if mode in ("file", "index"):
+            kwargs["x"] = mode
+            if mode == "file":
+                kwargs["time_unit"] = self.curve_time_unit_combo.currentData()
+        elif mode == "typed":
+            kwargs["x"] = self.curve_typed_edit.text()
+        elif mode == "list":
+            path = self.curve_list_edit.text().strip()
+            if not path or not os.path.isfile(path):
+                raise ValueError("Choose the list file (Browse…).")
+            kwargs["x"] = path
+            kwargs["factor"] = float(self.curve_factor_spin.value())
+        else:
+            kwargs.update(x="steps", start=float(self.curve_start_spin.value()),
+                          step=float(self.curve_step_spin.value()),
+                          multiplier=float(self.curve_multiplier_spin.value()),
+                          stop=self._optional_number(self.curve_stop_edit, "Stop"),
+                          points=self._optional_number(self.curve_points_edit, "Points",
+                                                       integer=True))
+        if kwargs["xlabel"] is None and mode != "file":
+            kwargs["xlabel"] = kwargs["xname"]
+        return kwargs
+
+    def read_curve(self) -> dict:
+        paths = self._chosen_paths()
+        if not paths:
+            raise ValueError("Add the file first.")
+        curve = simpson_series.SIMPSONcurve(paths[0], **self.curve_kwargs())
+        self.curve = curve
+        return curve
+
+    def _checked_curve(self):
+        try:
+            curve = self.read_curve()
+            normalise = self.curve_normalise_combo.currentData() or None
+            simpson_series.curve_y(curve, self.curve_part_combo.currentData(), normalise)
+        except Exception as exc:  # noqa: BLE001 -- shown to the user
+            QMessageBox.warning(self, "SIMPSON curve", str(exc))
+            self.curve_preview_label.setText(str(exc))
+            return None
+        x = curve["x"]
+        shown = ", ".join(f"{v:g}" for v in x[:6]) + (" …" if x.size > 6 else "")
+        text = (f"{curve['n']} points; x from {curve['x_source']}: {shown}"
+                + (f" ({curve['x_unused']} extra value(s) not used)" if curve["x_unused"] else ""))
+        if curve["rate_Hz"] and curve["x_source"] != "point number":
+            text += f". Rate in the file: {curve['rate_Hz']:g} Hz."
+        self.curve_preview_label.setText(text)
+        return curve
+
+    def _on_plot_curve(self) -> None:
+        curve = self._checked_curve()
+        if curve is None:
+            return
+        part = self.curve_part_combo.currentData()
+        normalise = self.curve_normalise_combo.currentData() or None
+        ylabel = self.curve_ylabel_edit.text().strip() or None
+
+        def draw(fig):
+            fig.clear()
+            ax = fig.add_subplot(111)
+            simpson_series.SIMPSONplot_curve(curve, part=part, normalise=normalise, ax=ax,
+                                             ylabel=ylabel)
+            return ax
+
+        self._draw_plot(draw)
+        self._say(f"Plotted {os.path.basename(curve['path'])} as a curve of {curve['n']} "
+                  "points.")
+
+    def _on_save_curve(self) -> None:
+        curve = self._checked_curve()
+        if curve is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save curve", "curve.csv", "CSV (*.csv)")
+        if path:
+            simpson_series.SIMPSONsave_curve(curve, path, part=self.curve_part_combo.currentData(),
+                                             normalise=self.curve_normalise_combo.currentData()
+                                             or None)
+            self._say(f"Saved {path}.")
+
+    def curve_notebook_code(self) -> str:
+        paths = self._chosen_paths()
+        try:
+            kwargs = self.curve_kwargs()
+        except ValueError:
+            kwargs = {"x": "file"}
+        args = ", ".join(f"{k}={v!r}" for k, v in kwargs.items() if v is not None)
+        normalise = self.curve_normalise_combo.currentData() or None
+        return "\n".join([
+            "import opennmr.notebook as nmr", "",
+            f"curve = nmr.SIMPSONcurve({(paths[0] if paths else 'file.fid')!r}, {args})",
+            f"fig, ax = nmr.SIMPSONplot_curve(curve, part={self.curve_part_combo.currentData()!r}, "
+            f"normalise={normalise!r})"])
+
+    # ------------------------------------------------------------------
+    # 6. Heatmap of two swept quantities
+    # ------------------------------------------------------------------
+    HEATMAP_SOURCES = (("table", "Table file (one row per combination)"),
+                       ("files", "FID files (two numbers in each name)"))
+    HEATMAP_CMAPS = ("viridis", "cividis", "magma", "plasma", "inferno", "RdBu_r", "coolwarm",
+                     "Greys")
+
+    def _build_heatmap_box(self) -> QGroupBox:
+        box = QGroupBox("6. Heatmap (two swept quantities)")
+        v = QVBoxLayout(box)
+        note = QLabel("A value for every combination of two swept quantities, as colour. From a "
+                      "table (the selected file, or the first: columns such as O1 O2 Re, with or "
+                      "without a header line) or from the FIDs in the list, one per "
+                      "combination, with the two values in each file name.")
+        note.setWordWrap(True)
+        v.addWidget(note)
+        form = QFormLayout()
+        self.heatmap_source_combo = QComboBox()
+        for key, text in self.HEATMAP_SOURCES:
+            self.heatmap_source_combo.addItem(text, key)
+        self.heatmap_source_combo.currentIndexChanged.connect(
+            lambda _i: self._sync_heatmap_controls())
+        form.addRow("Data:", self.heatmap_source_combo)
+
+        self.heatmap_x_combo, self.heatmap_y_combo, self.heatmap_z_combo = (
+            QComboBox(), QComboBox(), QComboBox())
+        self._heatmap_table_rows = []
+        for text, combo in (("x column:", self.heatmap_x_combo),
+                            ("y column:", self.heatmap_y_combo),
+                            ("Colour column:", self.heatmap_z_combo)):
+            combo.setToolTip("Filled from the table's header (or c1, c2 … without one) – press "
+                             "Read columns after choosing the file.")
+            label = QLabel(text)
+            form.addRow(label, combo)
+            self._heatmap_table_rows.append((label, combo))
+        self.heatmap_read_button = QPushButton("Read columns")
+        self.heatmap_read_button.clicked.connect(self._on_heatmap_read_columns)
+        label = QLabel("")
+        form.addRow(label, self.heatmap_read_button)
+        self._heatmap_table_rows.append((label, self.heatmap_read_button))
+
+        self.heatmap_x_number_spin = TypedSpinBox()
+        self.heatmap_y_number_spin = TypedSpinBox()
+        for spin, value in ((self.heatmap_x_number_spin, -2), (self.heatmap_y_number_spin, -1)):
+            spin.setRange(-20, 20)
+            spin.setValue(value)
+            spin.setToolTip("Which number in each file name: 0 is the first, 1 the second …; "
+                            "-1 is the last, -2 the one before. In O1_10_O2_-5.fid the numbers "
+                            "are 1, 10, 2, -5, so x = -3 (10) and y = -1 (-5).")
+        self.heatmap_expression_edit = QLineEdit("A")
+        self.heatmap_expression_edit.setToolTip("What each FID contributes: A = its first "
+                                                "point, or A + B - 0.3*C as in section 4.")
+        self.heatmap_part_combo = QComboBox()
+        for part in simpson_series.PARTS:
+            self.heatmap_part_combo.addItem(part, part)
+        self._heatmap_file_rows = []
+        for text, widget in (("x = number:", self.heatmap_x_number_spin),
+                             ("y = number:", self.heatmap_y_number_spin),
+                             ("Value:", self.heatmap_expression_edit),
+                             ("Part:", self.heatmap_part_combo)):
+            label = QLabel(text)
+            form.addRow(label, widget)
+            self._heatmap_file_rows.append((label, widget))
+
+        self.heatmap_xlabel_edit = QLineEdit()
+        self.heatmap_xlabel_edit.setPlaceholderText("default: the column / x")
+        self.heatmap_ylabel_edit = QLineEdit()
+        self.heatmap_ylabel_edit.setPlaceholderText("default: the column / y")
+        self.heatmap_zlabel_edit = QLineEdit()
+        self.heatmap_zlabel_edit.setPlaceholderText("default: the column / value")
+        form.addRow("x label:", self.heatmap_xlabel_edit)
+        form.addRow("y label:", self.heatmap_ylabel_edit)
+        form.addRow("Colour-bar label:", self.heatmap_zlabel_edit)
+        self.heatmap_cmap_combo = QComboBox()
+        for name in self.HEATMAP_CMAPS:
+            self.heatmap_cmap_combo.addItem(name, name)
+        form.addRow("Colour map:", self.heatmap_cmap_combo)
+        range_row = QHBoxLayout()
+        self.heatmap_vmin_edit = QLineEdit()
+        self.heatmap_vmin_edit.setPlaceholderText("auto")
+        self.heatmap_vmax_edit = QLineEdit()
+        self.heatmap_vmax_edit.setPlaceholderText("auto")
+        range_row.addWidget(self.heatmap_vmin_edit)
+        range_row.addWidget(QLabel("to"))
+        range_row.addWidget(self.heatmap_vmax_edit)
+        for edit in (self.heatmap_vmin_edit, self.heatmap_vmax_edit):
+            edit.setToolTip("Fix the colour range (e.g. the same for several maps); empty: "
+                            "the data's own range.")
+        form.addRow("Colour range:", range_row)
+        v.addLayout(form)
+        self.heatmap_preview_label = QLabel("")
+        self.heatmap_preview_label.setWordWrap(True)
+        v.addWidget(self.heatmap_preview_label)
+        row = QHBoxLayout()
+        self.plot_heatmap_button = QPushButton("Plot heatmap")
+        self.plot_heatmap_button.clicked.connect(self._on_plot_heatmap)
+        self.save_heatmap_button = QPushButton("Save grid (CSV)…")
+        self.save_heatmap_button.clicked.connect(self._on_save_heatmap)
+        self.copy_heatmap_code_button = QPushButton("Copy notebook code")
+        self.copy_heatmap_code_button.clicked.connect(
+            lambda: (QGuiApplication.clipboard().setText(self.heatmap_notebook_code()),
+                     self._say("Notebook code copied.")))
+        for b in (self.plot_heatmap_button, self.save_heatmap_button,
+                  self.copy_heatmap_code_button):
+            row.addWidget(b)
+        v.addLayout(row)
+        self._sync_heatmap_controls()
+        return box
+
+    def _sync_heatmap_controls(self) -> None:
+        table = self.heatmap_source_combo.currentData() == "table"
+        for label, widget in self._heatmap_table_rows:
+            label.setVisible(table)
+            widget.setVisible(table)
+        for label, widget in self._heatmap_file_rows:
+            label.setVisible(not table)
+            widget.setVisible(not table)
+
+    def _on_heatmap_read_columns(self) -> list[str] | None:
+        paths = self._chosen_paths()
+        if not paths:
+            self._say("Add the table file first.")
+            return None
+        try:
+            names = simpson_series.SIMPSONread_scan(paths[0])["names"]
+        except Exception as exc:  # noqa: BLE001 -- shown to the user
+            self.heatmap_preview_label.setText(str(exc))
+            return None
+        if len(names) < 3:
+            self.heatmap_preview_label.setText(
+                f"{os.path.basename(paths[0])} has {len(names)} column(s); a heatmap needs x, y "
+                "and a value.")
+            return None
+        for k, combo in enumerate((self.heatmap_x_combo, self.heatmap_y_combo,
+                                   self.heatmap_z_combo)):
+            keep = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(names)
+            combo.setCurrentIndex(names.index(keep) if keep in names else k)
+            combo.blockSignals(False)
+        self.heatmap_preview_label.setText(f"Columns: {', '.join(names)}.")
+        return names
+
+    @staticmethod
+    def _optional_float(edit: QLineEdit, name: str):
+        text = edit.text().strip().replace(",", ".")
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            raise ValueError(f"{name}: {text!r} is not a number.") from None
+
+    def read_heatmap(self) -> dict:
+        paths = self._chosen_paths()
+        if not paths:
+            raise ValueError("Add the file(s) first.")
+        if self.heatmap_source_combo.currentData() == "table":
+            if self.heatmap_x_combo.count() == 0 and self._on_heatmap_read_columns() is None:
+                raise ValueError(self.heatmap_preview_label.text() or "Could not read the columns.")
+            grid = simpson_series.SIMPSONscan_from_table(
+                paths[0], self.heatmap_x_combo.currentText(), self.heatmap_y_combo.currentText(),
+                self.heatmap_z_combo.currentText())
+        else:
+            grid = simpson_series.SIMPSONscan_from_files(
+                paths, x_number=self.heatmap_x_number_spin.value(),
+                y_number=self.heatmap_y_number_spin.value(),
+                expression=self.heatmap_expression_edit.text().strip() or "A",
+                part=self.heatmap_part_combo.currentData(), kind=self.read_kwargs().get("kind"))
+        self.grid = grid
+        return grid
+
+    def _heatmap_style(self) -> dict:
+        return {"xlabel": self.heatmap_xlabel_edit.text().strip() or None,
+                "ylabel": self.heatmap_ylabel_edit.text().strip() or None,
+                "zlabel": self.heatmap_zlabel_edit.text().strip() or None,
+                "cmap": self.heatmap_cmap_combo.currentData(),
+                "vmin": self._optional_float(self.heatmap_vmin_edit, "Colour range minimum"),
+                "vmax": self._optional_float(self.heatmap_vmax_edit, "Colour range maximum")}
+
+    def _checked_heatmap(self):
+        try:
+            grid = self.read_heatmap()
+            style = self._heatmap_style()
+            if grid["xs"].size < 2 or grid["ys"].size < 2:
+                raise ValueError("Both swept quantities need at least two values for a heatmap.")
+        except Exception as exc:  # noqa: BLE001 -- shown to the user
+            QMessageBox.warning(self, "SIMPSON heatmap", str(exc))
+            self.heatmap_preview_label.setText(str(exc))
+            return None, None
+        text = (f"{grid['xs'].size} {grid['xname']} × {grid['ys'].size} {grid['yname']} values"
+                f" ({grid['xs'].min():g} to {grid['xs'].max():g}; "
+                f"{grid['ys'].min():g} to {grid['ys'].max():g}).")
+        if grid["missing"]:
+            text += (f" {grid['missing']} combination(s) not in the data: left blank, not "
+                     "filled in.")
+        self.heatmap_preview_label.setText(text)
+        return grid, style
+
+    def _on_plot_heatmap(self) -> None:
+        grid, style = self._checked_heatmap()
+        if grid is None:
+            return
+
+        def draw(fig):
+            fig.clear()
+            ax = fig.add_subplot(111)
+            simpson_series.SIMPSONplot_heatmap(grid, ax=ax, **style)
+            return ax
+
+        self._draw_plot(draw)
+        self._say(f"Plotted a heatmap of {grid['zname']} over {grid['xname']} and "
+                  f"{grid['yname']}.")
+
+    def _on_save_heatmap(self) -> None:
+        grid, _style = self._checked_heatmap()
+        if grid is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save grid", "heatmap.csv", "CSV (*.csv)")
+        if path:
+            simpson_series.SIMPSONscan_table(grid).to_csv(path, index=False)
+            self._say(f"Saved {path}.")
+
+    def heatmap_notebook_code(self) -> str:
+        paths = self._chosen_paths()
+        try:
+            style = self._heatmap_style()
+        except ValueError:
+            style = {}
+        style_args = ", ".join(f"{k}={v!r}" for k, v in style.items() if v is not None)
+        if self.heatmap_source_combo.currentData() == "table":
+            read = (f"grid = nmr.SIMPSONscan_from_table({(paths[0] if paths else 'scan.txt')!r}, "
+                    f"{self.heatmap_x_combo.currentText() or 0!r}, "
+                    f"{self.heatmap_y_combo.currentText() or 1!r}, "
+                    f"{self.heatmap_z_combo.currentText() or 2!r})")
+            lines = ["import opennmr.notebook as nmr", "", read]
+        else:
+            lines = ["import opennmr.notebook as nmr", "", f"files = {paths!r}",
+                     "grid = nmr.SIMPSONscan_from_files(files, "
+                     f"x_number={self.heatmap_x_number_spin.value()}, "
+                     f"y_number={self.heatmap_y_number_spin.value()}, "
+                     f"expression={self.heatmap_expression_edit.text().strip() or 'A'!r}, "
+                     f"part={self.heatmap_part_combo.currentData()!r})"]
+        lines.append(f"fig, ax = nmr.SIMPSONplot_heatmap(grid{', ' + style_args if style_args else ''})")
+        return "\n".join(lines)
+
     def notebook_code(self) -> str:
         paths = self.paths()
         kwargs = self.read_kwargs()
@@ -598,7 +1141,10 @@ class SimpsonPanel(QWidget):
     def _refresh_state(self) -> None:
         has = self.file_list.count() > 0
         for b in (self.plot_button, self.open_button, self.plot_points_button,
-                  self.save_points_button, self.copy_code_button):
+                  self.save_points_button, self.copy_code_button, self.plot_curve_button,
+                  self.save_curve_button, self.copy_curve_code_button, self.plot_heatmap_button,
+                  self.save_heatmap_button, self.copy_heatmap_code_button,
+                  self.heatmap_read_button):
             b.setEnabled(has)
 
     # ------------------------------------------------------------------
@@ -614,6 +1160,12 @@ class SimpsonPanel(QWidget):
         self.add_paths([p for p in state.get("paths", []) if os.path.exists(p)])
         panel_state.restore_widgets(self, state.get("widgets") or {})
         self._sync_x_table()
+        self._sync_curve_controls()
+        self._sync_heatmap_controls()
+        if (self.heatmap_source_combo.currentData() == "table" and self.paths()
+                and self._on_heatmap_read_columns() is not None):
+            # The column choices can only be put back once the columns are listed.
+            panel_state.restore_widgets(self, state.get("widgets") or {})
         if self.x_source_combo.currentData() == "typed":
             for r, text in enumerate(state.get("x") or []):
                 if r < self.x_table.rowCount():

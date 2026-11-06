@@ -299,7 +299,14 @@ def test_dmg_is_hfs_plus_and_retried_when_busy(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mi.subprocess, "run", fake_run)
     monkeypatch.setattr(mi, "DMG_PAUSE_S", 0.0)
+    # The /Applications link in the image is only ever made on a Mac. On
+    # Windows os.symlink needs Developer Mode or admin rights (WinError
+    # 1314), which says nothing about the code under test -- so record it.
+    links = []
+    monkeypatch.setattr(mi.os, "symlink", lambda src, dst: links.append((src, dst)))
     out = mi.macos_dmg("1.2.3")
+    assert links and links[0][0] == "/Applications"
+    assert links[0][1].endswith("Applications")
     creates = [c for c in calls if c[:2] == ["hdiutil", "create"]]
     assert len(creates) == 3
     assert creates[0][creates[0].index("-fs") + 1] == "HFS+"

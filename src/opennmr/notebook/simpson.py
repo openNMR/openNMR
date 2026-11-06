@@ -67,6 +67,9 @@ ends up wanting the same "500"/"800" shorthand -- kept local to this
 module for now since only this ask covers simpson.py.
 """
 
+import os
+import re
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cmx
@@ -201,6 +204,114 @@ def SIMPSONread_shape(path):
         raise ValueError(f"{path}: expected 2 columns (amplitude, phase).")
     amplitude, phase = data[:, 0], data[:, 1]
     return {'amplitude': amplitude, 'phase': phase, 'npoints': len(amplitude), 'path': path}
+
+
+_DURATION_IN_NAME = re.compile(r'(?<![\d.])(\d+(?:\.\d+)?)\s*(us|µs|μs|ms|ns)(?![a-z])', re.IGNORECASE)
+
+
+def SIMPSONshape_duration_from_name(path):
+    """
+    The pulse length in microseconds written into a shape file's name --
+    ``inv_pow_10.0us_W10_...shape`` -> 10.0 -- or ``None`` if the name
+    holds none. The first number followed by us/µs (or ms, ns) counts.
+    """
+    match = _DURATION_IN_NAME.search(os.path.basename(str(path)))
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    return value * {'ms': 1e3, 'ns': 1e-3}.get(unit, 1.0)
+
+
+def SIMPSONshape_profile(path, duration_us=None):
+    """
+    A SIMPSON pulse shape described physically: RF amplitude, phase and the
+    frequency sweep the phase encodes.
+
+    SIMPSON's ``pulse_shaped <duration> <shape>`` gives every one of the N
+    elements the same length, ``dt = duration / N`` -- so a shape written
+    with N = 201 points for a 10 us pulse has 10/201 us elements, not
+    10/200. ``duration_us`` : the pulse length; ``None`` takes it from the
+    file name (:func:`SIMPSONshape_duration_from_name`), and without one
+    there is no time axis (only point numbers) and no sweep or
+    adiabaticity.
+
+    The **frequency offset** is the slope of the phase,
+    ``nu = (1/360) dphi/dt``, from consecutive elements (the phase is
+    unwrapped first, so a phase written modulo 360 degrees reads as the
+    continuous sweep it is). It is placed at the boundary between the two
+    elements. This needs ``|nu| < 1/(2 dt)``; a shape sampled more coarsely
+    than that cannot be unwrapped by anything.
+
+    The **adiabaticity at the centre**, ``Q0 = 2 pi nu1^2 / |d nu/dt|``
+    (``omega1^2 / |dOmega/dt|``), uses the amplitude and the sweep rate in
+    the middle of the pulse -- where an isochromat at the carrier passes
+    through resonance. Q0 >> 1 is adiabatic. ``None`` for a shape with no
+    sweep there.
+
+    Returns
+    -------
+    dict : 'npoints', 'path', 'duration_us' (or None), 'duration_source'
+        ('given', 'file name' or None), 'dt_us', 't_us' (start of each
+        element), 'amplitude_Hz', 'phase_deg' (as written),
+        'phase_unwrapped_deg', 't_offset_us' and 'offset_Hz' (N - 1 values,
+        at the element boundaries), 'max_amplitude_Hz', 'sweep_Hz'
+        (last - first offset; its sign is the direction), 'q0' (or None).
+    """
+    shape = SIMPSONread_shape(path)
+    n = shape['npoints']
+    amplitude = np.asarray(shape['amplitude'], dtype=float)
+    phase = np.asarray(shape['phase'], dtype=float)
+    unwrapped = np.unwrap(phase, period=360.0)
+    source = None
+    if duration_us is not None and float(duration_us) > 0:
+        duration_us, source = float(duration_us), 'given'
+    else:
+        duration_us = SIMPSONshape_duration_from_name(path)
+        source = 'file name' if duration_us else None
+    out = {'npoints': n, 'path': path, 'duration_us': duration_us,
+           'duration_source': source, 'amplitude_Hz': amplitude, 'phase_deg': phase,
+           'phase_unwrapped_deg': unwrapped, 'max_amplitude_Hz': float(np.max(np.abs(amplitude))),
+           'dt_us': None, 't_us': np.arange(n, dtype=float), 't_offset_us': None,
+           'offset_Hz': None, 'sweep_Hz': None, 'q0': None}
+    if not duration_us or n < 2:
+        return out
+    dt_us = duration_us / n
+    dt_s = dt_us * 1e-6
+    offset = np.diff(unwrapped) / 360.0 / dt_s
+    t_offset = np.arange(1, n, dtype=float) * dt_us
+    out.update(dt_us=dt_us, t_us=np.arange(n, dtype=float) * dt_us,
+               t_offset_us=t_offset, offset_Hz=offset,
+               sweep_Hz=float(offset[-1] - offset[0]))
+    if offset.size >= 3:
+        centre = 0.5 * duration_us
+        k = int(np.clip(np.searchsorted(t_offset, centre), 1, offset.size - 1))
+        step = offset[k] - offset[k - 1]
+        rate = step / ((t_offset[k] - t_offset[k - 1]) * 1e-6)
+        nu1 = float(np.interp(centre, (np.arange(n) + 0.5) * dt_us, np.abs(amplitude)))
+        # A constant offset differs from step to step only by rounding of the
+        # written phase: that is no sweep, and no adiabaticity to quote.
+        negligible = 1e-9 * max(float(np.max(np.abs(offset))), 1.0 / dt_s)
+        if abs(step) > negligible and np.isfinite(rate):
+            out['q0'] = float(2.0 * np.pi * nu1 ** 2 / abs(rate))
+    return out
+
+
+def SIMPSONdescribe_shape(profile):
+    """One line for a profile from :func:`SIMPSONshape_profile`."""
+    p = profile
+    text = (f"{p['npoints']} points, maximum \u03bd\u2081 {p['max_amplitude_Hz'] / 1e3:.4g} kHz")
+    if not p['duration_us']:
+        return text + "; no pulse length (none given or in the file name), so no time axis or sweep."
+    text += (f", {p['duration_us']:g} \u00b5s ({p['duration_source']}), "
+             f"{p['dt_us'] * 1e3:.4g} ns per point")
+    if p['offset_Hz'] is not None:
+        lo, hi = p['offset_Hz'][0], p['offset_Hz'][-1]
+        text += (f"; sweep {lo / 1e3:+.4g} \u2192 {hi / 1e3:+.4g} kHz "
+                 f"({abs(p['sweep_Hz']) / 1e3:.4g} kHz)")
+    if p['q0'] is not None:
+        text += f"; adiabaticity at the centre Q\u2080 = {p['q0']:.3g}"
+    return text + "."
 
 
 # ============================================================
@@ -883,7 +994,7 @@ def SIMPSONplot_1d_stack(spectra, labels=None, linestyles=None, colours=None,
 
 def SIMPSONplot_shape(path, duration_us=None, pl_width=3.375, pl_height=2.5,
                font='Arial', fontsize=12, save_fig=False,
-               fig_name='pulse_shape', save_format='png', fig=None):
+               fig_name='pulse_shape', save_format='png', fig=None, show_offset=False):
     """
     Plot amplitude and phase of a SIMPSON pulse-shape file as two
     stacked panels. Deliberately separate from SIMPSONplot_1d_stack: a pulse
@@ -895,38 +1006,63 @@ def SIMPSONplot_shape(path, duration_us=None, pl_width=3.375, pl_height=2.5,
     ----------
     path : str
     duration_us : float, optional
-        Total pulse duration in microseconds. If given, the x-axis is
-        time (us); if omitted, it's point index.
+        Total pulse duration in microseconds. If given -- or written in the
+        file name, e.g. ``..._10.0us_...`` -- the x-axis is time (us), each
+        element drawn as the step it is (``duration / N`` long, SIMPSON's
+        convention); otherwise it is the point number.
     fig : matplotlib Figure, optional
         Draw into this figure (the GUI does) instead of making one.
+    show_offset : bool
+        Add a third panel: the frequency sweep the phase encodes
+        (``(1/360) dphi/dt``, see :func:`SIMPSONshape_profile`). Needs a
+        pulse length.
+
+    The amplitude is shown as nu1 in kHz and the phase unwrapped (a phase
+    written modulo 360 degrees is the continuous sweep it encodes).
 
     Returns
     -------
-    fig, (ax_amplitude, ax_phase)
+    fig, (ax_amplitude, ax_phase) -- or (ax_amplitude, ax_phase, ax_offset)
+    with ``show_offset`` and a pulse length.
     """
-    shape = SIMPSONread_shape(path)
-    n = shape['npoints']
-    x = np.linspace(0, duration_us, n) if duration_us else np.arange(n)
-    xlabel = 'Time (\u00b5s)' if duration_us else 'Point index'
+    profile = SIMPSONshape_profile(path, duration_us)
+    n = profile['npoints']
+    timed = profile['duration_us'] is not None
+    # Each element is a step: drawn from its start to the next one's.
+    x = (np.append(profile['t_us'], profile['duration_us']) if timed
+         else np.arange(n + 1, dtype=float))
+    xlabel = r'$\mathit{t}$' + ' (µs)' if timed else 'Point'
+    amplitude = np.append(profile['amplitude_Hz'], profile['amplitude_Hz'][-1]) / 1e3
+    phase = np.append(profile['phase_unwrapped_deg'], profile['phase_unwrapped_deg'][-1])
+    with_offset = bool(show_offset and timed and profile['offset_Hz'] is not None)
+    rows = 3 if with_offset else 2
 
     if fig is None:
         style = setup_plotting(font=font, fontsize=fontsize, pl_width=pl_width,
                                 pl_height=pl_height)
         pl_width, pl_height = style['pl_width'], style['pl_height']
-        fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
-        fig.set_figheight(pl_height)
+        fig, axes = plt.subplots(rows, 1, sharex=True)
+        fig.set_figheight(pl_height * (1.4 if rows == 3 else 1.0))
         fig.set_figwidth(pl_width)
     else:
         fig.clear()
-        ax1, ax2 = fig.subplots(2, 1, sharex=True)
-    ax1.plot(x, shape['amplitude'], color='black', linewidth=1.2)
-    ax1.set_ylabel(_italic_label('Amplitude'))
+        axes = fig.subplots(rows, 1, sharex=True)
+    ax1, ax2 = axes[0], axes[1]
+    ax1.plot(x, amplitude, color='black', linewidth=1.2, drawstyle='steps-post')
+    ax1.set_ylabel(r'$\mathit{\nu}_1$ (kHz)')
     apply_spine_style(ax1, top=False, right=False)
 
-    ax2.plot(x, shape['phase'], color='black', linewidth=1.2)
-    ax2.set_ylabel(_italic_label('Phase (\u00b0)'))
-    ax2.set_xlabel(_italic_label(xlabel))
+    ax2.plot(x, phase, color='black', linewidth=1.2, drawstyle='steps-post')
+    ax2.set_ylabel(r'$\mathit{\phi}$' + ' (°)')
     apply_spine_style(ax2, top=False, right=False)
+    if with_offset:
+        ax3 = axes[2]
+        ax3.plot(profile['t_offset_us'], profile['offset_Hz'] / 1e3, color='black',
+                 linewidth=1.2)
+        ax3.set_ylabel(r'$\Delta\mathit{\nu}$ (kHz)')
+        apply_spine_style(ax3, top=False, right=False)
+    axes[-1].set_xlabel(xlabel)
+    axes[0].set_xlim(x[0], x[-1])
 
     if not getattr(fig, '_opennmr_managed', False):
         fig.tight_layout()
@@ -934,7 +1070,7 @@ def SIMPSONplot_shape(path, duration_us=None, pl_width=3.375, pl_height=2.5,
     if save_fig:
         save_figure(fig, fig_name=fig_name, save_format=save_format)
 
-    return fig, (ax1, ax2)
+    return fig, tuple(axes)
 
 
 # ============================================================

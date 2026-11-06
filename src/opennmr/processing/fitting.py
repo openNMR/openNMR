@@ -860,14 +860,30 @@ def estimate_baseline_spline(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
         return UnivariateSpline(xb, yb, k=k, s=s, ext=3)
 
     keep = np.ones(len(y_base), dtype=bool)
+    # Noise at or below this is floating-point rounding, not noise: the
+    # points lie exactly on a smooth curve. A smoothing target built from
+    # it (len * noise**2, ~1e-26 on data of order 10) asks FITPACK for a
+    # closer fit than arithmetic can resolve, and FITPACK answers with a
+    # warning that its result is "theoretically impossible" (and an
+    # approximate curve). Such points are interpolated (s = 0) instead,
+    # and nothing is rejected from them -- with no noise there are no
+    # outliers to find. 1e-9 of the data's size is far above rounding
+    # (~1e-16) and far below any real noise.
+    noise_floor = 1e-9 * max(float(np.max(np.abs(y_base))), float(np.ptp(y_base)),
+                             np.finfo(float).tiny)
     # The first fit's s from the points' own noise, as in the loop below.
     # It used to be len(x) alone -- right only for unit-variance noise, so
     # on real intensities (~1e4-1e7) it asked FITPACK to all but
     # interpolate every point: a very slow knot search, then a curve that
     # swung wildly between the two edges.
     noise0 = _robust_noise(y_base)
-    spline = _fit(x_base, y_base, smoothing if smoothing is not None
-                  else len(x_base) * max(noise0, np.finfo(float).tiny) ** 2)
+    if smoothing is not None:
+        s0 = smoothing
+    elif noise0 <= noise_floor:
+        s0 = 0.0
+    else:
+        s0 = len(x_base) * noise0 ** 2
+    spline = _fit(x_base, y_base, s0)
 
     for _ in range(max_iter):
         residual = y_base - spline(x_base)
@@ -875,7 +891,7 @@ def estimate_baseline_spline(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
         mad = np.median(np.abs(residual - median))
         noise = 1.4826 * mad
 
-        if noise <= 0:
+        if noise <= noise_floor:
             break
 
         new_keep = np.abs(residual - median) <= sigma * noise

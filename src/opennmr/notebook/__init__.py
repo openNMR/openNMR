@@ -279,10 +279,14 @@ from .simpson import (
     SIMPSONimport, CSDMimport, SIMPSONread_shape, SIMPSONapodization_window, SIMPSONread_fid,
     SIMPSONplot_fid, SIMPSONread_single_point_fid, SIMPSONread_fid_series, SIMPSONplot_1d_stack, SIMPSONplot_shape,
     SIMPSONplot_fid_series, SIMPSONload, SIMPSONread_table, SIMPSONread_script, SIMPSONplot_table,
+    SIMPSONshape_profile, SIMPSONshape_duration_from_name, SIMPSONdescribe_shape,
 )
 from .simpson_series import (
     SIMPSONread_points, SIMPSONpoint_series, SIMPSONcombine_points, SIMPSONpoint_table,
     SIMPSONsave_point_table, SIMPSONplot_point_series, x_from_filenames,
+    SIMPSONread_curve, SIMPSONcurve, SIMPSONplot_curve, SIMPSONcurve_table, SIMPSONsave_curve,
+    stepped_values, SIMPSONread_scan, SIMPSONscan_from_table, SIMPSONscan_from_files,
+    SIMPSONscan_table, SIMPSONplot_heatmap, scan_grid,
 )
 from .simpson_fit import fit_simpson_templates, SIMPSONfit_spectrum, SIMPSONplot_fit
 from ..io.export import export_spectrum, read_jcamp_spectrum
@@ -491,6 +495,10 @@ __all__ = [
     "SIMPSONplot_table",
     "SIMPSONread_points", "SIMPSONpoint_series", "SIMPSONcombine_points", "SIMPSONpoint_table",
     "SIMPSONsave_point_table", "SIMPSONplot_point_series", "x_from_filenames",
+    "SIMPSONshape_profile", "SIMPSONshape_duration_from_name", "SIMPSONdescribe_shape",
+    "SIMPSONread_curve", "SIMPSONcurve", "SIMPSONplot_curve", "SIMPSONcurve_table",
+    "SIMPSONsave_curve", "stepped_values", "SIMPSONread_scan", "SIMPSONscan_from_table",
+    "SIMPSONscan_from_files", "SIMPSONscan_table", "SIMPSONplot_heatmap", "scan_grid",
     "fit_simpson_templates", "SIMPSONfit_spectrum", "SIMPSONplot_fit",
     # export (any vendor -> .csv, .xy, JCAMP-DX)
     "export_spectrum", "read_jcamp_spectrum",
