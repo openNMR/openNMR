@@ -536,3 +536,70 @@ def test_bms_susceptibility_units(qapp, no_dialogs, bms_cache):
     u.set_state(t.get_state())
     assert u.bms_chi_si()[0] == pytest.approx(t.bms_chi_si()[0])
     assert u._bms_grid_form.isRowVisible(u.pm_bms_Z_spin)
+
+
+def test_bms_unit_combo_stays_clickable_after_switching(qapp, monkeypatch, tmp_path):
+    """Reported 2026-11-07: after choosing μ_eff the units drop-down was drawn
+    under the rows that appeared (it shared a row the narrow-panel reflow
+    wraps) and could not be clicked again. In the real window: pick units by
+    mouse; no two visible form rows may overlap, the drop-down stays on top."""
+    import itertools
+    from PySide6.QtCore import QPoint, QRect, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QFormLayout, QScrollArea, QStackedWidget, QTabWidget
+    from opennmr.gui.main_window import MainWindow
+    from opennmr.gui.widgets.collapsible_section import CollapsibleSection
+    monkeypatch.setenv("OPENNMR_BMS_CACHE", str(tmp_path / "sidebands"))
+    window = MainWindow()
+    window.resize(1500, 950)
+    window.show()
+    try:
+        t = window.paramagnetic_panel
+        t.pm_bms_section.setExpanded(True)
+        child, parent = t, t.parentWidget()
+        while parent is not None:
+            if isinstance(parent, CollapsibleSection):
+                parent.setExpanded(True)
+            if isinstance(parent, (QStackedWidget, QTabWidget)):
+                parent.setCurrentWidget(child)
+            child, parent = parent, parent.parentWidget()
+        combo = t.pm_bms_chi_unit_combo
+        area = combo.parentWidget()
+        while not isinstance(area, QScrollArea):
+            area = area.parentWidget()
+
+        def settle():
+            for _ in range(5):
+                qapp.processEvents()
+
+        def pick(key):
+            area.ensureWidgetVisible(combo)
+            settle()
+            combo.showPopup()
+            settle()
+            view = combo.view()
+            rect = view.visualRect(view.model().index(combo.findData(key), 0))
+            QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton,
+                             Qt.KeyboardModifier.NoModifier, rect.center())
+            settle()
+            area.ensureWidgetVisible(combo)
+            settle()
+            assert combo.currentData() == key
+            sec = t.pm_bms_section
+            for form in sec.findChildren(QFormLayout):
+                rects = []
+                for i in range(form.count()):
+                    item = form.itemAt(i)
+                    wd = item.widget() if item else None
+                    if wd is not None and wd.isVisible():
+                        rects.append((wd, QRect(wd.mapTo(sec, QPoint(0, 0)), wd.size())))
+                for (a, ra), (b, rb) in itertools.combinations(rects, 2):
+                    inter = ra.intersected(rb)
+                    assert not (inter.width() > 2 and inter.height() > 2), (key, a, b)
+            top = combo.window().childAt(combo.mapTo(combo.window(), combo.rect().center()))
+            assert top is combo or combo.isAncestorOf(top)
+
+        for key in ("mu_eff", "cgs_molar", "si_volume"):
+            pick(key)
+    finally:
+        window.close()

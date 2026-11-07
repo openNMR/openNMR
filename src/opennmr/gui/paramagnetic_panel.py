@@ -649,12 +649,11 @@ class ParamagneticToolsPanel(QWidget):
             "SI volume (dimensionless) is what the simulation uses; the others are converted "
             "(cgs volume × 4π; mass × density; molar ÷ molar volume; μ_eff by the Curie–Weiss "
             "law).")
-        chi_row = QWidget()
-        h = QHBoxLayout(chi_row)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(self.pm_bms_chi_edit, 1)
-        h.addWidget(self.pm_bms_chi_unit_combo)
-        gf.addRow("χ:", chi_row)
+        # Each on its own row: a combo whose text changes must not share a row that
+        # the narrow-panel reflow wraps (it was then drawn under the next row and
+        # could not be clicked again, 2026-11-07).
+        gf.addRow("χ:", self.pm_bms_chi_edit)
+        gf.addRow("Units:", self.pm_bms_chi_unit_combo)
         self.pm_bms_density_spin = _spin_box(0.0, 100.0, 0.0, 4, " g cm⁻³", step=0.1,
                                              tip="Density of the solid itself (the crystal "
                                                  "density), not a tap or packing density: the "
@@ -1018,8 +1017,8 @@ class ParamagneticToolsPanel(QWidget):
         rotor = shape == "rotor"
         smf.setRowVisible(self.pm_bms_rotor_check, rotor)
         with_rotor = rotor and self.pm_bms_rotor_check.isChecked()
-        for wdg in (self.pm_bms_rotor_length_spin, self.pm_bms_wall_combo._row,
-                    self.pm_bms_caps_combo._row):
+        for wdg in (self.pm_bms_rotor_length_spin, self.pm_bms_wall_combo,
+                    self.pm_bms_wall_chi_spin, self.pm_bms_caps_combo, self.pm_bms_caps_chi_spin):
             smf.setRowVisible(wdg, with_rotor)
         mode = self.pm_bms_mode_combo.currentData()
         smf.setRowVisible(self.pm_bms_angle_spin, shape != "sphere" and mode == "static")
@@ -1051,12 +1050,9 @@ class ParamagneticToolsPanel(QWidget):
         combo.setCurrentIndex(combo.findData(default))
         spin = _spin_box(-1e5, 1e5, bms_sample.MATERIALS[default][0] * 1e6, 4, " ppm", step=0.1,
                          tip=tip + " Volume susceptibility, SI, in ppm (10⁻⁶).")
-        row = QWidget()
-        h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(combo, 1)
-        h.addWidget(spin)
-        form.addRow(label, row)
+        # two rows, not one wrapped row (see the χ units row)
+        form.addRow(label, combo)
+        form.addRow("    its χ (SI):", spin)
         combo.setToolTip(tip)
 
         def chosen(_i):
@@ -1074,8 +1070,6 @@ class ParamagneticToolsPanel(QWidget):
                 combo.blockSignals(False)
         combo.activated.connect(chosen)
         spin.valueChanged.connect(typed)
-        row.setObjectName(f"_row_{default}")
-        combo._row = row
         return combo, spin
 
     def _rotor_chosen(self) -> None:
