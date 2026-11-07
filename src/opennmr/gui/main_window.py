@@ -11495,7 +11495,7 @@ class MainWindow(QMainWindow):
                           "czjzek": "Czjzek distribution",
                           "combined": "Solid-state NMR", "diffusion": "Diffusion (PFG)",
                           "bloch": "Shaped pulse (Bloch)", "pnmr": "pNMR (CIF)",
-                          "simpson": "SIMPSON import", "bms": "BMS shifts (fast)"}
+                          "simpson": "SIMPSON import", "bms": "BMS shifts"}
 
     def _fit_panels(self) -> dict:
         """Each fit, as an object with get_state/set_state/result_state/
@@ -11621,7 +11621,7 @@ class MainWindow(QMainWindow):
             # Load settings leaves it one click away.
             "pnmr": _Section(get_state=self.pnmr_panel.get_state, set_state=self.pnmr_panel.set_state,
                              rerun=None, summary=lambda: "", anchor=lambda: self.pnmr_panel),
-            # Paramagnetic NMR tools ▸ BMS (fast): seconds, so re-run.
+            # Paramagnetic NMR tools ▸ BMS shifts: seconds, so re-run.
             "bms": _Section(get_state=self.paramagnetic_panel.get_state,
                             set_state=self.paramagnetic_panel.set_state,
                             rerun=self._rerun_bms,
@@ -17087,7 +17087,9 @@ class MainWindow(QMainWindow):
             draw_plot=self._show_on_simulation_plot, style=self._simulation_style,
             dft_source=self.dft_sim_panel.paramagnetic_source,
             send_pathways=self.pnmr_panel.set_shift_contributions,
-            plot_spectrum=lambda spectrum: self._on_panel_simulated("bms", spectrum))
+            plot_spectrum=lambda spectrum: self._on_panel_simulated("bms", spectrum),
+            show_spectrum=self._show_simulated_spectrum,
+            keep_spectrum=self._keep_simulation)
         self._paramagnetic_sim_section = CollapsibleSection(
             "Paramagnetic NMR tools", content=self.paramagnetic_panel)
         layout.addWidget(self._paramagnetic_sim_section)

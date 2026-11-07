@@ -453,3 +453,40 @@ def test_paramagnetic_python_code_runs(tmp_path):
     ns = {}
     exec(code, ns)
     assert ns["model"]["atoms"][0]["iso"] == pytest.approx(-MN_HFC[35][5] + 1.0, abs=0.02)
+
+
+# ---- shift against temperature from any code (explicit user request, 2026-11-07) -----------
+
+def test_scaled_shift_vs_temperature_laws():
+    sites = {"A": {"dia": 3.0, "contact": 100.0, "dipolar": 20.0}}
+    T = [150.0, 300.0, 600.0]
+    c = pm.scaled_shift_vs_temperature(sites, T, T_ref=300, model="curie")["sites"]["A"]
+    assert np.allclose(c["total"], [3 + 240, 123, 3 + 60])
+    b = pm.scaled_shift_vs_temperature(sites, T, T_ref=300, model="curie_bleaney")["sites"]["A"]
+    assert np.allclose(b["contact"], [200, 100, 50]) and np.allclose(b["pseudocontact"], [80, 20, 5])
+    w = pm.scaled_shift_vs_temperature(sites, T, T_ref=300, model="curie_weiss",
+                                       theta=-100)["sites"]["A"]
+    assert np.allclose(w["contact"], 100 * 400 / (np.array(T) + 100))
+    with pytest.raises(ValueError, match="T − θ"):
+        pm.scaled_shift_vs_temperature(sites, T, T_ref=300, model="curie_weiss", theta=200)
+    with pytest.raises(ValueError, match="model"):
+        pm.scaled_shift_vs_temperature(sites, T, T_ref=300, model="bleaney")
+
+
+def test_crystal_shift_vs_temperature_follows_phi():
+    from test_bond_pathways import _calc
+    from opennmr.notebook import crystal_nmr as C
+    calc = _calc([1] * 8)
+    cw = {"theta": -50.0, "mu_eff": 5.9, "spin": 2.5, "T": 300.0, "B0": 9.4}
+    out = pm.crystal_shift_vs_temperature(calc, [250.0, 400.0], scaling=cw, element="Na",
+                                          orbital_shift=2.0)
+    direct = C.apply_scaling(calc, C.magnetic_scaling(**{**cw, "T": 400.0}))
+    fc = next(a["delta_fc"] for a in direct["atoms"] if a["label"] == "Na1")
+    assert out["sites"]["Na1"]["total"][1] == pytest.approx(fc + 2.0, rel=1e-12)
+    # a φ belongs to one temperature: it needs T_ref (and θ)
+    with pytest.raises(ValueError, match="T_ref"):
+        pm.crystal_shift_vs_temperature(calc, [250.0, 400.0], scaling={"phi": 0.05, "B0": 9.4})
+    phi = pm.crystal_shift_vs_temperature(calc, [150.0, 300.0], scaling={"phi": 0.05, "B0": 9.4},
+                                          T_ref=300.0, theta=0.0)
+    s = phi["sites"]["Na1"]["total"]
+    assert s[0] == pytest.approx(2 * s[1])

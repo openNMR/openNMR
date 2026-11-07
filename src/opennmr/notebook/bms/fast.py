@@ -63,8 +63,11 @@ Boundary conditions and the macroscopic sample
 
 Spectrum
 --------
-* ``"static"``: δ_zz with B₀ along z. A random packing is statistically
-  isotropic, so the fixed orientation already is a powder average.
+* ``"static"``: averaged over the packing's orientation by sampling
+  (:mod:`~opennmr.notebook.bms.interactions`). :func:`bms_spectrum`'s
+  own static route is δ_zz with B₀ along z for the one orientation the
+  packing has -- not a powder average for a packing of tens of
+  particles, so :func:`fast_bms_spectrum` does not use it.
 * ``"mas_infinite"``: the isotropic shift only (infinitely fast MAS).
   With isotropic χ the isotropic BMS shift is zero everywhere except
   for the bulk term -- MAS removes it completely. Only an anisotropic χ
@@ -90,6 +93,7 @@ import time
 import numpy as np
 import scipy.fft as sfft
 
+from .geometry import quat_to_rotmat
 from .io_utils import inp_part
 from .packing import _bounding_radius
 from .shift import tensor2haeberlen
@@ -251,6 +255,7 @@ def _rasterise(parts, L, n, n_fft, periodic, dtype, need_tensor, margin=1.15,
     occ = np.zeros(shape_fft, dtype=dtype)
     owner = np.full(shape_fft, -1, dtype=np.int32)
     X = [np.zeros(shape_fft, dtype=dtype) for _ in range(6 if need_tensor else 1)]
+    vols = np.zeros(len(parts))                 # Σ s per particle (voxels), for ⟨χ⟩
     grid0 = -L / 2.0
     for p_index, p in enumerate(parts):
         R = float(_bounding_radius(p["Equation"], p["v1"], p["v2"], p["v3"])) * _reach(p, margin)
@@ -275,6 +280,7 @@ def _rasterise(parts, L, n, n_fft, periodic, dtype, need_tensor, margin=1.15,
         s = block_shape(p, idx[0][1], idx[1][1], idx[2][1]).astype(dtype, copy=False)
         sel = np.ix_(idx[0][0], idx[1][0], idx[2][0])
         occ[sel] += s
+        vols[p_index] = float(s.sum(dtype=np.float64))
         core = s > (p["thresh"] if threshold_owner else 1e-9)
         if core.any():
             o = owner[sel]
@@ -287,7 +293,7 @@ def _rasterise(parts, L, n, n_fft, periodic, dtype, need_tensor, margin=1.15,
                     X[c][sel] += dtype(chi[i, j]) * s
         else:
             X[0][sel] += dtype(chi[0, 0]) * s
-    return X, occ, owner
+    return X, occ, owner, vols
 
 
 def _kvectors(L_fft, n_fft, dtype):
@@ -364,7 +370,7 @@ def bms_field(particles, magnetic_susceptibility, box_size=300.0, gridpoints=128
     t0 = time.perf_counter()
     if lorentz not in ("proportional", "threshold"):
         raise ValueError("lorentz: 'proportional' or 'threshold'.")
-    X, occ, owner = _rasterise(parts, L, n, n_fft, periodic, dtype, need_tensor=not iso_chi,
+    X, occ, owner, vols = _rasterise(parts, L, n, n_fft, periodic, dtype, need_tensor=not iso_chi,
                                threshold_owner=lorentz == "threshold")
     timings["shapes"] = time.perf_counter() - t0
 
@@ -461,6 +467,10 @@ def bms_field(particles, magnetic_susceptibility, box_size=300.0, gridpoints=128
         "owner": owner,
         "volume_fraction": float(np.clip(occ, 0.0, 1.0).mean()),
         "n_particles": len(parts),
+        # particle frame -> packing frame is Rᵀ (χ_lab = Rᵀ diag(χ) R, io_utils.inp_part)
+        "rotations": np.array([quat_to_rotmat(p["q"]) for p in parts]),
+        # the packing's mean χ tensor (volume-weighted over the box): χ_v = tr/3
+        "mean_chi": np.einsum("p,pij->ij", vols, chis) / float(np.prod(n)),
         "isotropic_chi": iso_chi,
         "timings": timings,
         "parameters": {
@@ -661,7 +671,7 @@ def _broaden(hist, sw_hz, linewidth_hz, lineshape):
 
 def bms_spectrum(field, nuclide="7Li", B0_tesla=9.4, mode="static", observe="inside",
                  spin_rate_hz=10000.0, linewidth_hz=50.0, lineshape="lorentzian",
-                 centre_ppm=None, sw_ppm=None, n_points=8192, max_order=8,
+                 centre_ppm=None, sw_ppm=None, n_points=None, max_order=8,
                  offset_ppm=0.0, gamma_MHz_per_T=None, min_weight=1e-3):
     """The spectrum of a :func:`bms_field` result, as openNMR's standard
     spectrum dict (``x_ppm``, ``real_spectrum``, ``BF1``, ...), plus
@@ -723,14 +733,15 @@ def bms_spectrum(field, nuclide="7Li", B0_tesla=9.4, mode="static", observe="ins
             hi = max(hi, mean + (max_order + 0.5) * spin_ppm)
         half = max(abs(hi - centre_ppm), abs(centre_ppm - lo)) + 10 * lw_ppm
         sw_ppm = 2 * max(half, 20 * lw_ppm, 1e-3)
+    from ..simulations import _bin_sticks
+    n_points, under = resolve_points(sw_ppm, lw_ppm, n_points)
     sw_hz = sw_ppm * BF1
     edges_lo = centre_ppm - sw_ppm / 2
-    hist, _ = np.histogram(sticks_ppm, bins=n_points, range=(edges_lo, edges_lo + sw_ppm),
-                           weights=sticks_w)
+    x_ppm = edges_lo + sw_ppm * (np.arange(n_points) + 0.5) / n_points
+    hist = _bin_sticks(x_ppm, sticks_ppm, sticks_w)          # linear, as the sampled route
     total = float(sticks_w.sum())
     outside_window = 1.0 - (float(hist.sum()) / total if total else 1.0)
     spec = _broaden(hist, sw_hz, linewidth_hz, lineshape)
-    x_ppm = edges_lo + sw_ppm * (np.arange(n_points) + 0.5) / n_points
     peak = np.max(np.abs(spec)) or 1.0
     return {
         "x_ppm": x_ppm, "x_Hz": x_ppm * BF1,
@@ -740,11 +751,119 @@ def bms_spectrum(field, nuclide="7Li", B0_tesla=9.4, mode="static", observe="ins
         "stats": {"mean_ppm": mean, "std_ppm": std, "fwhm_gauss_ppm": 2.3548 * std,
                   "outside_window": outside_window, "weight": float(w.sum()),
                   "left_out_weight": float(w_all[~keep].sum()),
-                  "sidebands_beyond_max_order": cut, "beyond_mu_grid": beyond},
+                  "sidebands_beyond_max_order": cut, "beyond_mu_grid": beyond,
+                  "n_points": n_points, "under_resolved": under},
         "parameters": {"nuclide": nuclide, "B0_tesla": float(B0_tesla), "mode": mode,
                        "observe": observe, "spin_rate_hz": float(spin_rate_hz),
                        "linewidth_hz": float(linewidth_hz), "lineshape": lineshape},
     }
+
+
+#: Points per FWHM the automatic axis gives the narrowest line, and the
+#: largest automatic axis.
+POINTS_PER_FWHM = 5
+MAX_POINTS = 2 ** 20
+
+
+def resolve_points(sw_ppm, linewidth_ppm, n_points=None):
+    """``(n, under_resolved)``: the points of a spectrum window of
+    ``sw_ppm`` -- automatic (``n_points=None``: a power of two with at least
+    :data:`POINTS_PER_FWHM` points across the line width, at least 4096,
+    at most :data:`MAX_POINTS`), or as given -- and whether the line is
+    then sampled by fewer than 3 points per FWHM (its height and shape are
+    then set by the grid, not by the physics: found 2026-11-07, a 2048-point
+    axis put 1.6 points across a 1.9 ppm line and misplaced peak heights by
+    5 %)."""
+    lw = float(linewidth_ppm)
+    if n_points is None:
+        need = 4096 if lw <= 0 else POINTS_PER_FWHM * sw_ppm / lw
+        n = int(min(MAX_POINTS, 2 ** int(np.ceil(np.log2(max(need, 4096))))))
+    else:
+        n = int(n_points)
+    under = lw > 0 and sw_ppm / n > lw / 3.0
+    return n, bool(under)
+
+
+def default_samples(mode) -> int:
+    """Samples for a sampled spectrum: static ones are cheap (one B₀
+    direction each), MAS ones carry a rotor cycle and its sidebands."""
+    return 1_000_000 if mode == "static" else 200_000
+
+
+def needs_sampling(sample=None, local=None, mode="mas") -> bool:
+    """Whether a spectrum goes through :func:`interactions.sample_spectrum`:
+    every static spectrum (averaged over the packing's orientation), and
+    under MAS a rotor or plate around the packing, or a local anisotropy
+    or quadrupolar coupling. The exact grid routes cover MAS of a
+    spherical sample with at most an isotropic local shift.
+
+    Why static is always sampled: one orientation of a finite packing
+    (B₀ along z) is not a powder average -- a 30-particle packing's δ_zz
+    had a mean of +8.1 ppm where the orientation average (= the mean
+    isotropic shift) is −3.8 ppm (2026-11-07)."""
+    from .interactions import has_local
+    from .sample import sample_from_dict
+    if mode == "static":
+        return True
+    return (sample is not None and not sample_from_dict(sample).is_uniform()) or has_local(local)
+
+
+def route(mode, sample=None, local=None):
+    """``(sampled, components)``: whether the spectrum is sampled
+    (:func:`needs_sampling`) and the field components it needs (plus δ_zz
+    and δ_iso for the field slice when sampled)."""
+    if mode not in SPECTRUM_MODES:
+        raise ValueError(f"mode: one of {', '.join(SPECTRUM_MODES)}.")
+    sampled = needs_sampling(sample, local, mode)
+    if sampled:
+        return True, ("tensor", "zz", "iso")
+    return False, {"mas_infinite": ("iso",), "mas": ("tensor", "iso")}[mode]
+
+
+def spectrum_from_field(field, *, nuclide="7Li", B0_tesla=9.4, mode="static", observe="inside",
+                        spin_rate_hz=10000.0, linewidth_hz=50.0, lineshape="lorentzian",
+                        centre_ppm=None, sw_ppm=None, n_points=None, max_order=8, sample=None,
+                        local=None, transitions="ct", quad_order="second", n_samples=None,
+                        seed=0, progress=None) -> dict:
+    """The spectrum of a field from :func:`bms_field` (with the components
+    :func:`route` asks for), by the route :func:`route` picks: sampled
+    (:func:`interactions.sample_spectrum`) or the exact grid route
+    (:func:`bms_spectrum`). A field can be reused for any number of
+    spectra (nucleus, field, MAS rate, sample, local interactions …)."""
+    sampled, comps = route(mode, sample, local)
+    keys = {"tensor": "delta_tensor", "iso": "delta_iso", "zz": "delta_zz"}
+    missing = [c for c in (("tensor",) if sampled else comps) if keys[c] not in field]
+    if missing:
+        raise ValueError(f"The field lacks {', '.join(missing)}: calculate it with "
+                         f"components={comps!r}.")
+    if sampled:
+        from .interactions import sample_spectrum
+        spec = sample_spectrum(field, nuclide=nuclide, B0_tesla=B0_tesla,
+                               mode="static" if mode == "static" else "mas",
+                               spin_rate_hz=1e12 if mode == "mas_infinite" else spin_rate_hz,
+                               sample=sample, local=local, observe=observe,
+                               transitions=transitions, quad_order=quad_order,
+                               n_samples=default_samples(mode) if not n_samples else n_samples,
+                               seed=seed, linewidth_hz=linewidth_hz, lineshape=lineshape,
+                               centre_ppm=centre_ppm, sw_ppm=sw_ppm, n_points=n_points,
+                               progress=progress)
+        spec["parameters"]["mode"] = mode
+        spec["route"] = "sampled"
+        return spec
+    contact = float((local or {}).get("contact_ppm", 0.0))
+    spec = bms_spectrum(field, nuclide=nuclide, B0_tesla=B0_tesla, mode=mode, observe=observe,
+                        spin_rate_hz=spin_rate_hz, linewidth_hz=linewidth_hz,
+                        lineshape=lineshape,
+                        centre_ppm=None if centre_ppm is None else centre_ppm - contact,
+                        sw_ppm=sw_ppm, n_points=n_points, max_order=max_order)
+    if contact:
+        spec["x_ppm"] = spec["x_ppm"] + contact
+        spec["x_Hz"] = spec["x_ppm"] * spec["BF1"]
+        spec["stats"]["mean_ppm"] += contact
+    spec["route"] = "grid"
+    if local:
+        spec["parameters"]["local"] = dict(local)
+    return spec
 
 
 def fast_bms_spectrum(particles, magnetic_susceptibility, nuclide="7Li", B0_tesla=9.4,
@@ -752,23 +871,42 @@ def fast_bms_spectrum(particles, magnetic_susceptibility, nuclide="7Li", B0_tesl
                       gridpoints=128, equation="ellipsoid", deformation="A", r=2, t=2,
                       slope_filter=2000, threshold=0.99, boundary="periodic",
                       sample_shape="sphere", linewidth_hz=50.0, lineshape="lorentzian",
-                      centre_ppm=None, sw_ppm=None, n_points=8192, max_order=8,
-                      dtype="float32", workers=-1):
+                      centre_ppm=None, sw_ppm=None, n_points=None, max_order=8,
+                      dtype="float32", workers=-1, sample=None, local=None,
+                      transitions="ct", quad_order="second", n_samples=None, seed=0,
+                      progress=None):
     """Packing -> BMS spectrum in one call: :func:`bms_field` (only the
-    components ``mode`` needs) then :func:`bms_spectrum`. Returns
-    ``(spectrum_dict, field)``."""
-    comps = {"static": ("zz",), "mas_infinite": ("iso",), "mas": ("tensor",)}[mode] \
-        if mode in SPECTRUM_MODES else ("zz",)
+    components the route needs) then :func:`spectrum_from_field`. Returns
+    ``(spectrum_dict, field)``.
+
+    ``sample`` (a :class:`~opennmr.notebook.bms.sample.Sample` or its dict:
+    a rotor, tube or plate around the packing) and ``local``
+    (:func:`~opennmr.notebook.bms.interactions.local_interactions`: contact
+    shift, spin-dipolar anisotropy, quadrupolar coupling) go through
+    :func:`~opennmr.notebook.bms.interactions.sample_spectrum`
+    (``transitions``, ``quad_order``, ``n_samples``, ``seed``), as does
+    every static spectrum (see :func:`needs_sampling`). Otherwise -- MAS of
+    a spherical sample, at most an isotropic local shift -- the exact grid
+    routes. With ``sample`` the field's own k = 0 term is a sphere's, the
+    sample's shape coming from ``sample`` instead."""
+    _sampled, comps = route(mode, sample, local)
+    if _sampled and sample_shape != "sphere":
+        raise ValueError("sample_shape is the grid routes' uniform bulk term; for this spectrum "
+                         "give the sample as sample= (opennmr.notebook.bms.sample.Sample), e.g. "
+                         "Sample('cylinder', diameter=…, length=…, axis_angle=0).")
+    if sample is not None:
+        sample_shape = "sphere"
     field = bms_field(particles, magnetic_susceptibility, box_size=box_size,
                       gridpoints=gridpoints, equation=equation, deformation=deformation, r=r,
                       t=t, slope_filter=slope_filter, threshold=threshold, boundary=boundary,
-                      sample_shape=sample_shape, components=comps + (("iso",) if mode == "mas"
-                                                                     else ()),
-                      dtype=dtype, workers=workers)
-    spec = bms_spectrum(field, nuclide=nuclide, B0_tesla=B0_tesla, mode=mode, observe=observe,
-                        spin_rate_hz=spin_rate_hz, linewidth_hz=linewidth_hz,
-                        lineshape=lineshape, centre_ppm=centre_ppm, sw_ppm=sw_ppm,
-                        n_points=n_points, max_order=max_order)
+                      sample_shape=sample_shape, components=comps, dtype=dtype, workers=workers)
+    spec = spectrum_from_field(field, nuclide=nuclide, B0_tesla=B0_tesla, mode=mode,
+                               observe=observe, spin_rate_hz=spin_rate_hz,
+                               linewidth_hz=linewidth_hz, lineshape=lineshape,
+                               centre_ppm=centre_ppm, sw_ppm=sw_ppm, n_points=n_points,
+                               max_order=max_order, sample=sample, local=local,
+                               transitions=transitions, quad_order=quad_order,
+                               n_samples=n_samples, seed=seed, progress=progress)
     return spec, field
 
 

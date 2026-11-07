@@ -267,7 +267,25 @@ def test_static_spectrum_keeps_the_intensity_and_the_mean():
     assert y.sum() == pytest.approx(st["weight"] * (1 - st["outside_window"]), rel=1e-6)
     assert (x * y).sum() / y.sum() == pytest.approx(st["mean_ppm"], abs=0.02 * st["std_ppm"] + 0.5)
     assert set(("x_ppm", "real_spectrum", "BF1", "SFO1", "nuclide")) <= set(spec)
-    assert "delta_zz" in field and "delta_tensor" not in field   # only what the mode needs
+    # static spectra are averaged over the packing's orientation (sampled), 2026-11-07
+    assert spec["route"] == "sampled" and "delta_tensor" in field
+
+
+def test_static_mean_is_the_orientation_average():
+    """Over every orientation of the packing, ⟨b·T·b⟩ = tr T / 3: the static
+    mean equals the mean isotropic shift (which one fixed orientation of a
+    small packing does not give)."""
+    static, field = F.fast_bms_spectrum(_packing(), CHI3, mode="static", box_size=200,
+                                        gridpoints=48, n_samples=400000)
+    occ = field["occupancy"]
+    iso_mean = float((field["delta_iso"] * occ).sum() / occ.sum())
+    assert static["stats"]["mean_ppm"] == pytest.approx(iso_mean, abs=0.02 * static["stats"]["std_ppm"])
+
+
+def test_sample_shape_and_a_sampled_route_are_refused_together():
+    with pytest.raises(ValueError, match="sample="):
+        F.fast_bms_spectrum(_packing(), CHI3, mode="static", box_size=200, gridpoints=32,
+                            sample_shape="cylinder_parallel")
 
 
 def test_mas_spectrum_has_sidebands_at_the_spinning_rate():

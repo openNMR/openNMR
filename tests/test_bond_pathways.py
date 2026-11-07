@@ -130,3 +130,83 @@ def test_plot_and_python():
     code = bp.pathways_to_python(["a.out"], reference="fm.out", observed="Na", magnetic=["Mn"],
                                  shell_bins=BINS, paramagnetic=SCALING, mode="spin_flip")
     compile(code, "<pathways>", "exec")
+
+
+# ---- which ion, and the neighbour distances (explicit user request, 2026-11-07) -------------
+
+def _chain(spins, rho_on_metals=True, tag="c"):
+    """Mn at x = 0, 6, 12, 18 Å and Na halfway between, in a 24 × 10 × 10 Å cell:
+    each Na's spin density comes from its two Mn neighbours (3 Å away)."""
+    lat = np.diag([24.0, 10.0, 10.0])
+    atoms = []
+    for k in range(4):
+        atoms.append({"species": "Mn", "label": f"Mn{k + 1}", "index": k,
+                      "position": np.array([6.0 * k, 0, 0]),
+                      "rho": float(spins[k]) if rho_on_metals else None, "hf": {}, "efg": None,
+                      "sigma": None})
+    for k in range(4):
+        rho = 0.01 * (spins[k] + spins[(k + 1) % 4])
+        atoms.append({"species": "Na", "label": f"Na{k + 1}", "index": 4 + k,
+                      "position": np.array([6.0 * k + 3.0, 0, 0]), "rho": rho, "hf": {},
+                      "efg": None, "sigma": None})
+    return {"code": "CRYSTAL", "path": tag, "lattice": lat, "atoms": atoms, "notes": [],
+            "info": {}, "method": {}, "spin_total": None, "energy_Eh": None}
+
+
+def test_identify_ions_by_spin_density_sign():
+    ref = _chain([1, 1, 1, 1], tag="fm")
+    found = bp.identify_ions([_chain([1, 1, -1, 1], tag="f3")], magnetic="Mn", reference=ref)
+    assert found[0]["ion"] == "Mn3" and found[0]["certain"]
+    assert "changed sign" in found[0]["how"] and "→" in found[0]["evidence"]
+
+
+def test_identify_ions_from_the_changed_neighbours_when_the_ion_has_no_rho():
+    ref = _chain([1, 1, 1, 1], rho_on_metals=False, tag="fm")
+    flip = _chain([1, 1, -1, 1], rho_on_metals=False, tag="f3")
+    found = bp.identify_ions([flip], magnetic="Mn", reference=ref)
+    assert found[0]["ion"] == "Mn3" and found[0]["certain"]
+    assert "sit around" in found[0]["how"] and "3.00 Å" in found[0]["evidence"]
+
+
+def test_an_uncertain_ion_is_flagged_and_noted():
+    """In the 2×2×2 cell every Na sees every Mn at the same distance: the
+    fallback cannot tell, says so, and the result asks to check it."""
+    ref = _calc([1] * 8, tag="fm")
+    flip = _calc([1, 1, -1, 1, 1, 1, 1, 1], tag="flip")
+    for c in (ref, flip):
+        for a in c["atoms"]:
+            if a["species"] == "Mn":
+                a["rho"] = None
+    found = bp.identify_ions([flip], magnetic="Mn", reference=ref)
+    assert found[0]["ion"] is not None and not found[0]["certain"]
+    res = bp.pathway_contributions([flip], reference=ref, observed="Na", magnetic="Mn",
+                                   shell_bins=BINS, paramagnetic=SCALING)
+    assert any("check it, or name it" in n for n in res["notes"])
+
+
+def test_identify_ions_given_and_single():
+    ref = _chain([1, 1, 1, 1], tag="fm")
+    found = bp.identify_ions([_chain([1, 1, -1, 1])], magnetic="Mn", reference=ref,
+                             flipped=["Mn4"])
+    assert found[0]["ion"] == "Mn4" and found[0]["how"] == "given"
+    with pytest.raises(ValueError, match="no atom Mn9"):
+        bp.identify_ions([_chain([1, 1, -1, 1])], magnetic="Mn", reference=ref, flipped=["Mn9"])
+    single = _chain([0, 0, 1, 0])
+    found = bp.identify_ions([single], magnetic="Mn", mode="single")
+    assert found[0]["ion"] == "Mn3" and found[0]["certain"]
+
+
+def test_neighbour_distances_shells_and_plot():
+    import matplotlib
+    matplotlib.use("Agg")
+    rows = bp.neighbour_distances(_chain([1, 1, 1, 1]), "Na", "Mn", max_r=10.0)
+    d = sorted({round(r["distance"], 6) for r in rows})
+    assert d[:2] == [3.0, 9.0]                   # nearest Mn, then the next along the chain
+    per_na = [r for r in rows if r["nucleus"] == "Na1" and r["distance"] < 3.5]
+    assert len(per_na) == 2
+    shells = bp.suggest_shells(rows, max_r=10.0)
+    assert shells[0][0] == "NN" and shells[0][1] < 3.0 < shells[0][2] < 9.0
+    fig = bp.plot_neighbour_distances(rows, shells, max_r=10.0, title="chain")
+    assert "$" in fig.axes[0].get_xlabel()
+    with pytest.raises(ValueError, match="No Li"):
+        bp.neighbour_distances(_chain([1, 1, 1, 1]), "Li", "Mn")

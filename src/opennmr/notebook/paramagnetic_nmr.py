@@ -644,6 +644,99 @@ def shift_vs_temperature(calc, temperatures, *, labels=None, element=None, model
     return {"T": T, "sites": sites, "model": model, "orbital_shift": float(orbital_shift)}
 
 
+#: How shifts known at one temperature scale with T (explicit user request,
+#: 2026-11-07: shift against temperature for any calculation, not only ORCA).
+SCALING_MODELS = {
+    "curie": "Curie: contact and dipolar ∝ 1/T",
+    "curie_weiss": "Curie–Weiss: contact and dipolar ∝ 1/(T − θ)",
+    "curie_bleaney": "Curie + Bleaney: contact ∝ 1/T, dipolar (pseudocontact) ∝ 1/T²",
+}
+
+
+def scaled_shift_vs_temperature(sites, temperatures, *, T_ref, model="curie", theta=0.0) -> dict:
+    """Shift against temperature from shifts calculated (or measured) at one
+    temperature ``T_ref`` -- by any code: VASP, CASTEP, CRYSTAL, Gaussian, ORCA.
+
+    ``sites``: ``{label: {"dia": δ_orb, "contact": δ_c, "dipolar": δ_d}}``
+    (ppm at ``T_ref``; "dipolar" the isotropic pseudocontact part, 0 for a
+    traceless spin-dipolar tensor). ``model`` (:data:`SCALING_MODELS`):
+    both paramagnetic parts ∝ 1/T (Curie), ∝ 1/(T − θ) (Curie–Weiss), or the
+    contact ∝ 1/T and the dipolar ∝ 1/T² (Bleaney's leading pseudocontact
+    term for an anisotropic ion). The diamagnetic shift does not change.
+
+    Returns the format of :func:`shift_vs_temperature` (``"T"``, ``"sites"``
+    with ``total``, ``contact``, ``pseudocontact``)."""
+    if model not in SCALING_MODELS:
+        raise ValueError(f"model: one of {', '.join(SCALING_MODELS)}.")
+    T = np.asarray(temperatures, dtype=float)
+    if T.ndim != 1 or len(T) < 2 or np.any(T <= 0):
+        raise ValueError("Give at least two positive temperatures (K).")
+    T_ref = float(T_ref)
+    if T_ref <= 0:
+        raise ValueError("The reference temperature must be positive.")
+    if model == "curie_weiss":
+        if np.any(T - theta <= 0) or T_ref - theta <= 0:
+            raise ValueError(f"T − θ must stay positive (θ = {theta:g} K): the Curie–Weiss law "
+                             "holds only above the ordering temperature.")
+        f_c = f_d = (T_ref - theta) / (T - theta)
+    elif model == "curie":
+        f_c = f_d = T_ref / T
+    else:
+        f_c, f_d = T_ref / T, (T_ref / T) ** 2
+    if not sites:
+        raise ValueError("Give at least one site.")
+    out = {}
+    for label, v in sites.items():
+        dia = float(v.get("dia", 0.0))
+        c = float(v.get("contact", 0.0)) * f_c
+        d = float(v.get("dipolar", 0.0)) * f_d
+        out[str(label)] = {"total": dia + c + d, "contact": c, "pseudocontact": d}
+    return {"T": T, "sites": out, "model": model, "T_ref": T_ref, "theta": float(theta)}
+
+
+def crystal_shift_vs_temperature(calc, temperatures, *, scaling, labels=None, element=None,
+                                 orbital_shift=0.0, components="both", T_ref=None,
+                                 theta=None) -> dict:
+    """Shift against temperature of a CRYSTAL calculation with its magnetic
+    scaling (``scaling``: the arguments of :func:`crystal_nmr.magnetic_scaling`).
+    The shift is linear in φ, so δ(T) = δ(T_ref) φ(T)/φ(T_ref): with a
+    Weiss constant θ and μ_eff (the Curie–Weiss route) φ ∝ 1/(T − θ) from
+    the scaling itself; a φ or χ_M belongs to one temperature, ``T_ref``,
+    and is carried to others by a Curie–Weiss law with ``theta`` (0: Curie)."""
+    from . import crystal_nmr
+    args = dict(scaling)
+    args.pop("components", None)
+    sc = crystal_nmr.magnetic_scaling(**args)
+    if sc["route"] == "curie_weiss":
+        T_ref, theta = sc["T"], float(sc["theta"])
+    else:
+        if T_ref is None:
+            raise ValueError("A φ or χ_M belongs to one temperature: give the temperature it "
+                             "was measured at (T_ref), and θ (0 for a Curie law).")
+        theta = 0.0 if theta is None else float(theta)
+    c = crystal_nmr.apply_scaling(calc, sc, components=components)
+    sites = {}
+    for a in c["atoms"]:
+        if a.get("delta_hf") is None:
+            continue
+        if element and a["species"] != element:
+            continue
+        if labels and a["label"] not in labels:
+            continue
+        fc = a["delta_fc"] if (a.get("delta_fc") is not None
+                               and components in ("both", "contact")) else 0.0
+        dip = (float(np.trace(a["delta_dip"]) / 3.0) if a.get("delta_dip") is not None
+               and components in ("both", "dipolar") else 0.0)
+        sites[a["label"]] = {"dia": float(orbital_shift), "contact": float(fc), "dipolar": dip}
+    if not sites:
+        raise ValueError("No nucleus with a hyperfine shift matches.")
+    out = scaled_shift_vs_temperature(sites, temperatures, T_ref=T_ref,
+                                      model="curie_weiss" if theta else "curie", theta=theta)
+    out["orbital_shift"] = float(orbital_shift)
+    out["source"] = "CRYSTAL"
+    return out
+
+
 TEMPERATURE_MODELS = {
     "curie": ("δ = δ_dia + a/T", "Curie law: a contact (and pseudocontact) shift ∝ 1/T"),
     "curie_bleaney": ("δ = δ_dia + a/T + b/T²",

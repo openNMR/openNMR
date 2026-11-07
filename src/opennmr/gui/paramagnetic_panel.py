@@ -2,16 +2,24 @@
 Simulate ▸ Paramagnetic NMR tools: each tool a collapsible section,
 drawing on the Simulation plot and copying its notebook code.
 
-1. Shift against temperature (2026-11-06) -- calculated from the ORCA
-   g/ZFS/hyperfine calculation of Simulate ▸ DFT tensors (its magnetic
-   model), and/or measured shifts fitted to a Curie, Curie + Bleaney (1/T²)
-   or Curie–Weiss law (:mod:`opennmr.notebook.paramagnetic_nmr`).
-2. Bulk magnetic susceptibility, fast (2026-11-07) -- the BMS shift
-   spectrum of a particle packing by superposition: one set of FFTs for
-   every particle (:mod:`opennmr.notebook.bms.fast`).
-3. Bond pathways (2026-11-06) -- per-shell, per-species contributions from
-   spin-flip or single-ion DFT calculations, sent to Simulate ▸ pNMR (CIF)
-   (:mod:`opennmr.notebook.bond_pathways`).
+1. Shift against temperature (2026-11-06; any source 2026-11-07) --
+   calculated from Simulate ▸ DFT tensors (an ORCA g/ZFS/hyperfine
+   calculation with its magnetic model, or a CRYSTAL calculation with its
+   φ / χ_M / Curie–Weiss scaling) or from shifts typed in from any code;
+   measured shifts fitted to a Curie, Curie + Bleaney (1/T²) or
+   Curie–Weiss law (:mod:`opennmr.notebook.paramagnetic_nmr`).
+2. Bulk magnetic susceptibility (BMS) shifts (2026-11-07) -- the spectrum
+   of a particle packing (one set of FFTs for every particle,
+   :mod:`opennmr.notebook.bms.fast`) in its sample (a rotor, tube, plate
+   or sphere, :mod:`~opennmr.notebook.bms.sample`), with local contact,
+   spin-dipolar and quadrupolar interactions
+   (:mod:`~opennmr.notebook.bms.interactions`); the spectrum, a field
+   slice or the packing in 3-D (:mod:`~opennmr.notebook.bms.views`); a
+   time check before long runs.
+3. Bond pathways (2026-11-06; 2026-11-07: which ion each file flips, and
+   the neighbour distances to set the shells by) -- per-shell, per-species
+   contributions from spin-flip or single-ion DFT calculations, sent to
+   Simulate ▸ pNMR (CIF) (:mod:`opennmr.notebook.bond_pathways`).
 
 The lanthanide-series and pseudocontact-shift sections were removed from
 the GUI (explicit user request, 2026-11-07); their notebook modules,
@@ -31,12 +39,15 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMessageBox, QPushButton,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QSlider, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..notebook import bond_pathways as bp
 from ..notebook import paramagnetic_nmr as pmr
 from ..notebook.bms import fast as bmsf
+from ..notebook.bms import interactions as bms_inter
+from ..notebook.bms import sample as bms_sample
+from ..notebook.bms import views as bms_views
 from .combined_panels import _spin_box
 from .widgets.collapsible_section import CollapsibleSection
 
@@ -104,10 +115,15 @@ class ParamagneticToolsPanel(QWidget):
              "from DFT for the pNMR (CIF) simulation.")
 
     def __init__(self, draw_plot=None, style=None, dft_source=None, send_pathways=None,
-                 plot_spectrum=None, parent=None) -> None:
+                 plot_spectrum=None, show_spectrum=None, keep_spectrum=None,
+                 parent=None) -> None:
         super().__init__(parent)
         self._draw_plot = draw_plot
         self._plot_spectrum = plot_spectrum
+        # show a spectrum again without logging a new run (Show ▸ Spectrum)
+        self._show_spectrum = show_spectrum or plot_spectrum
+        # into Open experiments (MainWindow._keep_simulation)
+        self._keep_spectrum = keep_spectrum
         self._style = style or (lambda: {})
         self._dft_source = dft_source or (lambda: None)
         self._send_pathways = send_pathways
@@ -118,8 +134,13 @@ class ParamagneticToolsPanel(QWidget):
         self._bms_packed_key = None
         self.bms_field = None
         self.bms_spectrum = None
+        self.bms_nmr_spectrum = None
+        self._bms_field_key = None
+        self._bms_field_new = False
         self.pathway_files: list[str] = []
         self.pathway_result = None
+        self.pathway_ions = None
+        self.neighbour_rows = None
         layout = QVBoxLayout(self)
         blurb = QLabel(self.BLURB)
         blurb.setWordWrap(True)
@@ -127,7 +148,7 @@ class ParamagneticToolsPanel(QWidget):
         self.pm_temperature_section = CollapsibleSection("Shift against temperature",
                                                          content=self._build_temperature())
         self.pm_bms_section = CollapsibleSection(
-            "Bulk magnetic susceptibility shifts (fast)", content=self._build_bms())
+            "Bulk magnetic susceptibility (BMS) shifts", content=self._build_bms())
         self.pm_pathway_section = CollapsibleSection("Bond pathways from DFT (for pNMR (CIF))",
                                                      content=self._build_pathways())
         for sec in (self.pm_temperature_section, self.pm_bms_section, self.pm_pathway_section):
@@ -137,10 +158,12 @@ class ParamagneticToolsPanel(QWidget):
     def _fontsize(self) -> float:
         return float((self._style() or {}).get("labelsize") or 11.0)
 
-    def _show(self, draw) -> bool:
+    def _show(self, draw, kind="curve") -> bool:
+        """``kind``: "curve", "2d" (a map) or "tensor" (a 3-D picture), so
+        the Simulation plot gives it the matching style and tools."""
         if self._draw_plot is None:
             return False
-        self._draw_plot(draw, "curve")
+        self._draw_plot(draw, kind)
         return True
 
     @staticmethod
@@ -153,22 +176,75 @@ class ParamagneticToolsPanel(QWidget):
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
-        calc_box = QGroupBox("Calculated (the ORCA calculation in Simulate ▸ DFT tensors)")
-        cf = QFormLayout(calc_box)
+        calc_box = QGroupBox("Calculated shifts")
+        cv = QVBoxLayout(calc_box)
+        cf = QFormLayout()
+        self._T_calc_form = cf
+        self.pm_T_source_combo = QComboBox()
+        self.pm_T_source_combo.addItem("The calculation in Simulate ▸ DFT tensors (ORCA or CRYSTAL)",
+                                       "dft")
+        self.pm_T_source_combo.addItem("Shifts at one temperature, typed in (any code)", "typed")
+        self.pm_T_source_combo.setToolTip(
+            "ORCA: its magnetic model (calculated spin Hamiltonian, Curie–Weiss, μ_eff). CRYSTAL: "
+            "its scaling (φ ∝ 1/(T − θ)). Typed in: shifts from any code (VASP, CASTEP, "
+            "Gaussian, …) at one temperature, carried to others by a Curie, Curie–Weiss or "
+            "Curie + Bleaney law.")
+        cf.addRow("Source:", self.pm_T_source_combo)
+        self.pm_T_ref_spin = _spin_box(1.0, 3000.0, 298.0, 2, " K", step=1.0,
+                                       tip="The temperature the shifts (or a CRYSTAL φ or χ_M) "
+                                           "belong to.")
+        cf.addRow("Shifts at T:", self.pm_T_ref_spin)
+        self.pm_T_scaling_combo = QComboBox()
+        for key, text in pmr.SCALING_MODELS.items():
+            self.pm_T_scaling_combo.addItem(text, key)
+        cf.addRow("Temperature law:", self.pm_T_scaling_combo)
+        self.pm_T_theta_spin = _spin_box(-1e5, 1e5, 0.0, 2, " K", step=1.0,
+                                         tip="Weiss constant θ (negative: antiferromagnetic). "
+                                             "For a CRYSTAL φ or χ_M, 0 is a Curie law.")
+        cf.addRow("Weiss constant θ:", self.pm_T_theta_spin)
+        cv.addLayout(cf)
+        self._T_typed_box = QWidget()
+        tv = QVBoxLayout(self._T_typed_box)
+        tv.setContentsMargins(0, 0, 0, 0)
+        hint = QLabel("One row per site: the diamagnetic (orbital) shift, and the contact and "
+                      "isotropic dipolar (pseudocontact) shifts at the temperature above. Paste "
+                      "(Ctrl+V) four columns: site, δ_dia, δ_contact, δ_dipolar.")
+        hint.setWordWrap(True)
+        tv.addWidget(hint)
+        self.pm_T_calc_table = _table(["Site", "δ_dia (ppm)", "δ_contact (ppm)",
+                                       "δ_dipolar (ppm)"], 0, 120)
+        tv.addWidget(self.pm_T_calc_table)
+        row = QHBoxLayout()
+        for text, fn in (("Add Site", lambda: self.pm_T_calc_table.insertRow(
+                             self.pm_T_calc_table.rowCount())),
+                         ("Remove Sites", self._remove_calc_rows),
+                         ("Paste", self.paste_calculated)):
+            b = QPushButton(text)
+            b.clicked.connect(lambda _c=False, f=fn: f())
+            row.addWidget(b)
+        row.addStretch(1)
+        tv.addLayout(row)
+        cv.addWidget(self._T_typed_box)
+        rf = QFormLayout()
         self.pm_T_min_spin = _spin_box(1.0, 3000.0, 200.0, 1, " K", step=10.0)
         self.pm_T_max_spin = _spin_box(1.0, 3000.0, 400.0, 1, " K", step=10.0)
         self.pm_T_points_spin = _spin_box(2, 2000, 41, 0, step=1)
-        cf.addRow("From:", self.pm_T_min_spin)
-        cf.addRow("To:", self.pm_T_max_spin)
-        cf.addRow("Points:", self.pm_T_points_spin)
-        self.pm_T_components_check = QCheckBox("Also show contact and pseudocontact parts")
-        cf.addRow("", self.pm_T_components_check)
+        rf.addRow("From:", self.pm_T_min_spin)
+        rf.addRow("To:", self.pm_T_max_spin)
+        rf.addRow("Points:", self.pm_T_points_spin)
+        self.pm_T_components_check = QCheckBox("Also show the contact and dipolar parts")
+        rf.addRow("", self.pm_T_components_check)
         self.pm_T_calc_button = QPushButton("Calculate δ(T)")
         self.pm_T_calc_button.setToolTip(
-            "The isotropic shift of the sites ticked in Simulate ▸ DFT tensors, with its magnetic "
-            "model (calculated spin Hamiltonian, Curie–Weiss or μ_eff), over this range.")
+            "The isotropic shift of each site over this range: the sites ticked in Simulate ▸ "
+            "DFT tensors with its magnetic model or scaling, or the typed-in sites.")
         self.pm_T_calc_button.clicked.connect(lambda: self.calculate_temperature())
-        cf.addRow("", self.pm_T_calc_button)
+        rf.addRow("", self.pm_T_calc_button)
+        self.pm_T_source_label = _label()
+        rf.addRow(self.pm_T_source_label)
+        cv.addLayout(rf)
+        self.pm_T_source_combo.currentIndexChanged.connect(lambda _i: self._sync_T_rows())
+        self.pm_T_scaling_combo.currentIndexChanged.connect(lambda _i: self._sync_T_rows())
         v.addWidget(calc_box)
         data_box = QGroupBox("Measured shifts")
         dv = QVBoxLayout(data_box)
@@ -225,7 +301,67 @@ class ParamagneticToolsPanel(QWidget):
         v.addLayout(row)
         self.pm_T_result_label = _label()
         v.addWidget(self.pm_T_result_label)
+        self._sync_T_rows()
         return w
+
+    def _sync_T_rows(self) -> None:
+        typed = self.pm_T_source_combo.currentData() == "typed"
+        self._T_typed_box.setVisible(typed)
+        self._T_calc_form.setRowVisible(self.pm_T_scaling_combo, typed)
+        # θ: the typed-in Curie–Weiss law, or carrying a CRYSTAL φ / χ_M to other T
+        self._T_calc_form.setRowVisible(
+            self.pm_T_theta_spin,
+            not typed or self.pm_T_scaling_combo.currentData() == "curie_weiss")
+        self.pm_T_ref_spin.setToolTip(
+            "The temperature of the typed-in shifts." if typed else
+            "Only for a CRYSTAL φ or χ_M (they belong to one temperature): the temperature "
+            "they were measured at. A Curie–Weiss scaling carries its own T and θ.")
+
+    def _remove_calc_rows(self) -> None:
+        rows = sorted({i.row() for i in self.pm_T_calc_table.selectedIndexes()}, reverse=True)
+        if not rows and self.pm_T_calc_table.rowCount():
+            rows = [self.pm_T_calc_table.rowCount() - 1]
+        for r in rows:
+            self.pm_T_calc_table.removeRow(r)
+
+    def paste_calculated(self, text=None) -> int:
+        """Rows of site, δ_dia, δ_contact, δ_dipolar (tab, comma or space
+        separated; a missing dipolar column is 0)."""
+        text = QGuiApplication.clipboard().text() if text is None else text
+        rows = []
+        for line in (text or "").splitlines():
+            line = line.strip()
+            parts = [x.strip() for x in (re.split(r"[\t,;]+", line) if re.search(r"[\t,;]", line)
+                                         else line.split()) if x.strip()]
+            if len(parts) < 3:
+                continue
+            try:
+                vals = [float(x) for x in parts[1:4]]
+            except ValueError:
+                continue
+            rows.append([parts[0]] + vals + [0.0] * (3 - len(vals)))
+        if rows:
+            self.pm_T_calc_table.setRowCount(0)
+            for site, dia, c, d in rows:
+                r = self.pm_T_calc_table.rowCount()
+                self.pm_T_calc_table.insertRow(r)
+                for col, t in enumerate((site, f"{dia:g}", f"{c:g}", f"{d:g}")):
+                    _set(self.pm_T_calc_table, r, col, t, True)
+        return len(rows)
+
+    def calculated_sites(self) -> dict:
+        sites = {}
+        for r in range(self.pm_T_calc_table.rowCount()):
+            name = _cell(self.pm_T_calc_table, r, 0)
+            vals = [_cell(self.pm_T_calc_table, r, c) for c in (1, 2, 3)]
+            if not name and not any(vals):
+                continue
+            name = name or f"site {r + 1}"
+            sites[name] = {k: (_num(v, f"{name}, {k}") if v else 0.0)
+                           for k, v in zip(("dia", "contact", "dipolar"), vals)}
+        if not sites:
+            raise ValueError("Type at least one site: its δ_dia, δ_contact and δ_dipolar.")
+        return sites
 
     def _remove_T_rows(self) -> None:
         rows = sorted({i.row() for i in self.pm_T_table.selectedIndexes()}, reverse=True)
@@ -264,25 +400,56 @@ class ParamagneticToolsPanel(QWidget):
             d.append(_num(b, f"Row {r + 1}, δ"))
         return np.array(T), np.array(d)
 
+    def _temperature_grid(self):
+        T0, T1 = self.pm_T_min_spin.value(), self.pm_T_max_spin.value()
+        if T1 <= T0:
+            raise ValueError("The range must go up: 'To' above 'From'.")
+        return np.linspace(T0, T1, int(self.pm_T_points_spin.value()))
+
     def calculate_temperature(self, quiet=False) -> bool:
-        src = self._dft_source()
         try:
-            if src is None:
-                raise ValueError("Read an ORCA output with hyperfine tensors in Simulate ▸ DFT "
-                                 "tensors first (step 1), and choose its magnetic model (step 2).")
-            if not src["labels"]:
-                raise ValueError("Tick at least one site in Simulate ▸ DFT tensors.")
-            args = dict(src["args"])
-            args.pop("components", None)
-            T = np.linspace(self.pm_T_min_spin.value(), self.pm_T_max_spin.value(),
-                            int(self.pm_T_points_spin.value()))
-            args.pop("T", None)
-            self.temperature_curves = pmr.shift_vs_temperature(
-                src["calc"], T, labels=src["labels"], orbital_shift=src["orbital"], **args)
+            T = self._temperature_grid()
+            if self.pm_T_source_combo.currentData() == "typed":
+                curves = pmr.scaled_shift_vs_temperature(
+                    self.calculated_sites(), T, T_ref=self.pm_T_ref_spin.value(),
+                    model=self.pm_T_scaling_combo.currentData(),
+                    theta=self.pm_T_theta_spin.value())
+                where = (f"{len(curves['sites'])} typed-in sites at "
+                         f"{self.pm_T_ref_spin.value():g} K, "
+                         f"{pmr.SCALING_MODELS[curves['model']].split(':')[0]}")
+            else:
+                src = self._dft_source()
+                if src is None:
+                    raise ValueError("Read an ORCA output with hyperfine tensors or a CRYSTAL "
+                                     "calculation in Simulate ▸ DFT tensors first (step 1), and "
+                                     "set its magnetic model or scaling (step 2), or type the "
+                                     "shifts in (Source).")
+                if not src["labels"]:
+                    raise ValueError("Tick at least one site in Simulate ▸ DFT tensors.")
+                if src.get("kind") == "crystal":
+                    args = dict(src["args"])
+                    comps = args.pop("components", "both")
+                    curves = pmr.crystal_shift_vs_temperature(
+                        src["calc"], T, scaling=args, labels=src["labels"],
+                        orbital_shift=src["orbital"], components=comps,
+                        T_ref=self.pm_T_ref_spin.value(), theta=self.pm_T_theta_spin.value())
+                    where = (f"CRYSTAL, {os.path.basename(src['path'])}: δ ∝ φ(T) ∝ "
+                             f"1/(T − θ), θ = {curves['theta']:g} K, from "
+                             f"{curves['T_ref']:g} K")
+                else:
+                    args = dict(src["args"])
+                    args.pop("components", None)
+                    args.pop("T", None)
+                    curves = pmr.shift_vs_temperature(
+                        src["calc"], T, labels=src["labels"], orbital_shift=src["orbital"], **args)
+                    where = (f"ORCA, {os.path.basename(src['path'])}: model "
+                             f"{src['args'].get('model')}")
         except (ValueError, KeyError) as exc:
             if not quiet:
                 QMessageBox.warning(self, "Shift against temperature", str(exc))
             return False
+        self.temperature_curves = curves
+        self.pm_T_source_label.setText(f"Calculated: {where}.")
         self.plot_temperature()
         return True
 
@@ -335,15 +502,30 @@ class ParamagneticToolsPanel(QWidget):
     def temperature_python(self) -> str:
         lines = ["from opennmr.notebook import paramagnetic_nmr as pm", "import numpy as np"]
         src = self._dft_source()
-        if self.temperature_curves is not None and src is not None:
-            args = {k: v for k, v in src["args"].items() if k not in ("components", "T")}
+        grid = (f"T = np.linspace({self.pm_T_min_spin.value()!r}, "
+                f"{self.pm_T_max_spin.value()!r}, {int(self.pm_T_points_spin.value())})")
+        typed = self.pm_T_source_combo.currentData() == "typed"
+        if self.temperature_curves is not None and typed:
+            lines += [grid, f"sites = {self.calculated_sites()!r}",
+                      f"curves = pm.scaled_shift_vs_temperature(sites, T, "
+                      f"T_ref={self.pm_T_ref_spin.value()!r}, "
+                      f"model={self.pm_T_scaling_combo.currentData()!r}, "
+                      f"theta={self.pm_T_theta_spin.value()!r})"]
+        elif self.temperature_curves is not None and src is not None:
             lines += ["from opennmr.notebook import dft_nmr",
-                      f"calc = dft_nmr.read_calculation({src['path']!r})",
-                      f"T = np.linspace({self.pm_T_min_spin.value()!r}, "
-                      f"{self.pm_T_max_spin.value()!r}, {int(self.pm_T_points_spin.value())})",
-                      f"curves = pm.shift_vs_temperature(calc, T, labels={src['labels']!r}, "
-                      f"orbital_shift={src['orbital']!r}, "
-                      + ", ".join(f"{k}={v!r}" for k, v in args.items()) + ")"]
+                      f"calc = dft_nmr.read_calculation({src['path']!r})", grid]
+            if src.get("kind") == "crystal":
+                args = dict(src["args"])
+                comps = args.pop("components", "both")
+                lines.append(f"curves = pm.crystal_shift_vs_temperature(calc, T, scaling={args!r}, "
+                             f"labels={src['labels']!r}, orbital_shift={src['orbital']!r}, "
+                             f"components={comps!r}, T_ref={self.pm_T_ref_spin.value()!r}, "
+                             f"theta={self.pm_T_theta_spin.value()!r})")
+            else:
+                args = {k: v for k, v in src["args"].items() if k not in ("components", "T")}
+                lines.append(f"curves = pm.shift_vs_temperature(calc, T, labels={src['labels']!r}, "
+                             f"orbital_shift={src['orbital']!r}, "
+                             + ", ".join(f"{k}={v!r}" for k, v in args.items()) + ")")
         else:
             lines.append("curves = None")
         T, d = self.temperature_data()
@@ -372,7 +554,7 @@ class ParamagneticToolsPanel(QWidget):
         if path:
             edit.setText(path)
 
-    # ==== 2. bulk magnetic susceptibility (fast) =================================
+    # ==== 2. bulk magnetic susceptibility (BMS) shifts ===========================
 
     BMS_GRIDS = (64, 96, 128, 160, 192, 256)
 
@@ -472,16 +654,122 @@ class ParamagneticToolsPanel(QWidget):
         self.pm_bms_boundary_combo.addItem("Periodic (the packing fills the sample)", "periodic")
         self.pm_bms_boundary_combo.addItem("Isolated cluster in vacuum (8× the voxels)", "isolated")
         gf.addRow("Boundary:", self.pm_bms_boundary_combo)
-        self.pm_bms_sample_combo = QComboBox()
-        for key, (text, _D) in bmsf.SAMPLE_SHAPES.items():
-            self.pm_bms_sample_combo.addItem(text, key)
-        self.pm_bms_sample_combo.setToolTip(
-            "The macroscopic sample's demagnetising tensor (the k = 0 term). It only changes "
-            "static spectra: under MAS its isotropic part is always 1/3.")
-        gf.addRow("Sample shape:", self.pm_bms_sample_combo)
         self.pm_bms_double_check = QCheckBox("Double precision (slower; single is ample)")
         gf.addRow("", self.pm_bms_double_check)
         v.addWidget(gb)
+
+        smp = QGroupBox("Sample")
+        smf = QFormLayout(smp)
+        self._bms_sample_form = smf
+        self.pm_bms_sample_combo = QComboBox()
+        for text, key in (("MAS rotor", "rotor"), ("Tube or other cylinder", "cylinder"),
+                          ("Plate (rectangular block)", "plate"),
+                          ("Sphere (no macroscopic shift)", "sphere")):
+            self.pm_bms_sample_combo.addItem(text, key)
+        self.pm_bms_sample_combo.setToolTip(
+            "The shape of the packed powder. Its own demagnetising field shifts each part of the "
+            "sample differently: −χ_v (N(r) − 1/3), χ_v the powder's volume susceptibility. Only "
+            "the shape matters (its proportions), not its size.")
+        smf.addRow("Shape:", self.pm_bms_sample_combo)
+        self.pm_bms_rotor_combo = QComboBox()
+        for od in bms_sample.ROTORS:
+            self.pm_bms_rotor_combo.addItem(f"{od:g} mm", od)
+        self.pm_bms_rotor_combo.setCurrentIndex(list(bms_sample.ROTORS).index(3.2))
+        self.pm_bms_rotor_combo.setToolTip("Outer diameter; choosing one fills in a typical inner "
+                                           "diameter (less the wall) and packed length.")
+        smf.addRow("Rotor:", self.pm_bms_rotor_combo)
+        inner0, len0 = bms_sample.ROTORS[3.2]
+        self.pm_bms_inner_spin = _spin_box(0.01, 100.0, inner0, 3, " mm", step=0.1,
+                                           tip="Inner diameter of the packed volume: the rotor's "
+                                               "outer diameter less twice the wall.")
+        smf.addRow("Inner diameter:", self.pm_bms_inner_spin)
+        self.pm_bms_length_spin = _spin_box(0.01, 500.0, len0, 3, " mm", step=0.5,
+                                            tip="Length of the packed powder (between the caps "
+                                                "or spacers).")
+        smf.addRow("Packed length:", self.pm_bms_length_spin)
+        self.pm_bms_plate_edit = QLineEdit("10, 10, 1")
+        self.pm_bms_plate_edit.setToolTip("Side lengths a, b and the thickness c (along the plate "
+                                          "normal), mm.")
+        smf.addRow("Plate a, b, thickness (mm):", self.pm_bms_plate_edit)
+        self.pm_bms_angle_spin = _spin_box(0.0, 90.0, bms_sample.MAGIC_ANGLE_DEG, 3, "°",
+                                           step=1.0,
+                                           tip="Static only: the angle between B₀ and the "
+                                               "cylinder axis or plate normal. A rotor at rest "
+                                               "in a MAS probe: 54.74°; a tube in a solution or "
+                                               "static probe: 0°; a plate lying in a horizontal "
+                                               "coil: 90°. Under MAS the rotor is at the magic "
+                                               "angle and turns.")
+        smf.addRow("Axis angle to B₀ (static):", self.pm_bms_angle_spin)
+        self.pm_bms_rotor_check = QCheckBox("Include the rotor's own field (wall and caps)")
+        self.pm_bms_rotor_check.setChecked(True)
+        self.pm_bms_rotor_check.setToolTip(
+            "The rotor is magnetised too: its wall (a tube over the rotor's length) and the caps "
+            "or spacers filling the bore beyond the powder shift the sample, most near its ends. "
+            "A long tube has no field in its bore, so the wall acts through its ends. Shifts are "
+            "relative to the bare sample; an external reference in the same rotor cancels the "
+            "uniform part.")
+        smf.addRow("", self.pm_bms_rotor_check)
+        self.pm_bms_rotor_length_spin = _spin_box(0.01, 500.0, len0 + 2 * 3.2, 3, " mm",
+                                                  step=0.5,
+                                                  tip="Length of the rotor tube (the wall). "
+                                                      "Typical: the packed length plus about one "
+                                                      "outer diameter at each end.")
+        smf.addRow("Rotor length:", self.pm_bms_rotor_length_spin)
+        self.pm_bms_wall_combo, self.pm_bms_wall_chi_spin = self._material_row(
+            smf, "Rotor wall:", "zirconia",
+            exclude=("none",), tip="The wall's volume susceptibility (SI, ppm).")
+        self.pm_bms_caps_combo, self.pm_bms_caps_chi_spin = self._material_row(
+            smf, "Caps and spacers:", "vespel",
+            tip="What fills the bore above and below the powder (caps, spacers, inserts); "
+                "'Nothing' for an empty bore.")
+        self.pm_bms_sample_note = _label()
+        smf.addRow(self.pm_bms_sample_note)
+        v.addWidget(smp)
+
+        lc = QGroupBox("Local interactions of the observed nuclei")
+        lc.setCheckable(True)
+        lc.setChecked(False)
+        lc.setToolTip("Interactions every observed nucleus has besides the BMS shift, fixed in "
+                      "its particle's frame (the principal frame of the particle's χ): the "
+                      "Fermi contact (isotropic) shift, the spin-dipolar anisotropy, a "
+                      "quadrupolar coupling. Nuclei between the particles take them in random "
+                      "orientations.")
+        self.pm_bms_local_group = lc
+        lf = QFormLayout(lc)
+        self._bms_local_form = lf
+        self.pm_bms_contact_spin = _spin_box(-1e6, 1e6, 0.0, 3, " ppm", step=10.0,
+                                             tip="Isotropic shift: Fermi contact plus any "
+                                                 "orbital (diamagnetic) shift.")
+        lf.addRow("Contact shift δ_iso:", self.pm_bms_contact_spin)
+        self.pm_bms_aniso_spin = _spin_box(-1e6, 1e6, 0.0, 3, " ppm", step=10.0,
+                                           tip="Spin-dipolar shift anisotropy δ (Haeberlen: "
+                                               "δ_zz − δ_iso).")
+        lf.addRow("Spin-dipolar anisotropy δ:", self.pm_bms_aniso_spin)
+        self.pm_bms_eta_spin = _spin_box(0.0, 1.0, 0.0, 3, step=0.05)
+        lf.addRow("Asymmetry η:", self.pm_bms_eta_spin)
+        self.pm_bms_euler_edit = QLineEdit("0, 0, 0")
+        self.pm_bms_euler_edit.setToolTip("Euler angles α, β, γ (ZYZ, degrees) of the shift "
+                                          "tensor's principal frame in the particle's frame.")
+        lf.addRow("Its Euler angles (°):", self.pm_bms_euler_edit)
+        self.pm_bms_cq_spin = _spin_box(-100.0, 100.0, 0.0, 4, " MHz", step=0.1,
+                                        tip="Quadrupolar coupling constant C_Q (0: none).")
+        lf.addRow("Quadrupolar C_Q:", self.pm_bms_cq_spin)
+        self.pm_bms_etaq_spin = _spin_box(0.0, 1.0, 0.0, 3, step=0.05)
+        lf.addRow("Asymmetry η_Q:", self.pm_bms_etaq_spin)
+        self.pm_bms_eulerq_edit = QLineEdit("0, 0, 0")
+        self.pm_bms_eulerq_edit.setToolTip("Euler angles α, β, γ (ZYZ, degrees) of the EFG "
+                                           "principal frame in the particle's frame.")
+        lf.addRow("Its Euler angles (°):", self.pm_bms_eulerq_edit)
+        self.pm_bms_transitions_combo = QComboBox()
+        self.pm_bms_transitions_combo.addItem("Central transition", "ct")
+        self.pm_bms_transitions_combo.addItem("All transitions", "all")
+        lf.addRow("Transitions:", self.pm_bms_transitions_combo)
+        self.pm_bms_qorder_combo = QComboBox()
+        for text, key in (("Second order", "second"), ("First order", "first"),
+                          ("Exact", "exact")):
+            self.pm_bms_qorder_combo.addItem(text, key)
+        lf.addRow("Quadrupolar theory:", self.pm_bms_qorder_combo)
+        v.addWidget(lc)
 
         sb = QGroupBox("Spectrum")
         sf = QFormLayout(sb)
@@ -500,6 +788,15 @@ class ParamagneticToolsPanel(QWidget):
                                            tip="Sidebands kept on each side; what lies beyond is "
                                                "reported.")
         sf.addRow("Sideband orders:", self.pm_bms_order_spin)
+        self.pm_bms_samples_spin = _spin_box(0, 1e8, 0, 0, step=50000,
+                                             tip="Samples of the sampled spectrum (a static "
+                                                 "spectrum, or a rotor, plate or local "
+                                                 "interactions under MAS). Automatic: 1,000,000 "
+                                                 "static, 200,000 MAS. The result reports the "
+                                                 "Monte Carlo noise: raise it if that is not "
+                                                 "small.")
+        self.pm_bms_samples_spin.setSpecialValueText("Automatic")
+        sf.addRow("Samples:", self.pm_bms_samples_spin)
         self.pm_bms_observe_combo = QComboBox()
         for key, text in bmsf.OBSERVE.items():
             self.pm_bms_observe_combo.addItem(text, key)
@@ -518,24 +815,70 @@ class ParamagneticToolsPanel(QWidget):
 
         row = QHBoxLayout()
         self.pm_bms_run_button = QPushButton("Simulate")
+        self.pm_bms_run_button.setToolTip("The field is kept: changing only the sample, the "
+                                          "local interactions or the spectrum settings does "
+                                          "not recalculate it.")
         self.pm_bms_run_button.clicked.connect(lambda: self.simulate_bms())
         row.addWidget(self.pm_bms_run_button)
-        self.pm_bms_slice_button = QPushButton("Show Field Slice")
-        self.pm_bms_slice_button.setToolTip("The shift field through the middle of the box (xz "
-                                            "plane, B₀ vertical), with the particle outlines.")
-        self.pm_bms_slice_button.clicked.connect(lambda: self.plot_bms_slice())
-        row.addWidget(self.pm_bms_slice_button)
+        row.addWidget(QLabel("Show:"))
+        self.pm_bms_view_combo = QComboBox()
+        for text, key in (("Spectrum", "spectrum"), ("Field slice", "slice"),
+                          ("Packing (3-D)", "packing")):
+            self.pm_bms_view_combo.addItem(text, key)
+        self.pm_bms_view_combo.setToolTip("What the Simulation plot shows, from the last run: "
+                                          "nothing is simulated again.")
+        self.pm_bms_view_combo.activated.connect(lambda _i: self.show_bms_view())
+        row.addWidget(self.pm_bms_view_combo)
+        self.pm_bms_keep_button = QPushButton("Keep in Open Experiments")
+        self.pm_bms_keep_button.setToolTip(
+            "Add the simulated spectrum to Open experiments (with its simulation settings in "
+            "its history), to compare with measured spectra or process it like any other.")
+        self.pm_bms_keep_button.setEnabled(False)
+        self.pm_bms_keep_button.clicked.connect(lambda: self.keep_bms_spectrum())
+        row.addWidget(self.pm_bms_keep_button)
         self.pm_bms_python_button = QPushButton("Copy as Python")
         self.pm_bms_python_button.clicked.connect(lambda: self._copy_safe(self.bms_python))
         row.addWidget(self.pm_bms_python_button)
         row.addStretch(1)
         v.addLayout(row)
+        self._bms_slice_row = QWidget()
+        sr = QHBoxLayout(self._bms_slice_row)
+        sr.setContentsMargins(0, 0, 0, 0)
+        sr.addWidget(QLabel("Slice:"))
+        self.pm_bms_plane_combo = QComboBox()
+        for text, key in (("xz (B₀ vertical)", "y"), ("yz (B₀ vertical)", "x"),
+                          ("xy (B₀ out of the page)", "z")):
+            self.pm_bms_plane_combo.addItem(text, key)
+        self.pm_bms_plane_combo.currentIndexChanged.connect(lambda _i: self._on_slice_changed())
+        sr.addWidget(self.pm_bms_plane_combo)
+        self.pm_bms_quantity_combo = QComboBox()
+        self.pm_bms_quantity_combo.addItem("δ_zz (B₀ along z)", "delta_zz")
+        self.pm_bms_quantity_combo.addItem("δ_iso", "delta_iso")
+        self.pm_bms_quantity_combo.currentIndexChanged.connect(lambda _i: self._on_slice_changed())
+        sr.addWidget(self.pm_bms_quantity_combo)
+        self.pm_bms_slice_slider = QSlider(Qt.Orientation.Horizontal)
+        self.pm_bms_slice_slider.setRange(0, 127)
+        self.pm_bms_slice_slider.setValue(64)
+        self.pm_bms_slice_slider.setToolTip("Where the slice cuts the box.")
+        self.pm_bms_slice_slider.valueChanged.connect(lambda _v: self._on_slice_changed())
+        sr.addWidget(self.pm_bms_slice_slider, 1)
+        v.addWidget(self._bms_slice_row)
         self.pm_bms_result_label = _label()
         v.addWidget(self.pm_bms_result_label)
         for combo in (self.pm_bms_source_combo, self.pm_bms_mode_combo,
-                      self.pm_bms_boundary_combo, self.pm_bms_equation_combo):
+                      self.pm_bms_boundary_combo, self.pm_bms_equation_combo,
+                      self.pm_bms_sample_combo, self.pm_bms_view_combo):
             combo.currentIndexChanged.connect(lambda _i: self._sync_bms_rows())
+        self.pm_bms_local_group.toggled.connect(lambda _c: self._sync_bms_rows())
+        self.pm_bms_rotor_check.toggled.connect(lambda _c: (self._sync_bms_rows(), self._update_sample_note()))
+        self.pm_bms_aniso_spin.valueChanged.connect(lambda _v: self._sync_bms_rows())
+        self.pm_bms_cq_spin.valueChanged.connect(lambda _v: self._sync_bms_rows())
+        self.pm_bms_rotor_combo.activated.connect(lambda _i: self._rotor_chosen())
+        self.pm_bms_sample_combo.activated.connect(lambda _i: self._sample_shape_chosen())
+        for wdg in (self.pm_bms_inner_spin, self.pm_bms_length_spin):
+            wdg.valueChanged.connect(lambda _v: self._update_sample_note())
         self._sync_bms_rows()
+        self._update_sample_note()
         return w
 
     def _sync_bms_rows(self) -> None:
@@ -548,11 +891,139 @@ class ParamagneticToolsPanel(QWidget):
             pf.setRowVisible(wdg, pack)
         pf.setRowVisible(self.pm_bms_deform_combo,
                          self.pm_bms_equation_combo.currentData() != "ellipsoid")
-        self._bms_grid_form.setRowVisible(
-            self.pm_bms_sample_combo, self.pm_bms_boundary_combo.currentData() == "periodic")
+        shape = self.pm_bms_sample_combo.currentData()
+        smf = self._bms_sample_form
+        smf.setRowVisible(self.pm_bms_rotor_combo, shape == "rotor")
+        for wdg in (self.pm_bms_inner_spin, self.pm_bms_length_spin):
+            smf.setRowVisible(wdg, shape in ("rotor", "cylinder"))
+        smf.setRowVisible(self.pm_bms_plate_edit, shape == "plate")
+        rotor = shape == "rotor"
+        smf.setRowVisible(self.pm_bms_rotor_check, rotor)
+        with_rotor = rotor and self.pm_bms_rotor_check.isChecked()
+        for wdg in (self.pm_bms_rotor_length_spin, self.pm_bms_wall_combo._row,
+                    self.pm_bms_caps_combo._row):
+            smf.setRowVisible(wdg, with_rotor)
         mode = self.pm_bms_mode_combo.currentData()
+        smf.setRowVisible(self.pm_bms_angle_spin, shape != "sphere" and mode == "static")
+        lf = self._bms_local_form
+        quad = self.pm_bms_cq_spin.value() != 0.0
+        for wdg in (self.pm_bms_etaq_spin, self.pm_bms_eulerq_edit, self.pm_bms_transitions_combo,
+                    self.pm_bms_qorder_combo):
+            lf.setRowVisible(wdg, quad)
+        lf.setRowVisible(self.pm_bms_euler_edit,
+                         self.pm_bms_aniso_spin.value() != 0.0 or quad)
+        try:
+            sampled = bmsf.needs_sampling(self.bms_sample(), self.bms_local(), mode)
+        except ValueError:
+            sampled = True
         self._bms_spec_form.setRowVisible(self.pm_bms_rate_spin, mode == "mas")
-        self._bms_spec_form.setRowVisible(self.pm_bms_order_spin, mode == "mas")
+        self._bms_spec_form.setRowVisible(self.pm_bms_order_spin, mode == "mas" and not sampled)
+        self._bms_spec_form.setRowVisible(self.pm_bms_samples_spin, sampled)
+        self._bms_slice_row.setVisible(self.pm_bms_view_combo.currentData() == "slice")
+
+    def _material_row(self, form, label, default, exclude=(), tip=""):
+        """A material combo (with Custom) and its χ (ppm) box, kept in step."""
+        combo = QComboBox()
+        for key, (chi, text) in bms_sample.MATERIALS.items():
+            if key in exclude:
+                continue
+            combo.addItem(text.split(":")[0], key)
+            combo.setItemData(combo.count() - 1, text, Qt.ItemDataRole.ToolTipRole)
+        combo.addItem("Custom", "custom")
+        combo.setCurrentIndex(combo.findData(default))
+        spin = _spin_box(-1e5, 1e5, bms_sample.MATERIALS[default][0] * 1e6, 4, " ppm", step=0.1,
+                         tip=tip + " Volume susceptibility, SI, in ppm (10⁻⁶).")
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(combo, 1)
+        h.addWidget(spin)
+        form.addRow(label, row)
+        combo.setToolTip(tip)
+
+        def chosen(_i):
+            key = combo.currentData()
+            if key in bms_sample.MATERIALS:
+                spin.blockSignals(True)
+                spin.setValue(bms_sample.MATERIALS[key][0] * 1e6)
+                spin.blockSignals(False)
+
+        def typed(value):
+            key = combo.currentData()
+            if key in bms_sample.MATERIALS and abs(bms_sample.MATERIALS[key][0] * 1e6 - value) > 1e-9:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(combo.findData("custom"))
+                combo.blockSignals(False)
+        combo.activated.connect(chosen)
+        spin.valueChanged.connect(typed)
+        row.setObjectName(f"_row_{default}")
+        combo._row = row
+        return combo, spin
+
+    def _rotor_chosen(self) -> None:
+        od = self.pm_bms_rotor_combo.currentData()
+        inner, length = bms_sample.ROTORS[od]
+        self.pm_bms_inner_spin.setValue(inner)
+        self.pm_bms_length_spin.setValue(length)
+        self.pm_bms_rotor_length_spin.setValue(length + 2.0 * od)
+        self._update_sample_note()
+
+    def _sample_shape_chosen(self) -> None:
+        """A sensible static axis angle when the user picks a shape."""
+        shape = self.pm_bms_sample_combo.currentData()
+        self.pm_bms_angle_spin.setValue(bms_sample.MAGIC_ANGLE_DEG if shape == "rotor" else 0.0)
+        self._update_sample_note()
+
+    def _update_sample_note(self) -> None:
+        shape = self.pm_bms_sample_combo.currentData()
+        text = ""
+        if shape in ("rotor", "cylinder"):
+            d, L = self.pm_bms_inner_spin.value(), self.pm_bms_length_spin.value()
+            vol = np.pi * (d / 2) ** 2 * L
+            text = f"Packed volume {vol:.3g} µL (mm³), length/diameter {L / d:.3g}."
+            if shape == "rotor":
+                od = self.pm_bms_rotor_combo.currentData()
+                typical = bms_sample.ROTORS[od]
+                text += (f" Typical {od:g} mm values: {typical[0]:g} mm inner diameter, "
+                         f"{typical[1]:g} mm packed length; walls, spacers and inserts differ "
+                         "between rotors, so set yours.")
+                if self.pm_bms_rotor_check.isChecked():
+                    text += (" Shifts are relative to the bare sample; a reference in the same "
+                             "rotor cancels the rotor's uniform part.")
+        self.pm_bms_sample_note.setText(text)
+
+    def bms_sample(self):
+        """The macroscopic sample (None: a sphere)."""
+        shape = self.pm_bms_sample_combo.currentData()
+        angle = self.pm_bms_angle_spin.value()
+        if shape == "sphere":
+            return None
+        if shape == "plate":
+            sides = self._triplet(self.pm_bms_plate_edit.text(), "Plate sides")
+            return bms_sample.Sample("plate", sides=sides, axis_angle=angle)
+        d, L = self.pm_bms_inner_spin.value(), self.pm_bms_length_spin.value()
+        rotor = None
+        if shape == "rotor":
+            od = self.pm_bms_rotor_combo.currentData()
+            if d >= od:
+                raise ValueError(f"The inner diameter ({d:g} mm) must be below the rotor's "
+                                 f"outer diameter ({od:g} mm).")
+            if self.pm_bms_rotor_check.isChecked():
+                rotor = {"outer_diameter": od, "length": self.pm_bms_rotor_length_spin.value(),
+                         "chi_wall": self.pm_bms_wall_chi_spin.value() * 1e-6,
+                         "chi_caps": self.pm_bms_caps_chi_spin.value() * 1e-6}
+        return bms_sample.Sample("cylinder", diameter=d, length=L, axis_angle=angle, rotor=rotor)
+
+    def bms_local(self):
+        """The local interactions (None when the group is off)."""
+        if not self.pm_bms_local_group.isChecked():
+            return None
+        return bms_inter.local_interactions(
+            contact_ppm=self.pm_bms_contact_spin.value(), aniso_ppm=self.pm_bms_aniso_spin.value(),
+            eta=self.pm_bms_eta_spin.value(),
+            euler=self._triplet(self.pm_bms_euler_edit.text(), "Euler angles"),
+            C_Q_MHz=self.pm_bms_cq_spin.value(), eta_Q=self.pm_bms_etaq_spin.value(),
+            euler_Q=self._triplet(self.pm_bms_eulerq_edit.text(), "Quadrupolar Euler angles"))
 
     @staticmethod
     def _triplet(text, what):
@@ -560,7 +1031,7 @@ class ParamagneticToolsPanel(QWidget):
         if len(vals) == 1:
             vals *= 3
         if len(vals) != 3:
-            raise ValueError(f"{what}: give one value or three (x, y, z).")
+            raise ValueError(f"{what}: give one value or three.")
         return tuple(vals)
 
     def bms_packing_arguments(self) -> dict:
@@ -602,6 +1073,8 @@ class ParamagneticToolsPanel(QWidget):
         self.bms_packing_stats = stats
         self._bms_packed_key = self._packing_key()
         self.pm_bms_result_label.setText(self._packing_text())
+        if not quiet and self.pm_bms_view_combo.currentData() == "packing":
+            self.show_bms_view()
         return True
 
     def _packing_text(self) -> str:
@@ -634,28 +1107,80 @@ class ParamagneticToolsPanel(QWidget):
                 "deformation": self.pm_bms_deform_combo.currentData(),
                 "slope_filter": self.pm_bms_slope_spin.value(),
                 "boundary": self.pm_bms_boundary_combo.currentData(),
-                "sample_shape": self.pm_bms_sample_combo.currentData(),
                 "dtype": "float64" if self.pm_bms_double_check.isChecked() else "float32"}
 
     def bms_spectrum_arguments(self) -> dict:
         nucleus = self.pm_bms_nucleus_edit.text().strip()
         if not nucleus:
             raise ValueError("Give the nucleus, e.g. 7Li.")
+        sample = self.bms_sample()
         return {"nuclide": nucleus, "B0_tesla": self.pm_bms_B0_spin.value(),
                 "mode": self.pm_bms_mode_combo.currentData(),
                 "observe": self.pm_bms_observe_combo.currentData(),
                 "spin_rate_hz": self.pm_bms_rate_spin.value(),
                 "max_order": int(self.pm_bms_order_spin.value()),
                 "linewidth_hz": self.pm_bms_lw_spin.value(),
-                "lineshape": self.pm_bms_shape_combo.currentData()}
+                "lineshape": self.pm_bms_shape_combo.currentData(),
+                "sample": None if sample is None else sample.to_dict(),
+                "local": self.bms_local(),
+                "transitions": self.pm_bms_transitions_combo.currentData(),
+                "quad_order": self.pm_bms_qorder_combo.currentData(),
+                "n_samples": int(self.pm_bms_samples_spin.value()) or None}
+
+    def _field_key(self, particles, fkw, comps):
+        src = (os.path.abspath(particles), os.path.getmtime(particles)) \
+            if isinstance(particles, str) else id(particles)
+        return (src, tuple((k, tuple(v) if isinstance(v, (list, tuple)) else v)
+                           for k, v in sorted(fkw.items())))
+
+    def _bms_field_for(self, particles, fkw, comps, quiet):
+        """The field: the kept one when its inputs are the same and it has
+        the components, else a new one (after a time check)."""
+        from . import long_run
+        from ..notebook import run_time
+        key = self._field_key(particles, fkw, comps)
+        keys = {"tensor": "delta_tensor", "iso": "delta_iso", "zz": "delta_zz"}
+        if self._bms_field_key == key and self.bms_field is not None and \
+                all(keys[c] in self.bms_field for c in comps):
+            return self.bms_field, False
+        if long_run.enabled() and not quiet:
+            est = bms_views.estimate_field_time(particles, components=comps, **fkw)
+            if est["seconds"] > run_time.SIMULATION_WARN_S or est["memory_GB"] > 4.0:
+                if not long_run.ask(self, "BMS field", "field calculation", est["text"],
+                                    "To make it faster: a coarser grid (each step down halves "
+                                    "the time or better); single precision; a periodic "
+                                    "boundary (isolated has 8× the voxels)."):
+                    return None, False
+        with _busy():
+            field = bmsf.bms_field(particles, components=comps, sample_shape="sphere", **fkw)
+        self._bms_field_key = key
+        return field, True
 
     def simulate_bms(self, quiet=False) -> bool:
+        from . import long_run
+        from ..notebook import run_time
         try:
             particles = self.bms_particles_for_run()
             fkw = self.bms_field_arguments()
             skw = self.bms_spectrum_arguments()
+            sampled, comps = bmsf.route(skw["mode"], skw["sample"], skw["local"])
+            field, new = self._bms_field_for(particles, fkw, comps, quiet)
+            if field is None:
+                return False
+            self.bms_field = field
+            if sampled and long_run.enabled() and not quiet:
+                n = skw["n_samples"] or bmsf.default_samples(skw["mode"])
+                est = bms_views.estimate_sampling_time(
+                    field, n, **self._sampling_kwargs(skw))
+                if est["seconds"] > run_time.SIMULATION_WARN_S:
+                    if not long_run.ask(self, "BMS spectrum", "spectrum", est["text"],
+                                        "To make it faster: fewer samples (more Monte Carlo "
+                                        "noise); a faster MAS rate (fewer sidebands); the "
+                                        "central transition only; second rather than exact "
+                                        "quadrupolar theory."):
+                        return False
             with _busy():
-                spectrum, field = bmsf.fast_bms_spectrum(particles, **fkw, **skw)
+                spectrum = bmsf.spectrum_from_field(field, **skw)
         except (ValueError, KeyError, OSError, MemoryError) as exc:
             if not quiet:
                 msg = str(exc).strip("'\"")
@@ -664,18 +1189,32 @@ class ParamagneticToolsPanel(QWidget):
                 QMessageBox.warning(self, "BMS simulation", msg)
             return False
         self.bms_spectrum = spectrum
-        self.bms_field = field
+        self._bms_field_new = new
+        self.bms_nmr_spectrum = self._bms_nmr_spectrum(spectrum, fkw, skw)
+        self.pm_bms_keep_button.setEnabled(self._keep_spectrum is not None)
         self.pm_bms_result_label.setText(self.bms_summary())
+        self._sync_slice_controls()
+        self.pm_bms_view_combo.setCurrentIndex(self.pm_bms_view_combo.findData("spectrum"))
         if self._plot_spectrum is not None:
-            self._plot_spectrum(self._bms_nmr_spectrum(spectrum, fkw, skw))
+            self._plot_spectrum(self.bms_nmr_spectrum)
         return True
+
+    @staticmethod
+    def _sampling_kwargs(skw):
+        keep = ("nuclide", "B0_tesla", "observe", "linewidth_hz", "lineshape", "sample", "local",
+                "transitions", "quad_order")
+        kw = {k: skw[k] for k in keep}
+        kw["mode"] = "static" if skw["mode"] == "static" else "mas"
+        kw["spin_rate_hz"] = 1e12 if skw["mode"] == "mas_infinite" else skw["spin_rate_hz"]
+        return kw
 
     def _bms_nmr_spectrum(self, spectrum, fkw, skw):
         from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
         axis = NMRAxis(kind="frequency", ppm=np.asarray(spectrum["x_ppm"], dtype=float))
-        params = {"kind": "bms", "model": "BMS (fast)",
+        params = {"kind": "bms", "model": "BMS",
                   **{k: (list(v) if isinstance(v, tuple) else v) for k, v in fkw.items()},
-                  **skw, "n_particles": self.bms_field["n_particles"],
+                  **{k: v for k, v in skw.items()}, "route": spectrum.get("route"),
+                  "n_particles": self.bms_field["n_particles"],
                   "volume_fraction": round(self.bms_field["volume_fraction"], 4)}
         metadata = NMRMetadata(vendor="simulated", nucleus=spectrum["nuclide"],
                                sfo1=float(spectrum["SFO1"]), bf1=float(spectrum["BF1"]),
@@ -686,15 +1225,39 @@ class ParamagneticToolsPanel(QWidget):
     def bms_summary(self) -> str:
         if self.bms_field is None or self.bms_spectrum is None:
             return ""
-        f, st = self.bms_field, self.bms_spectrum["stats"]
+        f, sp = self.bms_field, self.bms_spectrum
+        st, par = sp["stats"], sp.get("parameters", {})
         tm = f["timings"]
         lines = [f"{f['n_particles']} particles, volume fraction {f['volume_fraction']:.3f} "
                  f"(on the grid), {'×'.join(str(n) for n in f['parameters']['gridpoints'])} grid, "
-                 f"{f['parameters']['boundary']}.",
-                 f"Shift: mean {st['mean_ppm']:.4g} ppm, standard deviation {st['std_ppm']:.4g} ppm "
-                 f"(Gaussian FWHM equivalent {st['fwhm_gauss_ppm']:.4g} ppm).",
-                 f"Time: shapes {tm['shapes']:.2f} s, FFTs "
-                 f"{tm['forward_fft'] + tm['inverse_fft']:.2f} s."]
+                 f"{f['parameters']['boundary']}."]
+        sample = par.get("sample")
+        if sample:
+            lines.append(f"Sample: {bms_sample.sample_from_dict(sample).describe()}, χ_v = "
+                         f"{st.get('chi_v', 0):.3g}.")
+        if par.get("local"):
+            lo = par["local"]
+            bits = [f"δ_iso {lo['contact_ppm']:g} ppm"]
+            if lo["aniso_ppm"]:
+                bits.append(f"δ {lo['aniso_ppm']:g} ppm, η {lo['eta']:g}")
+            if lo["C_Q_MHz"]:
+                bits.append(f"C_Q {lo['C_Q_MHz']:g} MHz, η_Q {lo['eta_Q']:g} "
+                            f"({par.get('quad_order', 'second')} order, "
+                            f"{'all transitions' if par.get('transitions') == 'all' else 'CT'})")
+            lines.append("Local: " + "; ".join(bits) + ".")
+        lines.append(f"Shift: mean {st['mean_ppm']:.4g} ppm, standard deviation "
+                     f"{st['std_ppm']:.4g} ppm (Gaussian FWHM equivalent "
+                     f"{st['fwhm_gauss_ppm']:.4g} ppm)"
+                     + (" (isotropic shifts)" if par.get("mode", "").startswith("mas") else "")
+                     + ".")
+        timing = (f"Time: field {tm['total']:.2f} s" if self._bms_field_new
+                  else "Time: field kept from the last run")
+        if sp.get("route") == "sampled":
+            timing += (f", spectrum {st['seconds']:.2f} s ({st['n_samples']:,} samples, Monte "
+                       f"Carlo noise {100 * st['mc_noise'] / 2:.2g} % of the peak).")
+        else:
+            timing += ", spectrum on the grid (exact)."
+        lines.append(timing)
         warn = []
         if st.get("sidebands_beyond_max_order", 0) > 1e-3:
             warn.append(f"{100 * st['sidebands_beyond_max_order']:.1f} % of the intensity lies in "
@@ -704,6 +1267,11 @@ class ParamagneticToolsPanel(QWidget):
                         f"128 × the MAS rate: those sidebands are approximate")
         if st.get("outside_window", 0) > 1e-3:
             warn.append(f"{100 * st['outside_window']:.1f} % of the intensity fell outside the window")
+        if st.get("under_resolved"):
+            warn.append("the line width spans fewer than 3 points of the axis: peak heights are "
+                        "set by the grid")
+        if st.get("mc_noise", 0) / 2 > 0.02:
+            warn.append("the Monte Carlo noise is not small: raise Samples")
         if f["parameters"]["boundary"] == "periodic" and \
                 self.pm_bms_source_combo.currentData() == "pack":
             warn.append("the packer keeps particles inside the box walls, so the layer at the box "
@@ -711,17 +1279,90 @@ class ParamagneticToolsPanel(QWidget):
         lines += [f"• {w_}." for w_ in warn]
         return "\n".join(lines)
 
+    def _sync_slice_controls(self) -> None:
+        if self.bms_field is None:
+            return
+        avail = {"delta_zz": "delta_zz" in self.bms_field, "delta_iso": "delta_iso" in self.bms_field}
+        model = self.pm_bms_quantity_combo.model()
+        for i in range(self.pm_bms_quantity_combo.count()):
+            model.item(i).setEnabled(bool(avail.get(self.pm_bms_quantity_combo.itemData(i))))
+        if not avail.get(self.pm_bms_quantity_combo.currentData()):
+            for i in range(self.pm_bms_quantity_combo.count()):
+                if avail.get(self.pm_bms_quantity_combo.itemData(i)):
+                    self.pm_bms_quantity_combo.blockSignals(True)
+                    self.pm_bms_quantity_combo.setCurrentIndex(i)
+                    self.pm_bms_quantity_combo.blockSignals(False)
+                    break
+        n = len(self.bms_field[self.pm_bms_plane_combo.currentData()])
+        if self.pm_bms_slice_slider.maximum() != n - 1:
+            self.pm_bms_slice_slider.blockSignals(True)
+            self.pm_bms_slice_slider.setRange(0, n - 1)
+            self.pm_bms_slice_slider.setValue(n // 2)
+            self.pm_bms_slice_slider.blockSignals(False)
+
+    def _on_slice_changed(self) -> None:
+        if self.bms_field is not None and self.pm_bms_view_combo.currentData() == "slice":
+            self._sync_slice_controls()
+            self.plot_bms_slice()
+
+    def keep_bms_spectrum(self):
+        """The last simulated spectrum into Open experiments; its index there."""
+        if self.bms_nmr_spectrum is None or self._keep_spectrum is None:
+            return None
+        return self._keep_spectrum(self.bms_nmr_spectrum)
+
+    def show_bms_view(self, view=None) -> bool:
+        """Show the spectrum, the field slice or the packing of the last run
+        on the Simulation plot -- nothing is simulated again (the packing
+        needs only the particles)."""
+        if view is not None:
+            self.pm_bms_view_combo.setCurrentIndex(self.pm_bms_view_combo.findData(view))
+        view = self.pm_bms_view_combo.currentData()
+        self._sync_bms_rows()
+        if view == "packing":
+            return self.plot_bms_packing()
+        if view == "slice":
+            return self.plot_bms_slice()
+        if self.bms_nmr_spectrum is None:
+            return self.simulate_bms()
+        if self._show_spectrum is not None:
+            self._show_spectrum(self.bms_nmr_spectrum)
+            return True
+        return False
+
     def plot_bms_slice(self) -> bool:
         if self.bms_field is None:
             if not self.simulate_bms():
                 return False
+        self._sync_slice_controls()
         field = self.bms_field
-        quantity = "delta_zz" if "delta_zz" in field else "delta_iso"
+        quantity = self.pm_bms_quantity_combo.currentData()
+        axis = self.pm_bms_plane_combo.currentData()
+        index = self.pm_bms_slice_slider.value()
 
         def draw(figure):
-            bmsf.plot_bms_slice(field, figure=figure, quantity=quantity,
+            bmsf.plot_bms_slice(field, figure=figure, quantity=quantity, axis=axis, index=index,
                                 fontsize=self._fontsize())
-        return self._show(draw)
+        return self._show(draw, "2d")
+
+    def plot_bms_packing(self, quiet=False) -> bool:
+        try:
+            particles = self.bms_particles_for_run()
+            fkw = self.bms_field_arguments()
+        except (ValueError, OSError) as exc:
+            if not quiet:
+                QMessageBox.warning(self, "Packing", str(exc))
+            return False
+        style = self._style() or {}
+
+        def draw(figure):
+            bms_views.plot_packing_3d(particles, fkw["magnetic_susceptibility"],
+                                      box_size=fkw["box_size"], equation=fkw["equation"],
+                                      deformation=fkw["deformation"],
+                                      slope_filter=fkw["slope_filter"], figure=figure,
+                                      fontsize=self._fontsize(),
+                                      tensor_style=style.get("tensor_style"))
+        return self._show(draw, "tensor")
 
     def bms_python(self) -> str:
         fkw = self.bms_field_arguments()
@@ -736,12 +1377,17 @@ class ParamagneticToolsPanel(QWidget):
             particles = ("from opennmr.notebook.bms import packing\n"
                          f"particles, stats = packing.{fn}("
                          + ", ".join(f"{k}={v!r}" for k, v in kw.items()) + ", verbose=False)")
-        lines = ["from opennmr.notebook.bms import fast as bmsf", particles,
+        quantity = "delta_zz" if bmsf.route(skw["mode"], skw["sample"], skw["local"])[0] or \
+            skw["mode"] == "static" else "delta_iso"
+        lines = ["from opennmr.notebook.bms import fast as bmsf",
+                 "from opennmr.notebook.bms import views", particles,
                  f"spectrum, field = bmsf.fast_bms_spectrum(particles, {chi!r}, "
                  + ", ".join(f"{k}={v!r}" for k, v in {**fkw, **skw}.items()) + ")",
                  "print(spectrum['stats'])",
-                 "fig = bmsf.plot_bms_slice(field, quantity="
-                 f"{'delta_zz' if skw['mode'] == 'static' else 'delta_iso'!r})"]
+                 f"fig = bmsf.plot_bms_slice(field, quantity={quantity!r})",
+                 f"fig3d = views.plot_packing_3d(particles, {chi!r}, "
+                 f"box_size={fkw['box_size']!r}, equation={fkw['equation']!r}, "
+                 f"deformation={fkw['deformation']!r})"]
         return "\n".join(lines) + "\n"
 
     # ==== 3. bond pathways ========================================================
@@ -796,13 +1442,23 @@ class ParamagneticToolsPanel(QWidget):
         self.pm_bp_magnetic_edit = QLineEdit("Mn, Fe")
         self.pm_bp_magnetic_edit.setToolTip("Paramagnetic species, comma separated.")
         f2.addRow("Paramagnetic species:", self.pm_bp_magnetic_edit)
-        self.pm_bp_flipped_edit = QLineEdit()
-        self.pm_bp_flipped_edit.setPlaceholderText("optional: Mn3, Mn5, … (one per file, in order)")
-        self.pm_bp_flipped_edit.setToolTip(
-            "Which ion each calculation flips (or holds). Empty: found from the spin densities "
-            "at the nuclei (CRYSTAL), or as the only ion of a paramagnetic species.")
-        f2.addRow("Ion of each file:", self.pm_bp_flipped_edit)
         v.addLayout(f2)
+        ion_hint = QLabel("The ion each file flips (or holds), found from the files: check it, "
+                          "and type another label (e.g. Mn5, as in the output) to override it.")
+        ion_hint.setWordWrap(True)
+        v.addWidget(ion_hint)
+        self.pm_bp_ion_table = _table(["File", "Ion", "How it was found", "Evidence"], 0, 130)
+        self.pm_bp_ion_table.setToolTip(
+            "Spin flip: the ion whose own spin density changed sign; otherwise the ion the "
+            "changed spin densities sit around. Single ion: the only paramagnetic ion, or the "
+            "one carrying spin. ⚠ marks a guess to check. Only the Ion column can be edited.")
+        v.addWidget(self.pm_bp_ion_table)
+        row = QHBoxLayout()
+        self.pm_bp_identify_button = QPushButton("Identify Ions")
+        self.pm_bp_identify_button.clicked.connect(lambda: self.identify_pathway_ions())
+        row.addWidget(self.pm_bp_identify_button)
+        row.addStretch(1)
+        v.addLayout(row)
         self.pm_bp_shell_table = _table(["Shell", "r min (Å)", "r max (Å)"], 0, 140)
         for name, lo, hi in (("NN", "0", "3.6"), ("NNN", "3.6", "5.5")):
             r = self.pm_bp_shell_table.rowCount()
@@ -811,6 +1467,26 @@ class ParamagneticToolsPanel(QWidget):
                 _set(self.pm_bp_shell_table, r, c, t, True)
         v.addWidget(QLabel("Shells (as in Simulate ▸ pNMR (CIF)):"))
         v.addWidget(self.pm_bp_shell_table)
+        nrow = QHBoxLayout()
+        self.pm_bp_maxr_spin = _spin_box(1.0, 50.0, 8.0, 2, " Å", step=0.5,
+                                         tip="How far out to list the paramagnetic neighbours.")
+        nrow.addWidget(QLabel("Neighbours up to:"))
+        nrow.addWidget(self.pm_bp_maxr_spin)
+        self.pm_bp_distances_button = QPushButton("Neighbour Distances")
+        self.pm_bp_distances_button.setToolTip(
+            "The paramagnetic neighbours of the observed nuclei against distance (every "
+            "periodic image), stacked by species, with the shells shaded: set the shells "
+            "where the gaps are. From the reference calculation (spin flip) or the first file.")
+        self.pm_bp_distances_button.clicked.connect(lambda: self.plot_neighbour_distances())
+        nrow.addWidget(self.pm_bp_distances_button)
+        self.pm_bp_suggest_button = QPushButton("Suggest Shells")
+        self.pm_bp_suggest_button.setToolTip("Shells with their boundaries halfway across the "
+                                             "gaps between clusters of distances: check them "
+                                             "against the plot.")
+        self.pm_bp_suggest_button.clicked.connect(lambda: self.suggest_pathway_shells())
+        nrow.addWidget(self.pm_bp_suggest_button)
+        nrow.addStretch(1)
+        v.addLayout(nrow)
         row = QHBoxLayout()
         a2 = QPushButton("Add Shell")
         a2.clicked.connect(lambda: self.pm_bp_shell_table.insertRow(self.pm_bp_shell_table.rowCount()))
@@ -920,8 +1596,112 @@ class ParamagneticToolsPanel(QWidget):
                          _num(_cell(self.pm_bp_shell_table, r, 2), f"{name}, r max")))
         return bins
 
+    def _structure_calc(self):
+        """The calculation the neighbour distances come from."""
+        mode = self.pm_bp_mode_combo.currentData()
+        ref = self.pm_bp_reference_edit.text().strip()
+        if mode == "spin_flip" and ref:
+            return ref
+        if self.pathway_files:
+            return self.pathway_files[0]
+        raise ValueError("Add the calculations (and, for spin flip, the reference) first.")
+
+    def plot_neighbour_distances(self, quiet=False) -> bool:
+        try:
+            calc = self._structure_calc()
+            observed = self.pm_bp_observed_edit.text().strip()
+            magnetic = [x.strip() for x in self.pm_bp_magnetic_edit.text().split(",") if x.strip()]
+            max_r = self.pm_bp_maxr_spin.value()
+            rows = bp.neighbour_distances(calc, observed, magnetic, max_r=max_r)
+            try:
+                bins = self.pathway_shells()
+            except ValueError:
+                bins = []
+        except (OSError, ValueError, KeyError) as exc:
+            if not quiet:
+                QMessageBox.warning(self, "Neighbour distances", str(exc))
+            return False
+        self.neighbour_rows = rows
+        title = f"{os.path.basename(str(calc))}: {'/'.join(magnetic)} around {observed}"
+
+        def draw(figure):
+            bp.plot_neighbour_distances(rows, bins, figure=figure, fontsize=self._fontsize(),
+                                        max_r=max_r, title=title)
+        return self._show(draw)
+
+    def suggest_pathway_shells(self, quiet=False) -> bool:
+        if self.neighbour_rows is None and not self.plot_neighbour_distances(quiet):
+            return False
+        bins = bp.suggest_shells(self.neighbour_rows, max_r=self.pm_bp_maxr_spin.value())
+        if not bins:
+            if not quiet:
+                QMessageBox.warning(self, "Suggest shells", "No gap between the distances to put "
+                                                            "a shell boundary in: widen the range.")
+            return False
+        t = self.pm_bp_shell_table
+        t.setRowCount(0)
+        for name, lo, hi in bins:
+            r = t.rowCount()
+            t.insertRow(r)
+            for c, text in enumerate((name, f"{lo:g}", f"{hi:g}")):
+                _set(t, r, c, text, True)
+        return self.plot_neighbour_distances(quiet)
+
+    def _ion_table_matches_files(self) -> bool:
+        t = self.pm_bp_ion_table
+        return t.rowCount() == len(self.pathway_files) and all(
+            (t.item(r, 0) is not None and t.item(r, 0).toolTip() == path)
+            for r, path in enumerate(self.pathway_files))
+
+    def identify_pathway_ions(self, quiet=False) -> bool:
+        """Find the ion of each file (keeping any label typed over a
+        found one) and show how it was found."""
+        try:
+            mode = self.pm_bp_mode_combo.currentData()
+            ref = self.pm_bp_reference_edit.text().strip() or None
+            magnetic = [x.strip() for x in self.pm_bp_magnetic_edit.text().split(",") if x.strip()]
+            typed = self._typed_ions() if self._ion_table_matches_files() else None
+            found = bp.identify_ions(list(self.pathway_files), magnetic=magnetic, mode=mode,
+                                     reference=ref if mode == "spin_flip" else None,
+                                     flipped=typed)
+        except (OSError, ValueError, KeyError) as exc:
+            if not quiet:
+                QMessageBox.warning(self, "Identify ions", str(exc))
+            return False
+        t = self.pm_bp_ion_table
+        t.setRowCount(0)
+        for path, f in zip(self.pathway_files, found):
+            r = t.rowCount()
+            t.insertRow(r)
+            _set(t, r, 0, os.path.basename(path))
+            t.item(r, 0).setToolTip(path)
+            _set(t, r, 1, f["ion"] or "", True)
+            t.item(r, 1).setData(Qt.ItemDataRole.UserRole, f["ion"] or "")
+            _set(t, r, 2, ("" if f["certain"] else "⚠ ") + f["how"])
+            _set(t, r, 3, f["evidence"])
+        self.pathway_ions = found
+        return all(f["ion"] for f in found)
+
+    def _typed_ions(self):
+        """Ion labels typed over the found ones (None where it is the found one)."""
+        out = []
+        for r in range(self.pm_bp_ion_table.rowCount()):
+            item = self.pm_bp_ion_table.item(r, 1)
+            text = item.text().strip() if item is not None else ""
+            found = item.data(Qt.ItemDataRole.UserRole) if item is not None else ""
+            out.append(text if text and text != found else None)
+        return out
+
+    def pathway_flipped(self):
+        """The ion labels to use: the table's, when it lists every file."""
+        if not self._ion_table_matches_files():
+            return None
+        ions = [(_cell(self.pm_bp_ion_table, r, 1) or "").strip()
+                for r in range(self.pm_bp_ion_table.rowCount())]
+        return ions if all(ions) else None
+
     def pathway_arguments(self) -> dict:
-        flipped = [s.strip() for s in self.pm_bp_flipped_edit.text().split(",") if s.strip()]
+        flipped = self.pathway_flipped()
         mode = self.pm_bp_mode_combo.currentData()
         return {"observed": self.pm_bp_observed_edit.text().strip(),
                 "magnetic": [s.strip() for s in self.pm_bp_magnetic_edit.text().split(",")
@@ -930,6 +1710,18 @@ class ParamagneticToolsPanel(QWidget):
                 "flipped": flipped or None, "paramagnetic": self.pathway_scaling()}
 
     def calculate_pathways(self, quiet=False) -> bool:
+        if not self._ion_table_matches_files() or self.pathway_flipped() is None:
+            self.pathway_ions = None
+            if not self.identify_pathway_ions(quiet):
+                missing = [f["file"] for f in (self.pathway_ions or []) if not f["ion"]]
+                if missing and not quiet:
+                    QMessageBox.warning(
+                        self, "Bond pathways",
+                        "Could not tell which ion is " + ("flipped" if
+                        self.pm_bp_mode_combo.currentData() == "spin_flip" else "paramagnetic")
+                        + f" in: {', '.join(missing)}. Type its label (e.g. Mn5) in the Ion "
+                          "column, then Calculate.")
+                return False
         try:
             kw = self.pathway_arguments()
             ref = self.pm_bp_reference_edit.text().strip() or None
@@ -989,8 +1781,9 @@ class ParamagneticToolsPanel(QWidget):
     def get_state(self) -> dict:
         from . import panel_state
         state = {"widgets": panel_state.capture_widgets(
-            self, exclude=("pm_bp_result_table", "pm_bp_file_list"))}
+            self, exclude=("pm_bp_result_table", "pm_bp_file_list", "pm_bp_ion_table"))}
         state["pathway_files"] = list(self.pathway_files)
+        state["pathway_ions"] = (self.pathway_flipped() or []) if self.pathway_files else []
         return state
 
     def set_state(self, state: dict) -> None:
@@ -1000,5 +1793,17 @@ class ParamagneticToolsPanel(QWidget):
         self.pathway_files = []
         self.pm_bp_file_list.clear()
         self._add_pathway_files(state.get("pathway_files") or [])
+        ions = state.get("pathway_ions") or []
+        self.pm_bp_ion_table.setRowCount(0)
+        if len(ions) == len(self.pathway_files):
+            for path, ion in zip(self.pathway_files, ions):
+                r = self.pm_bp_ion_table.rowCount()
+                self.pm_bp_ion_table.insertRow(r)
+                _set(self.pm_bp_ion_table, r, 0, os.path.basename(path))
+                self.pm_bp_ion_table.item(r, 0).setToolTip(path)
+                _set(self.pm_bp_ion_table, r, 1, ion, True)
+                _set(self.pm_bp_ion_table, r, 2, "restored")
+                _set(self.pm_bp_ion_table, r, 3, "")
         self._sync_bp_rows()
         self._sync_bms_rows()
+        self._sync_T_rows()

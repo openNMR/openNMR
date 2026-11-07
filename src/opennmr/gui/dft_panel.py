@@ -459,19 +459,25 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         return box
 
     def paramagnetic_source(self) -> dict | None:
-        """The ORCA EPR calculation and its magnetic model as set here, for
-        Simulate ▸ Paramagnetic NMR tools (shift vs T, χ from g and Z):
-        ``{"calc", "path", "args", "element", "labels", "orbital"}``, or
-        None when the sample is not an ORCA output with hyperfine tensors."""
-        if not self._is_orca_epr():
+        """The paramagnetic calculation and its magnetic model as set here, for
+        Simulate ▸ Paramagnetic NMR tools (shift vs T): ``{"kind", "calc",
+        "path", "args", "element", "labels", "orbital"}`` -- ``kind`` "orca"
+        (an ORCA output with hyperfine tensors; ``args`` its model) or
+        "crystal" (a CRYSTAL calculation; ``args`` its φ / χ_M / Curie–Weiss
+        scaling, explicit user request 2026-11-07) -- or None for any other
+        sample."""
+        if not (self._is_orca_epr() or self._is_crystal()):
             return None
         try:
             labels = self.checked_labels()
         except (ValueError, AttributeError):
             labels = []
-        return {"calc": self.calcs["sample"], "path": self.dft_sample_edit.text().strip(),
-                "args": self.orca_paramagnetic_arguments(),
-                "element": self.dft_element_combo.currentText(), "labels": labels,
+        common = {"calc": self.calcs["sample"], "path": self.dft_sample_edit.text().strip(),
+                  "element": self.dft_element_combo.currentText(), "labels": labels}
+        if self._is_crystal():
+            return {**common, "kind": "crystal", "args": self.paramagnetic_arguments(),
+                    "orbital": self.dft_pm_orbital_spin.value()}
+        return {**common, "kind": "orca", "args": self.orca_paramagnetic_arguments(),
                 "orbital": 0.0 if self._orca_orbital_in_file()
                 else self.dft_opm_orbital_spin.value()}
 
