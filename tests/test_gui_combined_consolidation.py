@@ -55,7 +55,7 @@ def test_fit_and_simulate_offer_one_combined_entry_point(qapp):
             "Multi-spectrum", "Kept fit models"]
     assert _titles(window, window._simulations_tab_index) == [
         "Solution NMR", "Solid-state NMR", "Czjzek distribution", "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
-        "Diffusion (PFG)", "Shaped pulse (Bloch)", "pNMR (CIF)", "Paramagnetic NMR tools",
+        "Diffusion (PFG)", "Shaped pulse (Bloch)", "Paramagnetic NMR tools",
                       "SIMPSON import"]
     # The retired panels still exist (kept fits and saved states restore
     # through them), out of sight.

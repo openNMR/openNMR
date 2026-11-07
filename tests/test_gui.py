@@ -15511,7 +15511,7 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     sections = [s for s in simulations_tab.findChildren(CollapsibleSection)
                 if _enclosing_collapsible_section(s) is None]
     # Diffusion (PFG) and Shaped pulse (Bloch): ported from upstream;
-    # pNMR (CIF): the notebook's CIF shift simulation (test_gui_pnmr.py).
+    # pNMR (CIF) is inside Paramagnetic NMR tools since 2026-11-07.
     # J-coupling first (test_gui_jcoupling.py); Czjzek distribution after
     # Quadrupolar (test_gui_czjzek_display.py).
     # Since 2026-10-06 Solid-state NMR is the one interaction
@@ -15519,7 +15519,7 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     assert [s.title() for s in sections] == ["Solution NMR", "Solid-state NMR", "Czjzek distribution",
                                              "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
                                              "Diffusion (PFG)", "Shaped pulse (Bloch)",
-                                             "pNMR (CIF)", "Paramagnetic NMR tools",
+                                             "Paramagnetic NMR tools",
                       "SIMPSON import"]
     assert _enclosing_collapsible_section(window.sim_csa_diso_spin) is None
     assert _enclosing_collapsible_section(window.sim_quad_cq_spin) is None
@@ -16149,7 +16149,7 @@ def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
     # Solid-state NMR holds every interaction since 2026-10-06.
     assert titles == ["Solution NMR", "Solid-state NMR", "Czjzek distribution",
                       "DFT tensors (CASTEP, VASP, ORCA, Gaussian)", "Diffusion (PFG)",
-                      "Shaped pulse (Bloch)", "pNMR (CIF)", "Paramagnetic NMR tools",
+                      "Shaped pulse (Bloch)", "Paramagnetic NMR tools",
                       "SIMPSON import"]
 
 

@@ -1685,8 +1685,8 @@ class MainWindow(QMainWindow):
             window_menu.addAction(action)
             self._window_panel_actions[tile] = action
         # The Settings panel (built before this menu) may have hidden a tile.
-        for key in (getattr(self, "_ui_settings", None) or {}).get("hidden_sections") or []:
-            if key in self.OPTIONAL_SECTIONS:
+        for key in self.OPTIONAL_SECTIONS:
+            if getattr(self, "_ui_settings", None) is not None and not self._section_shown(key):
                 self._apply_section_shown(key, False)
 
         # Settings sits outside the numbered Panel shortcuts (Ctrl+1..8;
@@ -7490,15 +7490,18 @@ class MainWindow(QMainWindow):
                                 "and it is back as it was.")
         sections_intro.setWordWrap(True)
         sections_layout.addWidget(sections_intro)
-        hidden = set(self._ui_settings.get("hidden_sections") or [])
         self.section_shown_checkboxes = {}
         for key, (label, _attrs) in self.OPTIONAL_SECTIONS.items():
             box = QCheckBox(label)
-            box.setChecked(key not in hidden)
+            shown = self._section_shown(key)
+            box.setChecked(shown)
+            if key in self.DEFAULT_HIDDEN_SECTIONS:
+                box.setToolTip("Off until you switch it on, here or by choosing its kind of "
+                               "work in Help ▸ Welcome to openNMR….")
             box.toggled.connect(lambda shown, k=key: self._set_section_shown(k, shown))
             sections_layout.addWidget(box)
             self.section_shown_checkboxes[key] = box
-            self._apply_section_shown(key, key not in hidden)
+            self._apply_section_shown(key, shown)
         layout.addWidget(CollapsibleSection("Sections shown", content=sections))
 
         # --- Data ----------------------------------------------------
@@ -7846,8 +7849,12 @@ class MainWindow(QMainWindow):
                      ("_solution_fit_section", "_solution_sim_section")),
         "solid": ("Solid-state NMR (Fit and Simulate)",
                   ("_combined_fit_section", "_combined_sim_section")),
-        "pnmr": ("pNMR (Fit ▸ pNMR bond pathways and Simulate ▸ pNMR (CIF))",
-                 ("_pnmr_fit_section", "_pnmr_sim_section")),
+        # Explicit user request, 2026-11-07: every paramagnetic section under
+        # one switch, off until chosen here or in the Welcome wizard
+        # ("Paramagnetic NMR"); see DEFAULT_HIDDEN_SECTIONS.
+        "pnmr": ("Paramagnetic NMR (Simulate ▸ Paramagnetic NMR tools, with pNMR (CIF); "
+                 "Fit ▸ pNMR bond pathways)",
+                 ("_pnmr_fit_section", "_paramagnetic_sim_section", "_pnmr_sim_section")),
         # Explicit user request, 2026-10-23.
         "simpson": ("SIMPSON import (Simulate ▸ SIMPSON, Fit ▸ SIMPSON spectrum)",
                     ("_simpson_sim_section", "_simpson_fit_section")),
@@ -7874,6 +7881,12 @@ class MainWindow(QMainWindow):
         # and its Window-menu entry go together, never an empty tile.
         "advanced": ("Advanced Processing (the whole Adv. Proc. tile)", ("tab:Adv. Proc.",)),
     }
+
+    #: Optional sections that are off until switched on (Settings ▸ Sections
+    #: shown, or a Welcome-wizard work type that uses them). Their choice is
+    #: saved in ``shown_sections``; every other section's in
+    #: ``hidden_sections`` (an empty list there still means "all shown").
+    DEFAULT_HIDDEN_SECTIONS = ("pnmr",)
 
     #: The optional sections that live on the Apply tile. With none of
     #: them shown the tile has nothing on it, so it is hidden too.
@@ -7980,15 +7993,26 @@ class MainWindow(QMainWindow):
             box.blockSignals(False)
         hidden = [k for k in (self._ui_settings.get("hidden_sections") or [])
                   if k in self.OPTIONAL_SECTIONS and k != key]
-        if not shown:
+        opted_in = [k for k in (self._ui_settings.get("shown_sections") or [])
+                    if k in self.DEFAULT_HIDDEN_SECTIONS and k != key]
+        if key in self.DEFAULT_HIDDEN_SECTIONS:
+            if shown:
+                opted_in.append(key)
+        elif not shown:
             hidden.append(key)
-        if hidden:
-            self._ui_settings["hidden_sections"] = sorted(hidden)
-        else:
-            self._ui_settings.pop("hidden_sections", None)
+        for name, keys in (("hidden_sections", hidden), ("shown_sections", opted_in)):
+            if keys:
+                self._ui_settings[name] = sorted(keys)
+            else:
+                self._ui_settings.pop(name, None)
         self._save_ui_settings()
 
     def _section_shown(self, key: str) -> bool:
+        """Whether an optional section is shown: a default-hidden one only
+        when switched on (``shown_sections``), any other unless switched
+        off (``hidden_sections``)."""
+        if key in self.DEFAULT_HIDDEN_SECTIONS:
+            return key in (self._ui_settings.get("shown_sections") or [])
         return key not in (self._ui_settings.get("hidden_sections") or [])
 
     def _set_data_folder(self, folder: str) -> str:
@@ -17077,13 +17101,12 @@ class MainWindow(QMainWindow):
             plot_spectrum=lambda spectrum: self._on_panel_simulated("pnmr", spectrum),
             add_to_open=self._add_derived_spectrum,
             export_sites=self._export_pnmr_sites)
-        self._pnmr_sim_section = CollapsibleSection("pNMR (CIF)", content=self.pnmr_panel)
-        layout.addWidget(self._pnmr_sim_section)
         # Paramagnetic NMR tools (explicit user request, 2026-11-06; trimmed
-        # 2026-11-07): shift against temperature, fast bulk magnetic
-        # susceptibility (BMS) spectra, bond pathways from DFT (sent to
-        # pNMR (CIF) above). Its own module.
+        # 2026-11-07): pNMR (CIF) (its first section since 2026-11-07), shift
+        # against temperature, bulk magnetic susceptibility (BMS) spectra,
+        # bond pathways from DFT (sent to pNMR (CIF)). Its own module.
         self.paramagnetic_panel = ParamagneticToolsPanel(
+            pnmr_panel=self.pnmr_panel,
             draw_plot=self._show_on_simulation_plot, style=self._simulation_style,
             dft_source=self.dft_sim_panel.paramagnetic_source,
             send_pathways=self.pnmr_panel.set_shift_contributions,
@@ -17093,6 +17116,8 @@ class MainWindow(QMainWindow):
         self._paramagnetic_sim_section = CollapsibleSection(
             "Paramagnetic NMR tools", content=self.paramagnetic_panel)
         layout.addWidget(self._paramagnetic_sim_section)
+        # Code that opens Simulate ▸ pNMR (CIF) opens it inside the tools.
+        self._pnmr_sim_section = self.paramagnetic_panel.pm_pnmr_section
         # SIMPSON output: spectra, FIDs, and points from FIDs (explicit
         # user request, 2026-10-23). Its own module; the reading is io.simpson.
         self.simpson_panel = SimpsonPanel(
@@ -17958,6 +17983,7 @@ class MainWindow(QMainWindow):
         """Fit ▸ pNMR ▸ Set up…: the structural model lives in Simulate ▸
         pNMR (CIF); go there, opened."""
         self._show_side_tab("Simulate")
+        self._paramagnetic_sim_section.setExpanded(True)
         self._pnmr_sim_section.setExpanded(True)
 
     def _draw_czjzek_map(self, draw) -> None:

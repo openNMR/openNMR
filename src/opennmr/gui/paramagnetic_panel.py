@@ -111,11 +111,12 @@ class ParamagneticToolsPanel(QWidget):
     (:meth:`DftSimulationPanel.paramagnetic_source`);
     ``send_pathways(shell_bins, shift_dict)`` fills Simulate ▸ pNMR (CIF)."""
 
-    BLURB = ("Tools for paramagnetic shifts: their temperature dependence, the bulk magnetic "
-             "susceptibility (BMS) shifts of a particle packing, and bond-pathway contributions "
-             "from DFT for the pNMR (CIF) simulation.")
+    BLURB = ("Paramagnetic NMR: the pNMR (CIF) shift simulation, the temperature dependence of "
+             "shifts, the bulk magnetic susceptibility (BMS) shifts of a particle packing, and "
+             "bond-pathway contributions from DFT for pNMR (CIF).")
 
     def __init__(self, draw_plot=None, style=None, dft_source=None, send_pathways=None,
+                 pnmr_panel=None,
                  plot_spectrum=None, show_spectrum=None, keep_spectrum=None,
                  parent=None) -> None:
         super().__init__(parent)
@@ -146,14 +147,21 @@ class ParamagneticToolsPanel(QWidget):
         blurb = QLabel(self.BLURB)
         blurb.setWordWrap(True)
         layout.addWidget(blurb)
+        # Simulate ▸ pNMR (CIF) lives here since 2026-11-07 (explicit user request: the
+        # paramagnetic sections together, shown only when chosen).
+        self.pnmr_panel = pnmr_panel
+        self.pm_pnmr_section = (CollapsibleSection("pNMR (CIF)", content=pnmr_panel)
+                                if pnmr_panel is not None else None)
         self.pm_temperature_section = CollapsibleSection("Shift against temperature",
                                                          content=self._build_temperature())
         self.pm_bms_section = CollapsibleSection(
             "Bulk magnetic susceptibility (BMS) shifts", content=self._build_bms())
         self.pm_pathway_section = CollapsibleSection("Bond pathways from DFT (for pNMR (CIF))",
                                                      content=self._build_pathways())
-        for sec in (self.pm_temperature_section, self.pm_bms_section, self.pm_pathway_section):
-            layout.addWidget(sec)
+        for sec in (self.pm_pnmr_section, self.pm_temperature_section, self.pm_bms_section,
+                    self.pm_pathway_section):
+            if sec is not None:
+                layout.addWidget(sec)
         layout.addStretch(1)
 
     def _fontsize(self) -> float:
@@ -1899,7 +1907,9 @@ class ParamagneticToolsPanel(QWidget):
         except ValueError as exc:
             QMessageBox.warning(self, "Send to pNMR (CIF)", str(exc))
             return False
-        text = "Sent to Simulate ▸ pNMR (CIF)." + "".join(f"\n• {n}" for n in notes or [])
+        if self.pm_pnmr_section is not None:
+            self.pm_pnmr_section.setExpanded(True)
+        text = "Sent to pNMR (CIF) above." + "".join(f"\n• {n}" for n in notes or [])
         self.pm_bp_result_label.setText(self.pm_bp_result_label.text() + "\n" + text)
         return True
 

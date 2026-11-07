@@ -551,6 +551,7 @@ def test_bms_unit_combo_stays_clickable_after_switching(qapp, monkeypatch, tmp_p
     from opennmr.gui.widgets.collapsible_section import CollapsibleSection
     monkeypatch.setenv("OPENNMR_BMS_CACHE", str(tmp_path / "sidebands"))
     window = MainWindow()
+    window._set_section_shown("pnmr", True)      # Paramagnetic NMR is off until chosen
     window.resize(1500, 950)
     window.show()
     try:
@@ -603,3 +604,13 @@ def test_bms_unit_combo_stays_clickable_after_switching(qapp, monkeypatch, tmp_p
             pick(key)
     finally:
         window.close()
+
+
+def test_pnmr_cif_is_the_first_section_of_the_tools(qapp):
+    from opennmr.gui.widgets.collapsible_section import CollapsibleSection
+    from opennmr.gui.pnmr_panel import PnmrSimulationPanel
+    pnmr = PnmrSimulationPanel(None, lambda: None, lambda s: None, lambda s, n: None)
+    t = ParamagneticToolsPanel(pnmr_panel=pnmr)
+    titles = [s.title() for s in t.findChildren(CollapsibleSection)]
+    assert titles[0] == "pNMR (CIF)" and t.isAncestorOf(pnmr)
+    assert ParamagneticToolsPanel().pm_pnmr_section is None      # optional

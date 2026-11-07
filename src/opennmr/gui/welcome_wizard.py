@@ -36,7 +36,10 @@ WORK_TYPES = {
               ("solution", "pnmr", "dnp", "enmr", "imaging")),
     "dnp": ("DNP NMR", "Hyperpolarised experiments and their enhancements.",
             ("pnmr", "enmr", "imaging")),
-    "pnmr": ("Paramagnetic NMR", "Paramagnetic shifts, pNMR bond pathways and Curie-type fits.",
+    "pnmr": ("Paramagnetic NMR",
+             "Paramagnetic NMR tools: pNMR (CIF) bond pathways and their fits, shifts against "
+             "temperature, bulk magnetic susceptibility (BMS) spectra, bond pathways from DFT. "
+             "Off unless chosen.",
              ("dnp", "enmr", "imaging")),
 }
 

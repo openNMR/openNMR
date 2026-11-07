@@ -106,13 +106,18 @@ def test_the_browser_lists_the_data_folder_at_start_up(qapp, tmp_path, monkeypat
 def test_sections_can_be_hidden_and_stay_hidden_after_a_restart(qapp):
     window = MainWindow()
     for key in MainWindow.OPTIONAL_SECTIONS:
-        assert window.section_shown_checkboxes[key].isChecked()
+        # Paramagnetic NMR is off until chosen (2026-11-07); every other one is on.
+        assert window.section_shown_checkboxes[key].isChecked() == \
+            (key not in MainWindow.DEFAULT_HIDDEN_SECTIONS)
+    window._set_section_shown("pnmr", True)
+    assert _saved(window)["shown_sections"] == ["pnmr"]
     window._set_section_shown("pnmr", False)
     window.section_shown_checkboxes["drift"].setChecked(False)
     assert window._pnmr_fit_section.isHidden() and window._pnmr_sim_section.isHidden()
     assert window.drift_section.isHidden()
     assert not window._dnp_section.isHidden()
-    assert _saved(window)["hidden_sections"] == ["drift", "pnmr"]
+    assert _saved(window)["hidden_sections"] == ["drift"]
+    assert "shown_sections" not in _saved(window)
 
     again = MainWindow()
     again.show()
@@ -123,6 +128,7 @@ def test_sections_can_be_hidden_and_stay_hidden_after_a_restart(qapp):
     again.section_shown_checkboxes["drift"].setChecked(True)
     assert not again._pnmr_fit_section.isHidden() and not again.drift_section.isHidden()
     assert "hidden_sections" not in _saved(again)
+    assert _saved(again)["shown_sections"] == ["pnmr"]
 
 
 # ---- click and drag ----------------------------------------------------------------
@@ -253,3 +259,36 @@ def test_dpi_and_truncation_boxes(qapp, tmp_path, monkeypatch):
     QTest.keyClicks(box.lineEdit(), "2500")
     box.interpretText()
     assert box.value() == 2500
+
+
+def test_paramagnetic_nmr_is_off_until_chosen(qapp):
+    """Explicit user request, 2026-11-07: Simulate ▸ Paramagnetic NMR tools (with
+    pNMR (CIF) inside it) and Fit ▸ pNMR bond pathways are one optional section,
+    off until switched on in Settings or by the Welcome wizard's "Paramagnetic NMR"."""
+    from opennmr.gui.welcome_wizard import WelcomeWizard
+    window = MainWindow()
+    assert "pnmr" in MainWindow.DEFAULT_HIDDEN_SECTIONS
+    assert window._paramagnetic_sim_section.isHidden() and window._pnmr_fit_section.isHidden()
+    assert window.paramagnetic_panel.isAncestorOf(window.pnmr_panel)
+    assert window._pnmr_sim_section is window.paramagnetic_panel.pm_pnmr_section
+    wizard = WelcomeWizard(window)
+    assert not wizard.section_checks["pnmr"].isChecked()
+    wizard.work_type_checks["pnmr"].setChecked(True)
+    assert wizard.section_checks["pnmr"].isChecked()
+    wizard.apply()
+    assert window.section_shown_checkboxes["pnmr"].isChecked()
+    assert not window._paramagnetic_sim_section.isHidden()
+    assert not window._pnmr_fit_section.isHidden()
+    assert _saved(window)["shown_sections"] == ["pnmr"]
+    window._open_pnmr_model_setup()                       # Fit ▸ pNMR ▸ Set up…
+    assert window._paramagnetic_sim_section.isExpanded() and window._pnmr_sim_section.isExpanded()
+    assert MainWindow()._section_shown("pnmr")           # remembered
+
+
+def test_an_older_settings_file_keeps_paramagnetic_hidden(qapp):
+    import json
+    with open(MainWindow._UI_SETTINGS_PATH, "w", encoding="utf-8") as fh:
+        json.dump({"hidden_sections": ["drift", "pnmr"]}, fh)
+    window = MainWindow()
+    assert not window.section_shown_checkboxes["pnmr"].isChecked()
+    assert window._paramagnetic_sim_section.isHidden() and window.drift_section.isHidden()
