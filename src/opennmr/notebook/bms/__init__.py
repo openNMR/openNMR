@@ -13,5 +13,9 @@ See main.run_bms for the full set of options. File-based usage
 """
 from .main import run, run_bms
 from .io_utils import make_particle, particles_to_array, build_box
+# Fast route (2026-11-07): one set of FFTs for the whole packing.
+from . import fast
+from .fast import bms_field, bms_spectrum, fast_bms_spectrum
 
-__all__ = ["run", "run_bms", "make_particle", "particles_to_array", "build_box"]
+__all__ = ["run", "run_bms", "make_particle", "particles_to_array", "build_box",
+           "fast", "bms_field", "bms_spectrum", "fast_bms_spectrum"]

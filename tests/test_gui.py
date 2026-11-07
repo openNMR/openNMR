@@ -15519,7 +15519,8 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     assert [s.title() for s in sections] == ["Solution NMR", "Solid-state NMR", "Czjzek distribution",
                                              "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
                                              "Diffusion (PFG)", "Shaped pulse (Bloch)",
-                                             "pNMR (CIF)", "SIMPSON import"]
+                                             "pNMR (CIF)", "Paramagnetic NMR tools",
+                      "SIMPSON import"]
     assert _enclosing_collapsible_section(window.sim_csa_diso_spin) is None
     assert _enclosing_collapsible_section(window.sim_quad_cq_spin) is None
 
@@ -16148,7 +16149,8 @@ def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
     # Solid-state NMR holds every interaction since 2026-10-06.
     assert titles == ["Solution NMR", "Solid-state NMR", "Czjzek distribution",
                       "DFT tensors (CASTEP, VASP, ORCA, Gaussian)", "Diffusion (PFG)",
-                      "Shaped pulse (Bloch)", "pNMR (CIF)", "SIMPSON import"]
+                      "Shaped pulse (Bloch)", "pNMR (CIF)", "Paramagnetic NMR tools",
+                      "SIMPSON import"]
 
 
 def test_simulation_plot_shows_on_run_and_hides_on_leaving_the_tile(qapp):

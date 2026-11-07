@@ -538,6 +538,10 @@ def read_orca(path) -> dict:
     calc["info"]["version"] = version
     calc["notes"].append("Molecular (non-periodic) calculation: tensors are in the file's "
                          "x, y, z frame.")
+    # g, zero-field splitting and hyperfine tensors (%eprnmr): the
+    # paramagnetic shift (notebook.paramagnetic_nmr; user request 2026-11-06).
+    from . import paramagnetic_nmr
+    paramagnetic_nmr.attach_orca_epr(calc, lines)
     return calc
 
 
@@ -633,7 +637,8 @@ def read_gaussian(path) -> dict:
 
 
 #: The codes :func:`read_calculation` recognises.
-SUPPORTED_CODES = ("CASTEP (.magres)", "VASP (OUTCAR)", "ORCA (.out)", "Gaussian (.log)",
+SUPPORTED_CODES = ("CASTEP (.magres)", "VASP (OUTCAR)", "ORCA (.out, incl. EPR g/hyperfine)",
+                   "Gaussian (.log)",
                    "CRYSTAL (properties output: paramagnetic shifts and EFG)")
 
 
@@ -980,8 +985,23 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
             sigma_ref = 0.0
             delta_ref = float(delta_ref) + float(orbital_shift or 0.0)
             slope = 1.0
+    elif sample.get("epr"):
+        from . import paramagnetic_nmr
+        if paramagnetic is None:
+            raise ValueError("This ORCA output holds hyperfine tensors: give paramagnetic="
+                             "{'model': 'curie', 'T': 298} (the calculated g, S and zero-field "
+                             "splitting), or another model of paramagnetic_nmr.MODELS with its "
+                             "parameters.")
+        args = dict(paramagnetic)
+        sample = paramagnetic_nmr.apply_paramagnetic(sample, **args)
+        has_orbital = any(a.get("orbital_in_file") for a in sample["atoms"])
+        if not has_orbital and calibration is None and sigma_ref is None and reference is None:
+            sigma_ref = 0.0
+            delta_ref = float(delta_ref) + float(orbital_shift or 0.0)
+            slope = 1.0
     elif paramagnetic is not None:
-        raise ValueError("paramagnetic= applies to CRYSTAL calculations only.")
+        raise ValueError("paramagnetic= applies to CRYSTAL calculations only, and to ORCA "
+                         "outputs with hyperfine tensors.")
     atoms = select_atoms(sample, element, labels)
     atoms, average_notes = average_atoms(atoms, average)
     if state == "solution":
@@ -1053,6 +1073,10 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
             raise ValueError(f"{a['label']} has no shielding tensor in "
                              f"{os.path.basename(sample['path'])}.")
         delta = shift_tensor(a["sigma"], sigma_ref, delta_ref, slope)
+        if a.get("sigma_para") is not None:
+            # An orbital shielding on the reference scale, plus the
+            # paramagnetic part, which no reference scale applies to.
+            delta = delta - np.asarray(a["sigma_para"], dtype=float)
         csa = csa_parameters(delta)
         antisym = 0.5 * (np.asarray(a["sigma"]) - np.asarray(a["sigma"]).T)
         rec = {"label": a["label"], "species": a["species"], "position": a["position"],
@@ -1074,6 +1098,8 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
             rec["euler"], rec["efg_axes"] = relative_euler(csa["axes"], rec["efg_axes"],
                                                            return_frame=True)
         rec["members"] = a.get("members", [a["label"]])
+        if a.get("para") is not None:
+            rec["para"] = a["para"]
         rec["n_atoms"] = int(a.get("n_atoms", 1))
         if state == "solution":
             for key in ("aniso", "eta", "anisotropy", "span", "skew", "C_Q", "eta_Q", "P_Q"):

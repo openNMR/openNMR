@@ -666,6 +666,49 @@ class PnmrSimulationPanel(QWidget):
                     raise ValueError(f"Shell '{name}', {sp}: '{text}' is not a number (ppm).")
         return out
 
+    def set_shift_contributions(self, shell_bins, shift_dict) -> list[str]:
+        """Fill the shells table from bond-pathway contributions worked out
+        elsewhere (Simulate ▸ Paramagnetic NMR tools ▸ Bond pathways,
+        2026-11-06): ``shell_bins`` [(name, r_min, r_max)], ``shift_dict``
+        {shell: {species or element: ppm}}. A species column of the CIF
+        ("Mn3+") takes the value given for it, or else for its element
+        ("Mn"). Returns notes on what could not be placed. Needs the
+        structure initialised (the columns are the CIF's contributors)."""
+        species = self._species_columns()
+        if not species:
+            raise ValueError("Load the CIF and press Initialise structure in Simulate ▸ pNMR "
+                             "(CIF) first: its contributing species are the table's columns.")
+        notes = []
+        used = set()
+        self.shell_table.blockSignals(True)
+        self.shell_table.setRowCount(0)
+        self.shell_table.blockSignals(False)
+        for name, lo, hi in shell_bins:
+            given = shift_dict.get(name, {})
+            values = {}
+            for sp in species:
+                if sp in given:
+                    values[sp] = given[sp]
+                    used.add(sp)
+                else:
+                    el = pnmr.species_element(sp)
+                    if el in given:
+                        values[sp] = given[el]
+                        used.add(el)
+            self._append_shell_row(name, _fmt_distance(lo), _fmt_distance(hi),
+                                   {sp: f"{v:.6g}" for sp, v in values.items()})
+        unplaced = sorted({sp for shell in shift_dict.values() for sp in shell} - used)
+        if unplaced:
+            notes.append("No column for " + ", ".join(unplaced) + " in this CIF's contributors "
+                         "(" + ", ".join(species) + "): not used.")
+        shared = [el for el in {pnmr.species_element(sp) for sp in species}
+                  if sum(pnmr.species_element(sp) == el for sp in species) > 1]
+        if shared:
+            notes.append("More than one species of " + ", ".join(sorted(shared)) + " (e.g. "
+                         "different oxidation states) took the same element's value: edit them "
+                         "if they differ.")
+        return notes
+
     def _on_shell_table_changed(self, _item=None) -> None:
         error = ""
         try:

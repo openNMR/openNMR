@@ -147,6 +147,7 @@ from .combined_section import (CombinedModelSection, SOLUTION_MODELS, SOLUTION_T
                                SpinSystemHost)
 from .batch_relaxation_panel import BatchRelaxationPanel
 from .dft_panel import DftSimulationPanel
+from .paramagnetic_panel import ParamagneticToolsPanel
 from .quadrupolar_panels import QuadrupolarFitPanel
 from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
 from .multi_fit_panel import MultiFitPanel
@@ -11494,7 +11495,7 @@ class MainWindow(QMainWindow):
                           "czjzek": "Czjzek distribution",
                           "combined": "Solid-state NMR", "diffusion": "Diffusion (PFG)",
                           "bloch": "Shaped pulse (Bloch)", "pnmr": "pNMR (CIF)",
-                          "simpson": "SIMPSON import"}
+                          "simpson": "SIMPSON import", "bms": "BMS shifts (fast)"}
 
     def _fit_panels(self) -> dict:
         """Each fit, as an object with get_state/set_state/result_state/
@@ -11620,6 +11621,12 @@ class MainWindow(QMainWindow):
             # Load settings leaves it one click away.
             "pnmr": _Section(get_state=self.pnmr_panel.get_state, set_state=self.pnmr_panel.set_state,
                              rerun=None, summary=lambda: "", anchor=lambda: self.pnmr_panel),
+            # Paramagnetic NMR tools ▸ BMS (fast): seconds, so re-run.
+            "bms": _Section(get_state=self.paramagnetic_panel.get_state,
+                            set_state=self.paramagnetic_panel.set_state,
+                            rerun=self._rerun_bms,
+                            summary=self.paramagnetic_panel.bms_summary,
+                            anchor=lambda: self.paramagnetic_panel),
             # Reading files is not a simulation run: nothing to re-run.
             "simpson": _Section(get_state=self.simpson_panel.get_state,
                                 set_state=self.simpson_panel.set_state,
@@ -11735,6 +11742,10 @@ class MainWindow(QMainWindow):
                                          panel_state.describe_state(inputs), summary)
         except OSError as exc:
             self.statusBar().showMessage(f"Couldn't write the simulation log: {exc}", 10000)
+
+    def _rerun_bms(self) -> None:
+        self.paramagnetic_panel.pm_bms_section.setExpanded(True)
+        self.paramagnetic_panel.simulate_bms()
 
     def _on_panel_simulated(self, key: str, spectrum) -> None:
         self._show_simulated_spectrum(spectrum)
@@ -17068,6 +17079,18 @@ class MainWindow(QMainWindow):
             export_sites=self._export_pnmr_sites)
         self._pnmr_sim_section = CollapsibleSection("pNMR (CIF)", content=self.pnmr_panel)
         layout.addWidget(self._pnmr_sim_section)
+        # Paramagnetic NMR tools (explicit user request, 2026-11-06; trimmed
+        # 2026-11-07): shift against temperature, fast bulk magnetic
+        # susceptibility (BMS) spectra, bond pathways from DFT (sent to
+        # pNMR (CIF) above). Its own module.
+        self.paramagnetic_panel = ParamagneticToolsPanel(
+            draw_plot=self._show_on_simulation_plot, style=self._simulation_style,
+            dft_source=self.dft_sim_panel.paramagnetic_source,
+            send_pathways=self.pnmr_panel.set_shift_contributions,
+            plot_spectrum=lambda spectrum: self._on_panel_simulated("bms", spectrum))
+        self._paramagnetic_sim_section = CollapsibleSection(
+            "Paramagnetic NMR tools", content=self.paramagnetic_panel)
+        layout.addWidget(self._paramagnetic_sim_section)
         # SIMPSON output: spectra, FIDs, and points from FIDs (explicit
         # user request, 2026-10-23). Its own module; the reading is io.simpson.
         self.simpson_panel = SimpsonPanel(

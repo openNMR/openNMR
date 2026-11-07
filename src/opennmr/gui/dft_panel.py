@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from ..notebook import dft_calibration as dcal
 from ..notebook import crystal_nmr, dft_nmr, dft_structure
+from ..notebook import paramagnetic_nmr as pmr
 from .combined_panels import CombinedHamiltonianPanel, _spin_box
 from .widgets.collapsible_section import CollapsibleSection
 from .widgets.typed_spinbox import TypedSpinBox
@@ -152,7 +153,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self.dft_steps = [
             section(self.STEP_TITLES[0], self._build_import_box()),
             section(self.STEP_TITLES[1], self._build_paramagnetic_box(),
-                    self._build_reference_box()),
+                    self._build_orca_pm_box(), self._build_reference_box()),
             section(self.STEP_TITLES[2], self._build_state_box()),
             section(self.STEP_TITLES[3], setup),
             section(self.STEP_TITLES[4], self._build_calculate_box(), self.dft_sites_section,
@@ -345,6 +346,252 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self._sync_pm_rows()
         box.setVisible(False)
         return box
+
+    # ---- ORCA g / ZFS / hyperfine (explicit user request, 2026-11-06) ----------------
+
+    def _build_orca_pm_box(self) -> QGroupBox:
+        """The magnetic model for an ORCA output with hyperfine tensors:
+        σ = −(μ_B/g_Nμ_N) g·Z·A (notebook.paramagnetic_nmr)."""
+        box = QGroupBox("Paramagnetic shift (ORCA g, zero-field splitting, hyperfine)")
+        self.dft_opm_box = box
+        v = QVBoxLayout(box)
+        intro = QLabel(
+            "This ORCA output has hyperfine tensors. The paramagnetic shielding is "
+            "σ = −(μ_B/g_Nμ_N) g·Z·A, where Z is the electron spin's susceptibility. The "
+            "calculated spin Hamiltonian (S, g, and D if there is one) gives what ORCA's "
+            "orca_pnmr gives. A measured moment or susceptibility describes a coupled solid "
+            "better than a single ion does. The orbital shift is added below, unless the "
+            "file also has shieldings; then the shift scale (references) applies to them.")
+        intro.setWordWrap(True)
+        v.addWidget(intro)
+        form = QFormLayout()
+        self._opm_form = form
+        self.dft_opm_model_combo = QComboBox()
+        for key, text in (("curie", "Calculated spin Hamiltonian (S, g, D): as orca_pnmr"),
+                          ("curie_weiss", "Curie–Weiss law (S, θ)"),
+                          ("mu_eff", "Measured effective moment μ_eff (and θ)"),
+                          ("susceptibility", "Measured susceptibility χ_M at T"),
+                          ("phi", "Scaling factor φ = ⟨S_z⟩/S at B0")):
+            self.dft_opm_model_combo.addItem(text, key)
+            self.dft_opm_model_combo.setItemData(self.dft_opm_model_combo.count() - 1,
+                                                 pmr.MODELS[key], Qt.ItemDataRole.ToolTipRole)
+        form.addRow("Magnetic model:", self.dft_opm_model_combo)
+        self.dft_opm_T_spin = _spin_box(0.1, 3000.0, 298.0, 2, " K", step=1.0,
+                                        tip="Sample temperature.")
+        self.dft_opm_S_spin = _spin_box(0.5, 10.0, 0.5, 1, step=0.5,
+                                        tip="Electron spin S (from the multiplicity in the file; "
+                                            "a pseudo-spin for a lanthanide).")
+        self.dft_opm_zfs_check = QCheckBox("Use the zero-field splitting D from the file")
+        self.dft_opm_zfs_check.setChecked(True)
+        self.dft_opm_zfs_check.setToolTip(
+            "With D, Z is anisotropic and has a temperature-independent part: a pseudocontact "
+            "shift even with an isotropic g. Without D: the Curie law S(S+1)/3kT.")
+        self.dft_opm_theta_spin = _spin_box(-1e4, 1e4, 0.0, 2, " K", step=1.0,
+                                            tip="Weiss constant θ (negative: antiferromagnetic).")
+        self.dft_opm_mueff_spin = _spin_box(0.0, 50.0, 5.92, 3, " μB", step=0.01,
+                                            tip="Effective moment per paramagnetic centre.")
+        self.dft_opm_chi_spin = _spin_box(0.0, 1e3, 0.0146, 6, step=0.0001,
+                                          tip="Molar susceptibility per paramagnetic centre at T "
+                                              "(paramagnetic part).")
+        self.dft_opm_chi_units_combo = QComboBox()
+        self.dft_opm_chi_units_combo.addItem("cm³/mol (cgs, emu/mol)", "cm3/mol")
+        self.dft_opm_chi_units_combo.addItem("m³/mol (SI)", "m3/mol")
+        self.dft_opm_phi_spin = _spin_box(-100.0, 100.0, 0.02, 6, step=0.001,
+                                          tip="φ = ⟨S_z⟩/S at the field B0.")
+        self.dft_opm_B0_spin = _spin_box(0.001, 100.0, 11.7, 4, " T", step=0.1,
+                                         tip="The field φ belongs to.")
+        self.dft_opm_components_combo = QComboBox()
+        for key, text in (("both", "Fermi contact + spin dipolar"),
+                          ("contact", "Fermi contact only"), ("dipolar", "Spin dipolar only")):
+            self.dft_opm_components_combo.addItem(text, key)
+        self.dft_opm_orbital_spin = _spin_box(-1e5, 1e5, 0.0, 3, " ppm", step=1.0,
+                                              tip="Orbital (diamagnetic) shift added to every "
+                                                  "site, e.g. that of a diamagnetic analogue.")
+        self._opm_rows = {
+            "curie": [self.dft_opm_T_spin, self.dft_opm_S_spin, self.dft_opm_zfs_check],
+            "curie_weiss": [self.dft_opm_T_spin, self.dft_opm_S_spin, self.dft_opm_theta_spin],
+            "mu_eff": [self.dft_opm_T_spin, self.dft_opm_S_spin, self.dft_opm_mueff_spin,
+                       self.dft_opm_theta_spin],
+            "susceptibility": [self.dft_opm_T_spin, self.dft_opm_S_spin, self.dft_opm_chi_spin,
+                               self.dft_opm_chi_units_combo],
+            "phi": [self.dft_opm_S_spin, self.dft_opm_phi_spin, self.dft_opm_B0_spin]}
+        form.addRow("Temperature T:", self.dft_opm_T_spin)
+        form.addRow("Spin S:", self.dft_opm_S_spin)
+        form.addRow("", self.dft_opm_zfs_check)
+        form.addRow("Weiss constant θ:", self.dft_opm_theta_spin)
+        form.addRow("Effective moment μ_eff:", self.dft_opm_mueff_spin)
+        form.addRow("χ_M:", self.dft_opm_chi_spin)
+        form.addRow("χ_M units:", self.dft_opm_chi_units_combo)
+        form.addRow("φ:", self.dft_opm_phi_spin)
+        form.addRow("Field B0:", self.dft_opm_B0_spin)
+        form.addRow("Include:", self.dft_opm_components_combo)
+        form.addRow("Orbital shift:", self.dft_opm_orbital_spin)
+        v.addLayout(form)
+        self.dft_opm_label = QLabel("")
+        self.dft_opm_label.setWordWrap(True)
+        self.dft_opm_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        v.addWidget(self.dft_opm_label)
+        row = QHBoxLayout()
+        self.dft_opm_plot_button = QPushButton("Plot Contact / Pseudocontact")
+        self.dft_opm_plot_button.setToolTip(
+            "Bars of each site's Fermi contact and pseudocontact (spin dipolar) isotropic shift, "
+            "on the Simulation plot.")
+        self.dft_opm_plot_button.clicked.connect(lambda: self.plot_contributions())
+        row.addWidget(self.dft_opm_plot_button)
+        self.dft_opm_check_button = QPushButton("Check Against orca_pnmr Output…")
+        self.dft_opm_check_button.setToolTip(
+            "Compare openNMR's paramagnetic shielding tensors with those orca_pnmr printed "
+            "for the same g, D and A tensors.")
+        self.dft_opm_check_button.clicked.connect(lambda: self.check_against_orca())
+        row.addWidget(self.dft_opm_check_button)
+        row.addStretch(1)
+        v.addLayout(row)
+        self.dft_opm_model_combo.currentIndexChanged.connect(lambda _i: self._on_opm_changed())
+        for w in (self.dft_opm_T_spin, self.dft_opm_S_spin, self.dft_opm_theta_spin,
+                  self.dft_opm_mueff_spin, self.dft_opm_chi_spin, self.dft_opm_phi_spin,
+                  self.dft_opm_B0_spin, self.dft_opm_orbital_spin):
+            w.editingFinished.connect(self._on_opm_changed)
+        for w in (self.dft_opm_chi_units_combo, self.dft_opm_components_combo):
+            w.currentIndexChanged.connect(lambda _i: self._on_opm_changed())
+        self.dft_opm_zfs_check.toggled.connect(lambda _c: self._on_opm_changed())
+        self._sync_opm_rows()
+        box.setVisible(False)
+        return box
+
+    def paramagnetic_source(self) -> dict | None:
+        """The ORCA EPR calculation and its magnetic model as set here, for
+        Simulate ▸ Paramagnetic NMR tools (shift vs T, χ from g and Z):
+        ``{"calc", "path", "args", "element", "labels", "orbital"}``, or
+        None when the sample is not an ORCA output with hyperfine tensors."""
+        if not self._is_orca_epr():
+            return None
+        try:
+            labels = self.checked_labels()
+        except (ValueError, AttributeError):
+            labels = []
+        return {"calc": self.calcs["sample"], "path": self.dft_sample_edit.text().strip(),
+                "args": self.orca_paramagnetic_arguments(),
+                "element": self.dft_element_combo.currentText(), "labels": labels,
+                "orbital": 0.0 if self._orca_orbital_in_file()
+                else self.dft_opm_orbital_spin.value()}
+
+    def _is_orca_epr(self) -> bool:
+        sample = self.calcs.get("sample")
+        return sample is not None and bool(sample.get("epr"))
+
+    def _sync_opm_rows(self) -> None:
+        model = self.dft_opm_model_combo.currentData()
+        visible = {id(w) for w in self._opm_rows[model]}
+        for ws in self._opm_rows.values():
+            for w in ws:
+                self._opm_form.setRowVisible(w, id(w) in visible)
+        sample = self.calcs.get("sample") if hasattr(self, "calcs") else None
+        has_D = bool(sample and (sample.get("epr") or {}).get("D_cm") is not None)
+        self.dft_opm_zfs_check.setEnabled(has_D)
+        orbital = self._orca_orbital_in_file()
+        self._opm_form.setRowVisible(self.dft_opm_orbital_spin, not orbital)
+
+    def _orca_orbital_in_file(self) -> bool:
+        sample = self.calcs.get("sample") if hasattr(self, "calcs") else None
+        return bool(sample and sample.get("epr") and any(
+            a.get("sigma") is not None for a in sample["atoms"] if a.get("hfc")))
+
+    def orca_paramagnetic_arguments(self) -> dict:
+        """``paramagnetic=`` for :func:`dft_nmr.dft_sites` (an ORCA EPR file)."""
+        model = self.dft_opm_model_combo.currentData()
+        args = {"model": model, "S": self.dft_opm_S_spin.value(),
+                "components": self.dft_opm_components_combo.currentData()}
+        if model != "phi":
+            args["T"] = self.dft_opm_T_spin.value()
+        if model == "curie" and not (self.dft_opm_zfs_check.isChecked()
+                                     and self.dft_opm_zfs_check.isEnabled()):
+            args["D_cm"] = None
+        if model in ("curie_weiss", "mu_eff"):
+            args["theta"] = self.dft_opm_theta_spin.value()
+        if model == "mu_eff":
+            args["mu_eff"] = self.dft_opm_mueff_spin.value()
+        if model == "susceptibility":
+            args.update(chi=self.dft_opm_chi_spin.value(),
+                        chi_units=self.dft_opm_chi_units_combo.currentData())
+        if model == "phi":
+            args.update(phi=self.dft_opm_phi_spin.value(), B0=self.dft_opm_B0_spin.value())
+        return args
+
+    def _update_opm_label(self) -> None:
+        sample = self.calcs.get("sample")
+        if not sample or not sample.get("epr"):
+            self.dft_opm_label.setText("")
+            return
+        epr = sample["epr"]
+        bits = []
+        if epr.get("g") is not None:
+            w = np.linalg.svd(np.asarray(epr["g"]), compute_uv=False)
+            bits.append("g principal values " + ", ".join(f"{x:.5f}" for x in w))
+        if epr.get("D_cm") is not None:
+            de = pmr.D_E_from_tensor(epr["D_cm"])
+            bits.append(f"D = {de['D']:.4g} cm⁻¹, E/D = {de['E_over_D']:.3f}")
+        try:
+            args = {k: v for k, v in self.orca_paramagnetic_arguments().items()
+                    if k not in ("components", "model", "S")}
+            g = epr.get("g")
+            D = args.pop("D_cm", "file")
+            D = epr.get("D_cm") if isinstance(D, str) else D
+            model = self.dft_opm_model_combo.currentData()
+            resp = pmr.spin_response(self.dft_opm_S_spin.value(), args.pop("T", 298.0), model,
+                                     g=g, D_cm=D, **args)
+            bits.append(resp["text"])
+        except ValueError as exc:
+            bits.append(f"Z cannot be found: {exc}")
+        self.dft_opm_label.setText("; ".join(bits) + ".")
+
+    def _on_opm_changed(self) -> None:
+        self._sync_opm_rows()
+        self._update_opm_label()
+        if self.model is not None and self._is_orca_epr():
+            self.calculate()
+
+    def plot_contributions(self) -> bool:
+        if self._draw_plot is None:
+            return False
+        rows = pmr.contribution_rows(self.model) if self.model is not None else []
+        if not rows:
+            QMessageBox.warning(self, "Contributions", "Calculate the sites of a paramagnetic "
+                                "(ORCA hyperfine) calculation first.")
+            return False
+
+        def draw(figure):
+            look = self._style() or {}
+            pmr.plot_contributions(rows, figure=figure,
+                                   fontsize=float(look.get("labelsize") or 11.0))
+        self._draw_plot(draw, "curve")
+        return True
+
+    def check_against_orca(self, path=None) -> str | None:
+        """Compare with an orca_pnmr output; the result goes in the notes."""
+        if not self._is_orca_epr():
+            return None
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, "orca_pnmr output", "",
+                                                  "Text (*.txt *.out *.log);;All files (*)")
+            if not path:
+                return None
+        try:
+            args = {k: v for k, v in self.orca_paramagnetic_arguments().items()
+                    if k != "components"}
+            if args.get("model") != "curie":
+                raise ValueError("orca_pnmr uses the calculated spin Hamiltonian: choose that "
+                                 "model to compare.")
+            calc = pmr.apply_paramagnetic(self.calcs["sample"], **args)
+            res = pmr.compare_with_orca(calc, path)
+        except (OSError, ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "Check against orca_pnmr", str(exc))
+            return None
+        text = (f"Against orca_pnmr ({os.path.basename(path)}, {res['T']:g} K, {res['n']} "
+                f"nuclei): isotropic shielding within {res['max_iso_ppm']:.3g} ppm, every "
+                f"tensor element within {res['max_element_ppm']:.3g} ppm (ORCA's .out prints A "
+                "to 4 decimals, which limits the agreement).")
+        self.dft_opm_label.setText(self.dft_opm_label.text() + "\n" + text)
+        return text
 
     def _sync_pm_rows(self) -> None:
         route = self.dft_pm_route_combo.currentData()
@@ -847,6 +1094,12 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
             if not sample:
                 raise ValueError("Choose the sample's calculation file.")
             self.calcs["sample"] = self._read(sample)
+            epr = self.calcs["sample"].get("epr") or {}
+            # A new ORCA EPR file sets S from its multiplicity; the same file
+            # read again keeps whatever S was chosen (a pseudo-spin, say).
+            if epr.get("S") and sample != getattr(self, "_opm_S_from", None):
+                self.dft_opm_S_spin.setValue(float(epr["S"]))
+            self._opm_S_from = sample
         except (OSError, ValueError, KeyError) as exc:
             self.dft_files_label.setText(f"Could not read: {exc}")
             if not quiet:
@@ -943,7 +1196,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         isotopes = dft_nmr.nmr_isotopes(element)
         self.dft_isotope_combo.addItems(isotopes)
         for atom in self.calcs["sample"]["atoms"]:
-            if atom["species"] != element or (atom["sigma"] is None and not self._is_crystal()):
+            if atom["species"] != element or (atom["sigma"] is None and not self._is_crystal()
+                                              and not atom.get("hfc")):
                 continue
             item = QListWidgetItem(atom["label"])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -1283,6 +1537,10 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
             self.dft_frame_combo.setCurrentIndex(1)
         self.dft_show_tensor_button.setEnabled(self.model is not None)
         self.dft_pm_box.setVisible(self._is_crystal())
+        self.dft_opm_box.setVisible(self._is_orca_epr())
+        if self._is_orca_epr():
+            self._sync_opm_rows()
+            self._update_opm_label()
         if self._is_crystal():
             self._update_pm_label()
         self.dft_average_button.setEnabled(have or self.model is not None)
@@ -1314,6 +1572,14 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
                 model = dft_nmr.dft_sites(self.calcs["sample"],
                                           paramagnetic=self.paramagnetic_arguments(),
                                           orbital_shift=self.dft_pm_orbital_spin.value(), **args)
+            elif self._is_orca_epr() and not self._orca_orbital_in_file():
+                model = dft_nmr.dft_sites(self.calcs["sample"],
+                                          paramagnetic=self.orca_paramagnetic_arguments(),
+                                          orbital_shift=self.dft_opm_orbital_spin.value(), **args)
+            elif self._is_orca_epr():
+                model = dft_nmr.dft_sites(self.calcs["sample"],
+                                          paramagnetic=self.orca_paramagnetic_arguments(),
+                                          calibration=self.current_calibration(), **args)
             else:
                 cal = self.current_calibration()
                 model = dft_nmr.dft_sites(self.calcs["sample"], calibration=cal, **args)
@@ -1369,6 +1635,11 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         element = args["element"]
         g0 = self.dft_g0_check.isChecked()
         head = "from opennmr.notebook import dft_nmr, dft_calibration as dc\n"
+        if self._is_orca_epr() and not self._orca_orbital_in_file():
+            return pmr.paramagnetic_to_python(
+                self.dft_sample_edit.text().strip(), paramagnetic=self.orca_paramagnetic_arguments(),
+                orbital_shift=self.dft_opm_orbital_spin.value(),
+                **{k: v for k, v in args.items() if k not in ("element",)}, element=args["element"])
         if self._is_crystal():
             kwargs = ", ".join(f"{k}={v!r}" for k, v in args.items() if v is not None)
             return ("from opennmr.notebook import dft_nmr\n"
@@ -1538,6 +1809,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
                 pass
         self._fill_reference_table()
         self._sync_pm_rows()
+        self._opm_S_from = self.dft_sample_edit.text().strip()   # keep the saved S
         if self.dft_sample_edit.text().strip() and os.path.exists(
                 self.dft_sample_edit.text().strip()):
             if self.read_files(quiet=True):

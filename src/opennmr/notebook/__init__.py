@@ -84,6 +84,9 @@ from . import dft_structure
 from .dft_structure import plot_dft_structure
 from . import dft_calibration
 from .dft_calibration import fit_calibration, reference_point, plot_calibration
+# Paramagnetic NMR: g/ZFS/hyperfine shifts, pseudocontact shifts, lanthanide
+# series, bond pathways (2026-11-06).
+from . import paramagnetic_nmr, pseudocontact, lanthanides, bond_pathways
 from . import fit_correlation
 from .fit_correlation import plot_correlation_matrix, correlation_of, multi_fit_correlation
 
@@ -326,7 +329,7 @@ from ..plotting.accessibility import ordered_qualitative_colours
 from ..plotting import accessibility
 from ..simulate import bloch
 from . import periodic_table, pnmr_fit, bms
-from .bms import run_bms, particles_to_array, build_box
+from .bms import run_bms, particles_to_array, build_box, fast_bms_spectrum
 
 # Fitting limits and sideband guidance (2026-10-08): the app-wide maximum
 # number of iterations (2000 to start with) and the 3-5 sideband rule.
@@ -414,6 +417,7 @@ __all__ = [
     "dft_nmr", "read_calculation", "dft_sites", "simulate_dft", "plot_dft_tensors",
     "dft_structure", "plot_dft_structure",
     "dft_calibration", "fit_calibration", "reference_point", "plot_calibration",
+    "paramagnetic_nmr", "pseudocontact", "lanthanides", "bond_pathways",
     "isotopes", "resolve_links", "frequency_ratio", "to_observed_ppm", "isotope_partners",
     "partner_factors",
     "plot_correlation_matrix", "fit_correlation", "correlation_of", "multi_fit_correlation",
