@@ -48,6 +48,7 @@ from ..notebook.bms import fast as bmsf
 from ..notebook.bms import interactions as bms_inter
 from ..notebook.bms import sample as bms_sample
 from ..notebook.bms import views as bms_views
+from ..notebook import susceptibility as chi_units
 from .combined_panels import _spin_box
 from .widgets.collapsible_section import CollapsibleSection
 
@@ -639,9 +640,61 @@ class ParamagneticToolsPanel(QWidget):
         self._bms_grid_form = gf
         self.pm_bms_chi_edit = QLineEdit("1e-3, 1e-3, 1e-3")
         self.pm_bms_chi_edit.setToolTip(
-            "Principal values χ1, χ2, χ3 of the particles' volume susceptibility (SI, "
-            "dimensionless), in each particle's own frame. One value: isotropic.")
-        gf.addRow("χ (SI volume):", self.pm_bms_chi_edit)
+            "Principal values χ1, χ2, χ3 of the particles' susceptibility, in the units chosen "
+            "next to it, in each particle's own frame. One value: isotropic.")
+        self.pm_bms_chi_unit_combo = QComboBox()
+        for key, text in chi_units.UNITS.items():
+            self.pm_bms_chi_unit_combo.addItem(text, key)
+        self.pm_bms_chi_unit_combo.setToolTip(
+            "SI volume (dimensionless) is what the simulation uses; the others are converted "
+            "(cgs volume × 4π; mass × density; molar ÷ molar volume; μ_eff by the Curie–Weiss "
+            "law).")
+        chi_row = QWidget()
+        h = QHBoxLayout(chi_row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(self.pm_bms_chi_edit, 1)
+        h.addWidget(self.pm_bms_chi_unit_combo)
+        gf.addRow("χ:", chi_row)
+        self.pm_bms_density_spin = _spin_box(0.0, 100.0, 0.0, 4, " g cm⁻³", step=0.1,
+                                             tip="Density of the solid itself (the crystal "
+                                                 "density), not a tap or packing density: the "
+                                                 "packing is simulated.")
+        gf.addRow("Density:", self.pm_bms_density_spin)
+        self.pm_bms_vm_combo = QComboBox()
+        self.pm_bms_vm_combo.addItem("Molar mass and density", "mass")
+        self.pm_bms_vm_combo.addItem("Unit cell volume and Z", "cell")
+        self.pm_bms_vm_combo.setToolTip("The volume of one mole of formula units, which a molar "
+                                        "susceptibility is divided by.")
+        gf.addRow("Molar volume from:", self.pm_bms_vm_combo)
+        self.pm_bms_molar_mass_spin = _spin_box(0.0, 1e5, 0.0, 4, " g mol⁻¹", step=1.0,
+                                                tip="Molar mass of one formula unit.")
+        gf.addRow("Molar mass:", self.pm_bms_molar_mass_spin)
+        self.pm_bms_cell_spin = _spin_box(0.0, 1e7, 0.0, 3, " Å³", step=10.0,
+                                          tip="Unit cell volume.")
+        gf.addRow("Unit cell volume:", self.pm_bms_cell_spin)
+        self.pm_bms_Z_spin = _spin_box(0.0, 1000.0, 0.0, 0, step=1,
+                                       tip="Formula units per unit cell (the formula the molar "
+                                           "susceptibility refers to).")
+        gf.addRow("Z:", self.pm_bms_Z_spin)
+        self.pm_bms_chi_T_spin = _spin_box(0.1, 3000.0, 298.0, 2, " K", step=1.0,
+                                           tip="The temperature of the experiment.")
+        gf.addRow("Temperature:", self.pm_bms_chi_T_spin)
+        self.pm_bms_chi_theta_spin = _spin_box(-1e5, 1e5, 0.0, 2, " K", step=1.0,
+                                               tip="Weiss constant θ (negative: "
+                                                   "antiferromagnetic); 0: a Curie law.")
+        gf.addRow("Weiss constant θ:", self.pm_bms_chi_theta_spin)
+        self.pm_bms_nions_spin = _spin_box(0.0, 1000.0, 1.0, 3, step=1.0,
+                                           tip="Paramagnetic ions per formula unit (e.g. 1 for "
+                                               "LiMnPO₄, 0.5 for LiMn₀.₅Fe₀.₅PO₄ if only Mn is "
+                                               "counted).")
+        gf.addRow("Ions per formula unit:", self.pm_bms_nions_spin)
+        self.pm_bms_chidia_spin = _spin_box(-1e3, 1e3, 0.0, 8, " emu mol⁻¹", step=1e-6,
+                                            tip="Optional diamagnetic (core) susceptibility of "
+                                                "the formula unit, added to the Curie–Weiss "
+                                                "term.")
+        gf.addRow("χ_dia:", self.pm_bms_chidia_spin)
+        self.pm_bms_chi_si_label = _label()
+        gf.addRow(self.pm_bms_chi_si_label)
         self.pm_bms_grid_combo = QComboBox()
         for n in self.BMS_GRIDS:
             self.pm_bms_grid_combo.addItem(f"{n}³", n)
@@ -871,6 +924,14 @@ class ParamagneticToolsPanel(QWidget):
             combo.currentIndexChanged.connect(lambda _i: self._sync_bms_rows())
         self.pm_bms_local_group.toggled.connect(lambda _c: self._sync_bms_rows())
         self.pm_bms_rotor_check.toggled.connect(lambda _c: (self._sync_bms_rows(), self._update_sample_note()))
+        self.pm_bms_chi_unit_combo.currentIndexChanged.connect(lambda _i: self._sync_chi_rows())
+        self.pm_bms_vm_combo.currentIndexChanged.connect(lambda _i: self._sync_chi_rows())
+        self.pm_bms_chi_edit.textChanged.connect(lambda _t: self._update_chi_label())
+        for wdg in (self.pm_bms_density_spin, self.pm_bms_molar_mass_spin, self.pm_bms_cell_spin,
+                    self.pm_bms_Z_spin, self.pm_bms_chi_T_spin, self.pm_bms_chi_theta_spin,
+                    self.pm_bms_nions_spin, self.pm_bms_chidia_spin):
+            wdg.valueChanged.connect(lambda _v: self._update_chi_label())
+        self._sync_chi_rows()
         self.pm_bms_aniso_spin.valueChanged.connect(lambda _v: self._sync_bms_rows())
         self.pm_bms_cq_spin.valueChanged.connect(lambda _v: self._sync_bms_rows())
         self.pm_bms_rotor_combo.activated.connect(lambda _i: self._rotor_chosen())
@@ -880,6 +941,63 @@ class ParamagneticToolsPanel(QWidget):
         self._sync_bms_rows()
         self._update_sample_note()
         return w
+
+    def _sync_chi_rows(self) -> None:
+        unit = self.pm_bms_chi_unit_combo.currentData()
+        needs = chi_units.NEEDS[unit]
+        gf = self._bms_grid_form
+        molar = "molar_volume" in needs
+        by_cell = molar and self.pm_bms_vm_combo.currentData() == "cell"
+        gf.setRowVisible(self.pm_bms_density_spin, "density" in needs or (molar and not by_cell))
+        gf.setRowVisible(self.pm_bms_vm_combo, molar)
+        gf.setRowVisible(self.pm_bms_molar_mass_spin, molar and not by_cell)
+        gf.setRowVisible(self.pm_bms_cell_spin, by_cell)
+        gf.setRowVisible(self.pm_bms_Z_spin, by_cell)
+        mu = unit == "mu_eff"
+        for wdg in (self.pm_bms_chi_T_spin, self.pm_bms_chi_theta_spin, self.pm_bms_nions_spin,
+                    self.pm_bms_chidia_spin):
+            gf.setRowVisible(wdg, mu)
+        self._update_chi_label()
+
+    def chi_conversion(self) -> dict:
+        """The keyword arguments of :func:`susceptibility.to_si_volume` the
+        chosen unit needs (only those)."""
+        unit = self.pm_bms_chi_unit_combo.currentData()
+        needs = chi_units.NEEDS[unit]
+        kw = {}
+        if "density" in needs:
+            kw["density"] = self.pm_bms_density_spin.value()
+        if "molar_volume" in needs:
+            if self.pm_bms_vm_combo.currentData() == "cell":
+                kw.update(cell_volume=self.pm_bms_cell_spin.value(),
+                          Z=self.pm_bms_Z_spin.value())
+            else:
+                kw.update(molar_mass=self.pm_bms_molar_mass_spin.value(),
+                          density=self.pm_bms_density_spin.value())
+        if unit == "mu_eff":
+            kw.update(T=self.pm_bms_chi_T_spin.value(), theta=self.pm_bms_chi_theta_spin.value(),
+                      n_ions=self.pm_bms_nions_spin.value(),
+                      chi_dia=self.pm_bms_chidia_spin.value())
+        return kw
+
+    def bms_chi_si(self):
+        """χ1, χ2, χ3 as SI volume susceptibilities (the simulation's)."""
+        values = self._triplet(self.pm_bms_chi_edit.text(), "χ")
+        unit = self.pm_bms_chi_unit_combo.currentData()
+        si = chi_units.to_si_volume(values, unit, **self.chi_conversion())
+        return tuple(float(v) for v in np.atleast_1d(si))
+
+    def _update_chi_label(self) -> None:
+        unit = self.pm_bms_chi_unit_combo.currentData()
+        if unit == "si_volume":
+            self.pm_bms_chi_si_label.setText("")
+            return
+        try:
+            si = self.bms_chi_si()
+            self.pm_bms_chi_si_label.setText(
+                "→ χ_v (SI volume) = " + ", ".join(f"{v:.4g}" for v in si))
+        except ValueError as exc:
+            self.pm_bms_chi_si_label.setText(f"→ {exc}")
 
     def _sync_bms_rows(self) -> None:
         pack = self.pm_bms_source_combo.currentData() == "pack"
@@ -1100,7 +1218,7 @@ class ParamagneticToolsPanel(QWidget):
         return self.bms_particles
 
     def bms_field_arguments(self) -> dict:
-        chi = self._triplet(self.pm_bms_chi_edit.text(), "χ")
+        chi = self.bms_chi_si()
         return {"magnetic_susceptibility": chi, "box_size": self.pm_bms_box_spin.value(),
                 "gridpoints": int(self.pm_bms_grid_combo.currentData()),
                 "equation": self.pm_bms_equation_combo.currentData(),
@@ -1214,6 +1332,9 @@ class ParamagneticToolsPanel(QWidget):
         params = {"kind": "bms", "model": "BMS",
                   **{k: (list(v) if isinstance(v, tuple) else v) for k, v in fkw.items()},
                   **{k: v for k, v in skw.items()}, "route": spectrum.get("route"),
+                  "chi_input": list(self._triplet(self.pm_bms_chi_edit.text(), "χ")),
+                  "chi_unit": self.pm_bms_chi_unit_combo.currentData(),
+                  "chi_conversion": self.chi_conversion(),
                   "n_particles": self.bms_field["n_particles"],
                   "volume_fraction": round(self.bms_field["volume_fraction"], 4)}
         metadata = NMRMetadata(vendor="simulated", nucleus=spectrum["nuclide"],
@@ -1231,6 +1352,13 @@ class ParamagneticToolsPanel(QWidget):
         lines = [f"{f['n_particles']} particles, volume fraction {f['volume_fraction']:.3f} "
                  f"(on the grid), {'×'.join(str(n) for n in f['parameters']['gridpoints'])} grid, "
                  f"{f['parameters']['boundary']}."]
+        unit = self.pm_bms_chi_unit_combo.currentData()
+        if unit != "si_volume":
+            try:
+                lines.append(chi_units.describe(self._triplet(self.pm_bms_chi_edit.text(), "χ"),
+                                                unit, **self.chi_conversion()) + ".")
+            except ValueError:
+                pass
         sample = par.get("sample")
         if sample:
             lines.append(f"Sample: {bms_sample.sample_from_dict(sample).describe()}, χ_v = "
@@ -1367,7 +1495,18 @@ class ParamagneticToolsPanel(QWidget):
     def bms_python(self) -> str:
         fkw = self.bms_field_arguments()
         skw = self.bms_spectrum_arguments()
-        chi = fkw.pop("magnetic_susceptibility")
+        fkw.pop("magnetic_susceptibility")
+        unit = self.pm_bms_chi_unit_combo.currentData()
+        values = self._triplet(self.pm_bms_chi_edit.text(), "χ")
+        if unit == "si_volume":
+            chi_lines = [f"chi = {values!r}  # SI volume susceptibility (dimensionless)"]
+        else:
+            kw = self.chi_conversion()
+            chi_lines = ["from opennmr.notebook import susceptibility",
+                         f"chi = tuple(susceptibility.to_si_volume({values!r}, {unit!r}"
+                         + "".join(f", {k}={v!r}" for k, v in kw.items()) + "))",
+                         "print(susceptibility.describe(" + f"{values!r}, {unit!r}"
+                         + "".join(f", {k}={v!r}" for k, v in kw.items()) + "))"]
         if self.pm_bms_source_combo.currentData() == "dump":
             particles = f"particles = {self.pm_bms_dump_edit.text().strip()!r}  # LAMMPS dump"
         else:
@@ -1379,13 +1518,13 @@ class ParamagneticToolsPanel(QWidget):
                          + ", ".join(f"{k}={v!r}" for k, v in kw.items()) + ", verbose=False)")
         quantity = "delta_zz" if bmsf.route(skw["mode"], skw["sample"], skw["local"])[0] or \
             skw["mode"] == "static" else "delta_iso"
-        lines = ["from opennmr.notebook.bms import fast as bmsf",
+        lines = ["from opennmr.notebook.bms import fast as bmsf", *chi_lines,
                  "from opennmr.notebook.bms import views", particles,
-                 f"spectrum, field = bmsf.fast_bms_spectrum(particles, {chi!r}, "
+                 "spectrum, field = bmsf.fast_bms_spectrum(particles, chi, "
                  + ", ".join(f"{k}={v!r}" for k, v in {**fkw, **skw}.items()) + ")",
                  "print(spectrum['stats'])",
                  f"fig = bmsf.plot_bms_slice(field, quantity={quantity!r})",
-                 f"fig3d = views.plot_packing_3d(particles, {chi!r}, "
+                 "fig3d = views.plot_packing_3d(particles, chi, "
                  f"box_size={fkw['box_size']!r}, equation={fkw['equation']!r}, "
                  f"deformation={fkw['deformation']!r})"]
         return "\n".join(lines) + "\n"
@@ -1806,4 +1945,5 @@ class ParamagneticToolsPanel(QWidget):
                 _set(self.pm_bp_ion_table, r, 3, "")
         self._sync_bp_rows()
         self._sync_bms_rows()
+        self._sync_chi_rows()
         self._sync_T_rows()

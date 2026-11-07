@@ -503,3 +503,36 @@ def test_kept_bms_spectrum_lands_in_open_experiments(qapp, monkeypatch, tmp_path
     index = t.keep_bms_spectrum()
     assert index is not None and len(window.session.spectra) == before + 1
     assert t.keep_bms_spectrum() == index and len(window.session.spectra) == before + 1   # once
+
+
+def test_bms_susceptibility_units(qapp, no_dialogs, bms_cache):
+    from opennmr.notebook import susceptibility as X
+    t = _bms_panel()
+    g = t._bms_grid_form
+    assert not g.isRowVisible(t.pm_bms_density_spin)                 # SI volume: nothing else
+    t.pm_bms_chi_unit_combo.setCurrentIndex(t.pm_bms_chi_unit_combo.findData("mu_eff"))
+    assert g.isRowVisible(t.pm_bms_chi_T_spin) and g.isRowVisible(t.pm_bms_molar_mass_spin)
+    t.pm_bms_chi_edit.setText("5.92")
+    assert "molar volume" in t.pm_bms_chi_si_label.text()          # says what is missing
+    t.pm_bms_molar_mass_spin.setValue(157.85)
+    t.pm_bms_density_spin.setValue(3.43)
+    t.pm_bms_chi_T_spin.setValue(300.0)
+    expect = X.to_si_volume(5.92, "mu_eff", molar_mass=157.85, density=3.43, T=300.0)
+    assert t.bms_chi_si() == pytest.approx((expect,) * 3)
+    assert f"{expect:.4g}" in t.pm_bms_chi_si_label.text()
+    t.pm_bms_vm_combo.setCurrentIndex(t.pm_bms_vm_combo.findData("cell"))
+    assert g.isRowVisible(t.pm_bms_Z_spin) and not g.isRowVisible(t.pm_bms_molar_mass_spin)
+    t.pm_bms_cell_spin.setValue(157.85 / 3.43 * 4 / X.N_A * 1e24)
+    t.pm_bms_Z_spin.setValue(4)
+    assert t.bms_chi_si()[0] == pytest.approx(expect, rel=1e-6)
+    t.pm_bms_samples_spin.setValue(20000)
+    assert t.simulate_bms(), no_dialogs
+    assert "μ_eff" in t.pm_bms_result_label.text()
+    assert t.bms_nmr_spectrum.metadata.raw["simulation"]["chi_unit"] == "mu_eff"
+    ns = {}
+    exec(t.bms_python().replace("fig = ", "_f = ").replace("fig3d = ", "_g = "), ns)
+    assert np.allclose(ns["spectrum"]["real_spectrum"], t.bms_spectrum["real_spectrum"])
+    u = ParamagneticToolsPanel()
+    u.set_state(t.get_state())
+    assert u.bms_chi_si()[0] == pytest.approx(t.bms_chi_si()[0])
+    assert u._bms_grid_form.isRowVisible(u.pm_bms_Z_spin)
