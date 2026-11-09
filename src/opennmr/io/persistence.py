@@ -78,6 +78,11 @@ _PROCESSING_RAW_BLOCKLIST = frozenset({
     # stale copy of something the vendor files already say. The user's
     # own SR (`sr_shift_hz`) *is* persisted -- it is a real choice.
     "sr_recorded_hz", "sr_recorded_hz_f1",
+    # The reader's own reading of the file format (JEOL 2D, 2026-11-09):
+    # F1's quadrature sense and why a recorded phase was not used. Saved,
+    # a copy would outlive a correction to the reader and override it on
+    # every reopen of that file.
+    "f1_quadrature_sign_flip", "phase_note",
 })
 
 

@@ -673,11 +673,11 @@ def correct_spectrum_fids(fid_raw: np.ndarray, setup: BrukerDriftSetup, start_hz
 #: Vendors whose readers take ``drift_correction=`` for a pseudo-2D series
 #: (X-Pulse arrays, Varian arrayed 2D, Spinsolve PGSTE). Bruker is separate:
 #: it also does genuine 2D/3D/4D, from its own acquisition parameters.
-PSEUDO_2D_VENDORS = ("xpulse", "varian", "spinsolve")
+PSEUDO_2D_VENDORS = ("xpulse", "varian", "spinsolve", "jeol")
 
 NOT_SUPPORTED_MESSAGE = (
     "Drift correction needs a Bruker 2D/pseudo-2D read from its raw ser, or a pseudo-2D series "
-    "(one spectrum per row, acquired in order) from X-Pulse, Varian or Spinsolve. A genuine 2D "
+    "(one spectrum per row, acquired in order) from X-Pulse, Varian, Spinsolve or JEOL. A genuine 2D "
     "from another vendor also has an indirect dimension to correct, which needs that vendor's "
     "acquisition order – not available yet. For Bruker data, use Write Corrected Bruker Dataset…"
 )

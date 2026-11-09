@@ -241,7 +241,8 @@ def test_read_1d_ppm_axis_centred_on_x_offset(tmp_path):
 
 def test_read_1d_rejects_non_1d_data_format(tmp_path):
     path = _write_jdf(tmp_path, data_format=2)  # Two_D
-    with pytest.raises(ValueError, match="only supports 1D"):
+    # 2D files are read by read_2d (io.load picks it); read_1d says so.
+    with pytest.raises(ValueError, match="is a 2D JEOL file"):
         jeol.read_1d(path)
 
 

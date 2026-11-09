@@ -3976,8 +3976,11 @@ class MainWindow(QMainWindow):
             "pseudo_2d" not in add_kwargs
             and spectrum.ndim == 2
             and not spectrum.is_pseudo_2d
-            and spectrum.metadata.vendor != "xpulse"
+            and spectrum.metadata.vendor not in ("xpulse", "jeol")
         ):
+            # (JEOL: the file itself says which it is -- a complex
+            # indirect axis with a nucleus is a genuine 2D, a real one a
+            # series -- so its reader's choice stands, 2026-11-09.)
             # Pseudo-2D is the default treatment for any 2D data,
             # regardless of what the vendor's own (known-unreliable for
             # at least Bruker T2/PFG data, see TODO.md) auto-detection
@@ -21739,7 +21742,8 @@ class MainWindow(QMainWindow):
         ])
         self._narrow_combo(self.delay_source_combo)
         self.delay_source_combo.setToolTip(
-            "Auto: this experiment's own vdlist/diff.xml if found, "
+            "Auto: this experiment's own vdlist/diff.xml, or the delays a JEOL .jdf "
+            "records with its rows, if found; "
             "otherwise plain slice index (1, 2, 3, ...). Manual list: "
             "type values in directly. Start + step: generate an "
             "evenly-spaced series starting at Start and incrementing "
@@ -26349,6 +26353,16 @@ class MainWindow(QMainWindow):
             reader_warnings = (recorded or {}).get("warnings") or []
         else:
             reader_warnings = []
+        # Values the data file itself records for its rows (a JEOL
+        # pseudo-2D's delay list, in seconds -- io.jeol.read_2d), with
+        # where they came from (2026-11-09).
+        recorded_axis = (spectrum.metadata.raw or {}).get("indirect_values")
+        if (not is_diffusion and isinstance(recorded_axis, dict)
+                and recorded_axis.get("unit") == "s"):
+            values = np.asarray(recorded_axis.get("values"), dtype=float)
+            if values.ndim == 1 and values.size == n_slices and np.all(np.isfinite(values)):
+                self._values_provenance = recorded_axis.get("source") or "the data file's own delays"
+                return values
         if spectrum.metadata.vendor == "bruker" and source_path and not is_diffusion:
             try:
                 return io_bruker.read_vdlist(source_path)
