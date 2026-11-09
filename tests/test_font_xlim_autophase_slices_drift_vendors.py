@@ -276,7 +276,9 @@ def _meta(vendor, pseudo=True, ndim=2):
                        metadata=NMRMetadata(vendor=vendor, nucleus="1H", sfo1=400.0, pseudo_2d=pseudo))
 
 
-@pytest.mark.parametrize("vendor", ["xpulse", "varian", "spinsolve"])
+# JEOL joined 2026-11-09, with its 2D reader (io.jeol.read_2d corrects a
+# pseudo-2D series and refuses a genuine 2D, like the others).
+@pytest.mark.parametrize("vendor", ["xpulse", "varian", "spinsolve", "jeol"])
 def test_drift_support_accepts_a_pseudo_2d_from_each_supported_vendor(vendor):
     assert dc.drift_support(_meta(vendor))[0] is True
 
@@ -287,8 +289,6 @@ def test_drift_support_refuses_the_rest_with_a_reason(vendor):
     assert not ok and "Bruker" in why
     ok, why = dc.drift_support(_meta(vendor, ndim=1))
     assert not ok
-    if vendor == "jeol":
-        assert not dc.drift_support(_meta("jeol"))[0]
 
 
 def test_bruker_support_is_unchanged():
