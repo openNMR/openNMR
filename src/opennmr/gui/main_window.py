@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 from PySide6.QtWidgets import QColorDialog, QLayout
+from . import report_format
 from .widgets.report_label import ReportLabel
 from .widgets.notes_editor import ExperimentNotesEditor
 from .widgets.advice_box import AdviceBox
@@ -22684,23 +22685,22 @@ class MainWindow(QMainWindow):
         # The across-peaks summary, above the per-peak report it
         # summarises. It used to print on the Peak Picking sub-tab --
         # see score_results_label for the cause the four shared.
+        # Laid out like Fit's read-outs (explicit user request, 2026-11-09:
+        # the monospaced "====" report was unappealing): rich text from the
+        # fit itself (report_format.curve_fit_summary_html), while text()
+        # stays the plain report that is logged, copied and exported.
         self.curve_fit_summary_label = ReportLabel("")
         self.curve_fit_summary_label.setWordWrap(True)
-        self.curve_fit_summary_label.setFont(QFontDatabase.systemFont(
-            QFontDatabase.SystemFont.FixedFont))
         self.curve_fit_summary_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         self.curve_fit_advice_box = AdviceBox(on_action=self._apply_curve_advice,
                                               title="What the curve fit tells you, and what "
                                                     "to try next")
 
-        self.relaxation_fit_params_label = QLabel("")
+        # The plain format_relaxation_report is its text(); what is shown is
+        # report_format.relaxation_report_html (2026-11-09, as above).
+        self.relaxation_fit_params_label = ReportLabel("")
         self.relaxation_fit_params_label.setWordWrap(True)
-        # Monospaced: format_relaxation_report aligns its parameter and
-        # quality tables with spaces, which a proportional font turns
-        # into a ragged mess.
-        self.relaxation_fit_params_label.setFont(QFontDatabase.systemFont(
-            QFontDatabase.SystemFont.FixedFont))
         self.relaxation_fit_params_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
 
@@ -27085,12 +27085,17 @@ class MainWindow(QMainWindow):
         if note:
             summary = f"⚠ {note}\n\n{summary}"
         provenance = getattr(self, "_values_provenance", None)
+        provenance_line = ""
         if provenance:
             # The record of how the x-axis was arrived at stays with the
             # number it produced (project rule: an easy-to-follow log of
             # how an answer was reached).
-            summary += f"\n\n{self.delays_row_label.text().rstrip(':')} from: {provenance}"
-        self.curve_fit_summary_label.setText(summary)
+            provenance_line = f"{self.delays_row_label.text().rstrip(':')} from: {provenance}"
+            summary += f"\n\n{provenance_line}"
+        muted, warn = self.curve_fit_summary_label.colours()
+        self.curve_fit_summary_label.setReport(summary, report_format.curve_fit_summary_html(
+            results, global_result, note=note or "", provenance=provenance_line,
+            muted=muted, warn=warn))
         self._global_fit_result = global_result
         self.curve_fit_advice_box.set_items(self._curve_fit_advice(results))
 
@@ -29354,10 +29359,11 @@ class MainWindow(QMainWindow):
         # deciding whether to believe the number -- so it needs the
         # uncertainty's own kind, R² and the reduced chi-squared, not
         # just the value and a bare ±.
-        self.relaxation_fit_params_label.setText(
-            processing_relaxation.format_relaxation_report(
-                result, title=result.get("peak_label") or None, width=58)
-        )
+        title = result.get("peak_label") or None
+        muted, warn = self.relaxation_fit_params_label.colours()
+        self.relaxation_fit_params_label.setReport(
+            processing_relaxation.format_relaxation_report(result, title=title, width=58),
+            report_format.relaxation_report_html(result, title=title, muted=muted, warn=warn))
 
     @staticmethod
     def _relaxation_fit_curve(result):
@@ -29383,10 +29389,13 @@ class MainWindow(QMainWindow):
             fit_style=box.fit_style(), normalise=box.normalise())
         self._fit_canvas_owner = "relaxation"
         self._sync_curve_peak_bar()
-        self.relaxation_fit_params_label.setText("\n\n".join(
-            processing_relaxation.format_relaxation_report(
-                r, title=r.get("peak_label") or f"Peak {k + 1}", width=58)
-            for k, r in enumerate(results)))
+        titles = [r.get("peak_label") or f"Peak {k + 1}" for k, r in enumerate(results)]
+        muted, warn = self.relaxation_fit_params_label.colours()
+        self.relaxation_fit_params_label.setReport(
+            "\n\n".join(processing_relaxation.format_relaxation_report(r, title=t, width=58)
+                         for r, t in zip(results, titles)),
+            "<hr>".join(report_format.relaxation_report_html(r, title=t, muted=muted, warn=warn)
+                        for r, t in zip(results, titles)))
 
     def _on_curve_fit_plot_changed(self) -> None:
         """Redraw with the new fit-plot settings, and remember them."""
@@ -30065,6 +30074,7 @@ class MainWindow(QMainWindow):
             # be lost on a reselection.
             "score_results_text": self.score_results_label.text(),
             "curve_fit_summary_text": self.curve_fit_summary_label.text(),
+            "curve_fit_summary_html": self.curve_fit_summary_label.html(),
             "dosy_results_text": self.dosy_results_label.text(),
             "gradient_calibration_text": self.gradient_calibration_label.text(),
             # The rest of the Curve Fitting panel. Everything in it is
@@ -30264,7 +30274,12 @@ class MainWindow(QMainWindow):
             self.analysis_results_label.setText(state["results_text"])
             self.integration_results_label.setText(state.get("integration_results_text", ""))
             self.score_results_label.setText(state.get("score_results_text", ""))
-            self.curve_fit_summary_label.setText(state.get("curve_fit_summary_text", ""))
+            summary_html = state.get("curve_fit_summary_html")
+            if summary_html and report_format.is_rich(summary_html):
+                self.curve_fit_summary_label.setReport(
+                    state.get("curve_fit_summary_text", ""), summary_html)
+            else:
+                self.curve_fit_summary_label.setText(state.get("curve_fit_summary_text", ""))
             self.dosy_results_label.setText(state.get("dosy_results_text", ""))
             self.gradient_calibration_label.setText(state.get("gradient_calibration_text", ""))
             # After the model combo above, since these are the shape of

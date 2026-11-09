@@ -13,6 +13,9 @@ is unchanged; this module only decides how it is *shown*:
   row per site, with whatever every site shares said once above it
   (seven sites with one CSA, one C_Q and one width were seven near-
   identical sentences).
+* :func:`relaxation_report_html`, :func:`global_report_html`,
+  :func:`peaks_summary_html`, :func:`curve_fit_summary_html` -- Dynamics'
+  curve-fit read-outs (2026-11-09), from the fit dicts themselves.
 * :func:`combined_simulation_html`, :func:`combined_fit_html`,
   :func:`combined_preview_html` -- Simulate's and Fit's CSA, Quad &
   J-coupling read-outs, from their structured results.
@@ -312,3 +315,301 @@ def combined_preview_html(n_orientations: int, fit_orientations: int, amounts: d
     return (f'{_P}<span style="font-weight:600;">Starting model shown on the Fit view</span>'
             f"<br>{_items(items, muted)}"
             + (f"<br>{_muted(_e(amount_text), muted)}" if amount_text else "") + "</p>")
+
+
+# ---- Dynamics: relaxation / diffusion curve fits -------------------------------------------
+#
+# Explicit user request, 2026-11-09: Dynamics' curve-fit report was the
+# monospaced "====" text block; it should read like Fit's read-outs (a
+# headline, bold and normal type, sizes, a quality row). These build that
+# layout from the fit dict itself rather than by parsing the plain report,
+# which (format_relaxation_report / format_global_report) is still what is
+# logged, copied, exported and kept.
+
+#: Model keys whose readable name is not just the key with spaces.
+_MODEL_NAMES = {
+    "stejskal_tanner": "Stejskal–Tanner",
+    "stejskal_tanner_stretched": "Stejskal–Tanner, stretched",
+    "stejskal_tanner_biexponential": "Stejskal–Tanner, biexponential",
+    "diffusion_n": "N-component diffusion",
+}
+#: Parameter names that are a Greek letter, or a Greek letter with a subscript.
+_GREEK = {"beta": "β", "alpha": "α", "tau": "τ", "gamma": "γ", "delta": "δ"}
+_SYMBOL = re.compile(r"^([A-Za-z])(\d+[a-z]{0,3}|[a-z])?$")
+_SUB = '<sub>{}</sub>'
+
+
+def model_name(model) -> str:
+    """A model key as words: ``inversion_recovery`` -> "Inversion recovery"."""
+    key = str(model or "")
+    if key in _MODEL_NAMES:
+        return _MODEL_NAMES[key]
+    words = key.replace("_", " ").strip()
+    return words[:1].upper() + words[1:]
+
+
+def param_html(name) -> str:
+    """A parameter name as its symbol: italic letter, subscript label
+    (T1 -> *T*₁, T2a -> *T*₂ₐ, M0 -> *M*₀, beta -> *β*, tau_c -> *τ*꜀,
+    T1rho -> *T*₁ρ). Names that are not a symbol (a custom model's
+    ``amp``) are shown as written, since guessing a subscript would
+    misname them. Project rule: algebraic symbols are italic."""
+    name = str(name)
+    if name in _GREEK:
+        return f"<i>{_GREEK[name]}</i>"
+    if name == "T1rho":
+        return "<i>T</i>" + _SUB.format("1ρ")
+    head, sep, sub = name.partition("_")
+    if sep and sub and (head in _GREEK or len(head) == 1) and sub.isalnum():
+        letter = _GREEK.get(head, head)
+        return f"<i>{_e(letter)}</i>" + _SUB.format(_e(sub))
+    match = _SYMBOL.match(name)
+    if match:
+        letter, sub = match.groups()
+        return f"<i>{letter}</i>" + (_SUB.format(sub) if sub else "")
+    return _e(name)
+
+
+def _value_html(text) -> str:
+    """A formatted value ("68.9 ± 3.2 µs", "2.03e-09 ± … m^2/s") for HTML."""
+    return _e(text).replace("^2", "²").replace("^3", "³")
+
+
+def _metrics_html(metrics, muted: str) -> str:
+    """Fit's quality row: each label small and muted over its value in bold."""
+    cells = "".join(
+        f'<td style="padding-right:16px;"><span style="color:{muted};">{label}</span><br>'
+        f'<span style="font-weight:600;">{value}</span></td>' for label, value in metrics)
+    return (f'<table cellspacing="0" cellpadding="0" style="margin-top:2px; margin-bottom:6px;">'
+            f"<tr>{cells}</tr></table>")
+
+
+def _section(title: str) -> str:
+    # Qt's rich text drops a paragraph's top margin straight after a
+    # table, so the gap above a section heading is a small empty line.
+    return ('<p style="margin-top:0px; margin-bottom:0px; font-size:4pt;">&nbsp;</p>'
+            f'<p style="margin-top:0px; margin-bottom:2px;"><b>{_e(title)}</b></p>')
+
+
+def _finite(value) -> bool:
+    try:
+        return value is not None and bool(float(value) == float(value)) \
+            and abs(float(value)) != float("inf")
+    except (TypeError, ValueError):
+        return False
+
+
+def _quality_metrics(quality: dict, n_points=None) -> list[tuple[str, str]]:
+    metrics = []
+    if _finite(quality.get("r_squared")):
+        metrics.append(("<i>R</i>²", f"{float(quality['r_squared']):.5f}"))
+    if _finite(quality.get("rmse")):
+        metrics.append(("RMSE", _e(f"{float(quality['rmse']):.4g}")))
+    if _finite(quality.get("reduced_chi2")):
+        metrics.append(("reduced χ²", _e(f"{float(quality['reduced_chi2']):.4g}")))
+    points = quality.get("n_points", n_points)
+    if points is not None:
+        metrics.append(("points / d.o.f.", _e(f"{points} / {quality.get('dof', '?')}")))
+    return metrics
+
+
+def _uncertainty_html(uncertainty: dict, muted: str) -> str:
+    if not uncertainty:
+        return ""
+    short = uncertainty.get("short", "")
+    long = uncertainty.get("description", "")
+    return (f'<p style="margin-top:4px; margin-bottom:6px;">'
+            f'<span style="font-weight:600;">± is {_e(short)}.</span> '
+            f"{_muted(_e(long), muted)}</p>")
+
+
+def _title_html(title: str, subtitle_items, muted: str) -> str:
+    out = f'{_P}<span style="font-size:large; font-weight:600;">{_e(title)}</span>'
+    items = [i for i in subtitle_items if i]
+    if items:
+        out += f"<br>{_items(items, muted)}"
+    return out + "</p>"
+
+
+def relaxation_report_html(fit: dict, title: str | None = None, muted: str = MUTED,
+                           warn: str = WARN) -> str:
+    """One :func:`~opennmr.processing.relaxation.fit_relaxation` result
+    laid out like Fit's read-outs; the same content as
+    :func:`~opennmr.processing.relaxation.format_relaxation_report`
+    (headline value, every parameter with its unit and kind of ±, the
+    relative amplitudes, R², RMSE, reduced χ², points, final I/I₀)."""
+    from opennmr.processing import relaxation as rx
+
+    params, errors = fit.get("params") or {}, fit.get("errors") or {}
+    names = list(fit.get("param_names") or params)
+    quality = fit.get("fit_quality") or {}
+    uncertainty = fit.get("uncertainty") or rx.describe_uncertainty(
+        fit.get("y_err") is not None, quality.get("dof", 1))
+    fractions = rx.amplitude_fractions(params)
+
+    out = [_title_html(title or "Curve fit", [model_name(fit.get("model"))], muted)]
+
+    rate = fit.get("rate_param")
+    if rate and rate in params:
+        value = rx.format_param_value(rate, params[rate], errors.get(rate))
+        out.append(f'<p style="margin-top:2px; margin-bottom:6px;">'
+                   f'<span style="font-size:x-large; font-weight:600;">'
+                   f"{param_html(rate)} = {_value_html(value)}</span></p>")
+
+    rows = []
+    for name in names:
+        value, error = params.get(name), errors.get(name)
+        fixed = error is None or not _finite(error)
+        shown = rx.format_param_value(name, value, None if fixed else error)
+        notes = []
+        if fixed:
+            notes.append("fixed")
+        if name in fractions:
+            notes.append(f"{fractions[name] * 100:.1f}% of total")
+        note = _muted(_e(", ".join(notes)), muted) if notes else ""
+        rows.append(f'<tr><td style="padding-right:14px;">{param_html(name)}</td>'
+                    f'<td style="padding-right:12px;">{_value_html(shown)}</td>'
+                    f"<td>{note}</td></tr>")
+    if rows:
+        out.append(_section("Parameters"))
+        out.append(f'<table cellspacing="0" cellpadding="1" style="margin-bottom:4px;">{"".join(rows)}</table>')
+
+    if fractions:
+        out.append(_section("Relative amplitudes (population weights)"))
+        rows = []
+        for name in [n for n in names if n in fractions]:
+            paired = rx._paired_rate_param(name, names)
+            rate_cell = ""
+            if paired is not None:
+                rate_cell = (f"{param_html(paired)} = "
+                             f"{_value_html(rx.format_param_value(paired, params.get(paired)))}")
+            rows.append(f'<tr><td style="padding-right:14px;">{param_html(name)}</td>'
+                        f'<td align="right" style="padding-right:12px; font-weight:600;">'
+                        f"{fractions[name] * 100:.2f}%</td><td>{rate_cell}</td></tr>")
+        out.append(f'<table cellspacing="0" cellpadding="1" style="margin-bottom:4px;">{"".join(rows)}</table>')
+        if any(share < 0 or share > 1 for share in fractions.values()):
+            out.append(_warning("A share outside 0–100% means the components have opposite "
+                                "signs, which usually indicates more components than the "
+                                "data supports.", warn))
+
+    out.append(_section("Fit quality"))
+    t = fit.get("t")
+    metrics = _quality_metrics(quality, None if t is None else len(t))
+    fraction = quality.get("decay_fraction")
+    if fraction is None:
+        fraction = rx.decay_fraction(fit.get("y") if fit.get("y") is not None else [])
+    if _finite(fraction):
+        metrics.append(("final <i>I</i>/<i>I</i>₀",
+                        _e(f"{float(fraction):.4g} ({float(fraction) * 100:.1f}%)")))
+    out.append(_metrics_html(metrics, muted))
+    out.append(_uncertainty_html(uncertainty, muted))
+    return "".join(out)
+
+
+def global_report_html(result: dict, muted: str = MUTED, warn: str = WARN) -> str:
+    """A :func:`~opennmr.processing.relaxation.fit_relaxation_global`
+    result: the shared parameters as the headline, a row per curve for
+    the ones left local, then the joint quality row."""
+    from opennmr.processing import relaxation as rx
+
+    quality = result.get("fit_quality") or {}
+    shared = result.get("shared") or {}
+    sub = [model_name(result.get("model")),
+           f"{quality.get('n_datasets', len(result.get('per_dataset') or []))} curves",
+           f"{quality.get('n_points', '?')} points",
+           f"{len(shared)} shared parameter{'s' if len(shared) != 1 else ''}"]
+    out = [_title_html("Global curve fit", sub, muted)]
+
+    if shared:
+        errors = result.get("shared_errors") or {}
+        lines = [f"{param_html(n)} = {_value_html(rx.format_param_value(n, v, errors.get(n)))}"
+                 for n, v in shared.items()]
+        out.append('<p style="margin-top:2px; margin-bottom:6px;">'
+                   '<span style="font-size:x-large; font-weight:600;">'
+                   + "<br>".join(lines) + "</span><br>"
+                   + _muted("shared across every curve", muted) + "</p>")
+    else:
+        out.append(f"{_P}{_muted('No shared parameters — every curve fitted independently.', muted)}</p>")
+
+    local = list(result.get("local_names") or [])
+    per = list(result.get("per_dataset") or [])
+    if local and per:
+        out.append(_section("Per curve"))
+        head = "".join(f'<th align="left" style="color:{muted}; font-weight:600; '
+                       f'padding-right:12px;">{h}</th>'
+                       for h in ["Curve"] + [param_html(n) for n in local]
+                       + ["final <i>I</i>/<i>I</i>₀"])
+        rows = []
+        for k, entry in enumerate(per):
+            shares = rx.amplitude_fractions(entry.get("params") or {})
+            cells = [f'<td style="padding-right:12px;"><b>{_e(entry.get("label") or k + 1)}</b></td>']
+            for n in local:
+                if n in shares:
+                    text = f"{shares[n] * 100:.1f}%"
+                else:
+                    text = rx.format_param_value(n, (entry.get("params") or {}).get(n),
+                                                 (entry.get("errors") or {}).get(n))
+                cells.append(f'<td style="padding-right:12px;">{_value_html(text)}</td>')
+            frac = (entry.get("fit_quality") or {}).get("decay_fraction")
+            cells.append(f"<td>{_e(f'{float(frac):.3g}') if _finite(frac) else '—'}</td>")
+            rows.append("<tr>" + "".join(cells) + "</tr>")
+        out.append(f'<table cellspacing="0" cellpadding="1"><tr>{head}</tr>{"".join(rows)}</table>')
+
+    out.append(_section("Fit quality (joint, over every curve)"))
+    out.append(_metrics_html(_quality_metrics(quality), muted))
+    out.append(_uncertainty_html(result.get("uncertainty") or {}, muted))
+    return "".join(out)
+
+
+def peaks_summary_html(results: list[dict], muted: str = MUTED) -> str:
+    """Several peaks' curve fits as one table: the rate (or, for a
+    model with no single rate, every parameter, amplitudes as shares)
+    and R² per peak."""
+    from opennmr.processing import relaxation as rx
+
+    if not results:
+        return ""
+    out = [_title_html(f"{len(results)} peaks", [model_name(results[0].get("model"))], muted)]
+    rows = []
+    for result in results:
+        params, errors = result.get("params") or {}, result.get("errors") or {}
+        rate = result.get("rate_param")
+        if rate is not None and rate in params:
+            value = (f"{param_html(rate)} = "
+                     f"<b>{_value_html(rx.format_param_value(rate, params[rate], errors.get(rate)))}</b>")
+        else:
+            shares = rx.amplitude_fractions(params)
+            value = ", ".join(
+                f"{param_html(n)} = " + (f"{shares[n] * 100:.1f}%" if n in shares
+                                         else _value_html(rx.format_param_value(n, params[n])))
+                for n in result.get("param_names") or params)
+        r2 = (result.get("fit_quality") or {}).get("r_squared")
+        r2_cell = _muted(f"<i>R</i>² {float(r2):.4f}", muted) if _finite(r2) else ""
+        rows.append(f'<tr><td style="padding-right:12px;"><b>{_e(result.get("peak_label", "?"))}</b>'
+                    f'</td><td style="padding-right:12px;">{value}</td><td>{r2_cell}</td></tr>')
+    out.append(f'<table cellspacing="0" cellpadding="1" style="margin-bottom:4px;">{"".join(rows)}</table>')
+    short = (results[0].get("uncertainty") or {}).get("short")
+    if short:
+        out.append(f'<p style="margin-top:4px; margin-bottom:0px;">'
+                   f"{_muted(_e(f'± is {short}.'), muted)}</p>")
+    return "".join(out)
+
+
+def curve_fit_summary_html(results: list[dict], global_result: dict | None = None,
+                           note: str = "", provenance: str = "", muted: str = MUTED,
+                           warn: str = WARN) -> str:
+    """Dynamics' results read-out above the per-peak report: a warning
+    about the x-values first if there is one, the global / single /
+    several-peak layout, then where the x-values came from."""
+    out = []
+    if note:
+        out.append(_warning(str(note), warn))
+    if global_result is not None:
+        out.append(global_report_html(global_result, muted=muted, warn=warn))
+    elif len(results or []) == 1:
+        out.append(relaxation_report_html(results[0], muted=muted, warn=warn))
+    elif results:
+        out.append(peaks_summary_html(results, muted=muted))
+    if provenance:
+        out.append(f'<p style="margin-top:6px; margin-bottom:0px;">{_muted(_e(provenance), muted)}</p>')
+    return "".join(out)
