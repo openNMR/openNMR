@@ -203,6 +203,32 @@ def _text_size(parent_ax, spec: dict) -> float:
     return 0.75 * base
 
 
+def default_label(parent_ax, name: str = "x") -> str:
+    """The text an inset's ``name`` ("x" or "y") axis label takes when the
+    spec gives none: the plot's own label; else, on a figure of stacked
+    plots (Compare), the label of the plots sharing that axis -- only the
+    bottom row of a stack carries the x label -- and then any label on the
+    figure; else "Intensity" for y, the quantity a spectrum's unlabelled
+    vertical axis shows. Explicit user report, 2026-11-10: ticking "x-axis
+    label" with no text of one's own drew nothing."""
+    if parent_ax is None:
+        return "Intensity" if name == "y" else ""
+    getter = f"get_{name}label"
+    text = getattr(parent_ax, getter)()
+    if text:
+        return text
+    shared = (parent_ax.get_shared_x_axes() if name == "x"
+              else parent_ax.get_shared_y_axes()).get_siblings(parent_ax)
+    figure_axes = list(parent_ax.figure.axes) if parent_ax.figure is not None else []
+    for other in [*shared, *figure_axes]:
+        if other is parent_ax or other.get_gid() == INSET_GID:
+            continue
+        text = getattr(other, getter)()
+        if text:
+            return text
+    return "Intensity" if name == "y" else ""
+
+
 def _apply_labels(ax, parent_ax, spec: dict, bounds=None) -> None:
     """The x and y axis labels, when switched on: the spec's text, else the
     plot's own, in the inset's typeface and on the side facing into the plot
@@ -217,8 +243,8 @@ def _apply_labels(ax, parent_ax, spec: dict, bounds=None) -> None:
             setter("")
             continue
         text = spec.get(f"{name}label")
-        if text is None and parent_ax is not None:
-            text = getattr(parent_ax, f"get_{name}label")()
+        if text is None:
+            text = default_label(parent_ax, name)
         setter(text or "")
         label = axis.get_label()
         label.set_fontsize(size)
