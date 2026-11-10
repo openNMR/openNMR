@@ -16,6 +16,8 @@ is unchanged; this module only decides how it is *shown*:
 * :func:`relaxation_report_html`, :func:`global_report_html`,
   :func:`peaks_summary_html`, :func:`curve_fit_summary_html` -- Dynamics'
   curve-fit read-outs (2026-11-09), from the fit dicts themselves.
+* :func:`score_report_html` -- a SCORE/OUTSCORE resolution, laid out like
+  the curve fit (explicit user request, 2026-11-10).
 * :func:`combined_simulation_html`, :func:`combined_fit_html`,
   :func:`combined_preview_html` -- Simulate's and Fit's CSA, Quad &
   J-coupling read-outs, from their structured results.
@@ -612,4 +614,89 @@ def curve_fit_summary_html(results: list[dict], global_result: dict | None = Non
         out.append(peaks_summary_html(results, muted=muted))
     if provenance:
         out.append(f'<p style="margin-top:6px; margin-bottom:0px;">{_muted(_e(provenance), muted)}</p>')
+    return "".join(out)
+
+
+def score_report_html(result: dict, muted: str = MUTED, warn: str = WARN,
+                      footnote: str = "") -> str:
+    """A :func:`~opennmr.processing.score.score` result laid out like the
+    curve fit's read-out: the method and model as the title, a row per
+    component (its share, its decay constant and any other parameter its
+    model fits), the fit-quality row -- R², RMSE, the residual as a share
+    of the signal, the worst slice, cross-talk -- then what the numbers
+    can and cannot say, and any warning. The same content as
+    :func:`~opennmr.processing.score.format_score_report`."""
+    import numpy as np
+
+    from opennmr.processing import relaxation as rx
+    from opennmr.processing import score as sc
+
+    method = result.get("method", "score")
+    name = sc.RESOLUTION_METHODS[method]["label"].split(" (")[0]
+    n = int(result["n_components"])
+    sub = [model_name(result.get("model")), f"{n} component{'s' if n != 1 else ''}"]
+    out = [_title_html(name, sub, muted)]
+    if result.get("model_note"):
+        out.append(f"{_P}{_muted(_e(result['model_note']), muted)}</p>")
+
+    diffusion = result.get("kind") == "diffusion"
+    rate_symbol = "<i>D</i>" if diffusion else "<i>T</i>"
+    extra = [p for p in result.get("model_params", []) if p != result.get("rate_param")]
+    head = "".join(f'<th align="left" style="color:{muted}; font-weight:600; '
+                   f'padding-right:12px;">{h}</th>'
+                   for h in ["Component", "Share", rate_symbol] + [param_html(p) for p in extra])
+    rows = []
+    fractions = result.get("fractions")
+    params = result.get("component_params") or [{}] * n
+    for index in range(n):
+        if diffusion:
+            value = rx.format_diffusion_value(result["constants"][index])
+        else:
+            value = rx.format_time_value(result["T"][index])
+        share = float(fractions[index]) if fractions is not None else float("nan")
+        cells = [f'<td style="padding-right:12px;"><b>{index + 1}</b></td>',
+                 f'<td align="right" style="padding-right:12px; font-weight:600;">'
+                 f"{share * 100:.1f}%</td>" if _finite(share) else "<td>—</td>",
+                 f'<td style="padding-right:12px;">{_value_html(value)}</td>']
+        for p in extra:
+            v = (params[index] if index < len(params) else {}).get(p)
+            cells.append(f'<td style="padding-right:12px;">'
+                         f"{_e(f'{float(v):.4g}') if _finite(v) else '—'}</td>")
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    out.append(_section("Components"))
+    out.append(f'<table cellspacing="0" cellpadding="1" style="margin-bottom:4px;">'
+               f"<tr>{head}</tr>{''.join(rows)}</table>")
+
+    out.append(_section("Fit quality"))
+    metrics = []
+    if _finite(result.get("r_squared")):
+        metrics.append(("<i>R</i>²", f"{float(result['r_squared']):.5f}"))
+    if _finite(result.get("rmse")):
+        metrics.append(("RMSE", _e(f"{float(result['rmse']):.4g}")))
+    if _finite(result.get("relative_rmse")):
+        metrics.append(("residual / signal", _e(f"{float(result['relative_rmse']) * 100:.2f}%")))
+    by_level = np.asarray(result.get("residual_by_level", []), dtype=float)
+    worst = result.get("worst_level")
+    if by_level.size and worst is not None:
+        rows_used = result.get("rows")
+        number = (int(rows_used[worst]) + 1 if rows_used is not None and worst < len(rows_used)
+                  else int(worst) + 1)
+        metrics.append(("worst slice", _e(f"{number} ({by_level[worst] * 100:.2f}%)")))
+    if _finite(result.get("crosstalk")):
+        metrics.append(("cross-talk", _e(f"{float(result['crosstalk']):.4f}")))
+    columns = result.get("columns")
+    if columns is not None:
+        metrics.append(("points fitted", _e(f"{len(columns)} (≥ {result['threshold']:.0%} of max)")))
+    out.append(_metrics_html(metrics, muted))
+    optimised = "residual" if method == "score" else "cross-talk"
+    caveat = (f"This run minimised the {optimised}; the other numbers are reported for "
+              "comparison, not as independent corroboration. The number of components was "
+              "an input: a good R² says this many fit, never that it is the right number – "
+              "compare one more and one fewer, and look at the residual (tick Residual in "
+              "the component list).")
+    out.append(f"{_P}{_muted(_e(caveat), muted)}</p>")
+    for warning in result.get("warnings", []):
+        out.append(_warning(str(warning), warn))
+    if footnote:
+        out.append(f"{_P}{_muted(_e(footnote), muted)}</p>")
     return "".join(out)

@@ -75,6 +75,11 @@ INSET_DEFAULTS: dict = {
     "background": None,         # fill; None = the parent's
     "auto_ylim": False,         # fit the vertical range to the data in xlim
     "factor": None,             # 2D contour insets only: lowest contour, fraction of the maximum
+    # Which plot's area the inset sits in, for a figure of several stacked
+    # plots (Compare): None = the plot it magnifies; otherwise the index of
+    # another plot, so one spectrum's inset can sit beside another's. The
+    # position (corner / x, y) and size are then fractions of *that* plot.
+    "host": None,
 }
 
 CORNER_NAMES = tuple(CORNERS)
@@ -291,24 +296,32 @@ def _indicator_artists(indicator):
     return [p for p in parts if p is not None and hasattr(p, "set_gid")]
 
 
-def add_inset(parent_ax, xlim=None, ylim=None, spec: dict | None = None, **options):
+def add_inset(parent_ax, xlim=None, ylim=None, spec: dict | None = None, host_ax=None,
+              **options):
     """Add one inset to ``parent_ax`` and return its axes.
 
     ``xlim`` / ``ylim`` : the region magnified, in the parent's data
     coordinates, in display order (``(7.4, 7.1)`` keeps an NMR axis
     reversed). ``ylim=None`` fits the vertical range to the data in
     ``xlim``. Every other option is a key of :data:`INSET_DEFAULTS`.
+
+    ``host_ax`` : another axes of the same figure to place the inset in
+    (its corner / position and size are then fractions of ``host_ax``),
+    so an inset of one stacked spectrum can sit beside another's. The
+    copied data, the limits and the lines to the region still come from
+    ``parent_ax``, and :func:`remove_insets` on ``parent_ax`` removes it.
     """
     spec = normalise(spec, **options)
+    host = host_ax if host_ax is not None and host_ax is not parent_ax else parent_ax
     xlim = xlim if xlim is not None else spec["xlim"]
     ylim = ylim if ylim is not None else spec["ylim"]
     if xlim is None:
         raise ValueError("An inset needs xlim, the region to magnify.")
     if float(xlim[0]) == float(xlim[1]):
         raise ValueError("The inset region has no width.")
-    inset = parent_ax.inset_axes(inset_bounds(spec))
+    inset = host.inset_axes(inset_bounds(spec))
     inset.set_gid(INSET_GID)
-    inset.set_zorder(parent_ax.get_zorder() + 5)
+    inset.set_zorder(host.get_zorder() + 5)
     if not copy_artists(parent_ax, inset):
         inset.remove()
         raise ValueError("There is nothing on this plot to magnify.")
@@ -359,16 +372,27 @@ def remove_insets(parent_ax) -> int:
     return removed
 
 
-def draw_insets(parent_ax, specs) -> list:
+def draw_insets(parent_ax, specs, resolve_host=None) -> list:
     """Replace the insets on ``parent_ax`` with ``specs`` (a list of dicts
     as :func:`add_inset` takes) and return the new inset axes. A spec that
     cannot be drawn is skipped, so one bad region does not lose the others;
-    ``ValueError`` is raised only when none could be drawn."""
+    ``ValueError`` is raised only when none could be drawn.
+
+    ``resolve_host`` : ``index -> axes or None``, turning a spec's ``host``
+    into the axes to place it in (see :data:`INSET_DEFAULTS`); without it,
+    or for a host it cannot resolve, the inset sits on ``parent_ax``."""
     remove_insets(parent_ax)
     created, failures = [], []
     for spec in specs or []:
+        host_ax = None
+        host = (spec or {}).get("host")
+        if host is not None and resolve_host is not None:
+            try:
+                host_ax = resolve_host(int(host))
+            except (TypeError, ValueError, IndexError):
+                host_ax = None
         try:
-            created.append(add_inset(parent_ax, spec=spec))
+            created.append(add_inset(parent_ax, spec=spec, host_ax=host_ax))
         except ValueError as exc:
             failures.append(str(exc))
     if failures and not created:

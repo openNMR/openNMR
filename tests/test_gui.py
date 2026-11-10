@@ -11761,25 +11761,34 @@ def test_main_window_score_default_model_is_the_plain_stejskal_tanner(qapp, monk
     assert window._score_result["model"] == "stejskal_tanner"
 
 
-def test_main_window_score_rejects_a_multi_component_model_with_the_reason(qapp, monkeypatch):
+def test_main_window_score_uses_the_single_component_form_of_a_multi_component_model(
+        qapp, monkeypatch):
     # A biexponential already describes the populations SCORE's own
-    # component count describes; asking for both is asking for four.
-    # Reported against the Model combo, before the settings dialog.
+    # component count describes, so it cannot be a kernel. It used to be
+    # refused with an error; explicit user request (2026-11-10): "can it
+    # default to the single component model rather than flag an error?"
     window, _b, _ppm = _overlapping_pfg_window(qapp)
     index = window.relaxation_model_combo.findData("stejskal_tanner_biexponential")
     assert index >= 0
     window.relaxation_model_combo.setCurrentIndex(index)
 
-    shown = {}
     monkeypatch.setattr(QMessageBox, "critical",
-                        lambda *args, **kwargs: shown.update(title=args[1], text=args[2]))
-    monkeypatch.setattr(_ScoreSettingsDialog, "exec",
-                        lambda self: pytest.fail("the settings dialog should not open"))
+                        lambda *args, **kwargs: pytest.fail(f"no error expected: {args[2]}"))
+    seen = {}
 
+    def accept(self):
+        seen["labels"] = [w.text() for w in self.findChildren(QLabel)]
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(_ScoreSettingsDialog, "exec", accept)
     window._on_score_clicked()
 
-    assert "no single amplitude parameter" in shown["text"]
-    assert window._score_result is None
+    result = window._score_result
+    assert result is not None and result["model"] == "stejskal_tanner"
+    assert result["D"][0] == pytest.approx(2.5e-10, rel=0.1)
+    # Said before the run (the dialog) and after it (the report).
+    assert any("single-component form" in text for text in seen["labels"])
+    assert "single-component form" in window.score_results_label.text()
 
 
 def test_main_window_score_dialog_names_the_model_it_will_use(qapp, monkeypatch):
@@ -11872,7 +11881,7 @@ def test_main_window_score_component_list_is_selectable(qapp, monkeypatch):
 
     listing = window.score_component_list
     assert listing.isHidden() is False
-    assert listing.count() == 3            # two components plus "Measured"
+    assert listing.count() == 4            # two components, "Measured" and "Residual"
     # Components on by default; the measured spectrum off, since it is
     # for comparison rather than part of the answer.
     assert listing.item(0).checkState() == Qt.CheckState.Checked

@@ -851,9 +851,23 @@ class MplCanvas(QWidget):
     #: re-fit without it, so it just asks the owner (MainWindow).
     fitPointExcludeRequested = Signal(float, float)
 
-    #: Emitted (no value) when "Reset Excluded Points" is chosen --
+    #: Emitted (no value) when "Restore Removed Points" is chosen --
     #: same division of responsibility as fitPointExcludeRequested.
     fitPointsResetRequested = Signal()
+
+    #: Emitted with the right-clicked (x, y) when "Remove Slice from
+    #: Every Fit" is chosen on a curve fit of a series (one peak or all
+    #: peaks together): the whole slice nearest the click is to leave
+    #: every fit, as unticking it in Dynamics' "Slices used in fits"
+    #: does (explicit user request, 2026-11-10).
+    fitSliceRemoveRequested = Signal(float, float)
+
+    #: Emitted with the right-clicked x (data units) when "Calibrate
+    #: Integral Here…" is chosen on a 1D spectrum with integration
+    #: regions -- the owner finds the region and asks for its value.
+    integralCalibrationRequested = Signal(float)
+    #: "Reset Integral Calibration": back to the smallest integral = 1.
+    integralCalibrationResetRequested = Signal()
 
     #: Emitted with (lo, hi) x-data values -- lo < hi -- when a drag
     #: finishes while region-select mode is on (see
@@ -1352,6 +1366,13 @@ class MplCanvas(QWidget):
         self._curve_fit_shown: dict | None = None
         #: Every peak's curve fit, when they are shown together.
         self._curve_fits_shown: list = []
+        #: Set by the owner while the integral labels on show are
+        #: calibrated to a region's value (offers Reset Integral Calibration).
+        self.integral_calibrated = False
+        #: Set by the owner while the curve fit on show is a pseudo-2D's
+        #: own slices, so a whole slice can be taken out of every fit
+        #: from the right-click menu (False for a Compare stack or eNMR).
+        self.series_slices_removable = False
         #: The palette every multi-series plot takes its default
         #: colours from -- Compare, extracted slices, the DOSY overlay
         #: and the 2D overlay. One setting rather than one per view, so
@@ -3593,6 +3614,7 @@ class MplCanvas(QWidget):
         self._slice_fit_overlay = None
         self._curve_fit_shown = None
         self._curve_fits_shown = []
+        self.series_slices_removable = False
         self.simulation_spectrum = None
         # The Axes these were drawn on are about to go; the Python-side
         # list would otherwise keep handing out artists belonging to a
@@ -3897,7 +3919,7 @@ class MplCanvas(QWidget):
                         and getattr(ax, "_opennmr_inset_stamp", None) == stamp):
                     continue
                 try:
-                    inset_module.draw_insets(ax, specs)
+                    inset_module.draw_insets(ax, specs, resolve_host=self._inset_host_axes)
                 except ValueError:
                     pass
                 ax._opennmr_inset_stamp = stamp
@@ -3934,10 +3956,10 @@ class MplCanvas(QWidget):
         entry = self._inset_entry(index, ax)
         old = list(entry["specs"]) if entry else None
         try:
-            inset_module.draw_insets(ax, checked)
+            inset_module.draw_insets(ax, checked, resolve_host=self._inset_host_axes)
         except ValueError:
             if old is not None:
-                inset_module.draw_insets(ax, old)
+                inset_module.draw_insets(ax, old, resolve_host=self._inset_host_axes)
             self.canvas.draw_idle()
             raise
         if checked:
@@ -3950,6 +3972,84 @@ class MplCanvas(QWidget):
 
     def clear_insets(self) -> None:
         self.set_inset_specs([])
+
+    # -- every inset of a figure of several plots (Compare) ----------------
+    #
+    # Explicit user report, 2026-11-10: on a Compare stack, an inset made on
+    # one spectrum could no longer be removed once another spectrum had been
+    # selected and given an inset of its own -- the Insets window only ever
+    # listed the insets of the *last* plot drawn on. These list (and set)
+    # every plot's insets at once, each spec carrying the ``row`` it
+    # magnifies; a spec's ``host`` places it in another row's area.
+
+    def _inset_host_axes(self, index):
+        """The plain axes ``index`` (an inset spec's ``host``), or None."""
+        axes = self._plain_axes()
+        return axes[index] if 0 <= int(index) < len(axes) else None
+
+    def inset_rows(self) -> list[str]:
+        """A name for each plot an inset can be drawn on, in order: the
+        spectrum of each Compare row, else "Plot 1", "Plot 2"...; one name
+        for a single plot or a 2D contour."""
+        if self._contour_spectrum is not None:
+            return ["Contour"]
+        names = []
+        for i, ax in enumerate(self._plain_axes()):
+            label = next((line.get_label() for line in ax.get_lines()
+                          if inset_module._copyable(line)
+                          and not str(line.get_label()).startswith("_")), "")
+            names.append(label or f"Plot {i + 1}")
+        return names
+
+    def all_inset_specs(self) -> list[dict]:
+        """Every inset on the figure on show, each with ``row``: the index
+        of the plot it magnifies (see :meth:`inset_rows`)."""
+        if self._contour_spectrum is not None:
+            return [{**spec, "row": 0} for spec in self.inset_specs()]
+        out = []
+        for index, ax in enumerate(self._plain_axes()):
+            entry = self._inset_entry(index, ax)
+            for spec in (entry["specs"] if entry else []):
+                out.append({**spec, "row": index})
+        return out
+
+    def set_all_inset_specs(self, specs) -> None:
+        """Replace every inset on the figure with ``specs`` (each with its
+        ``row``; a spec without one goes on the plot last drawn on). Plots
+        no spec names lose their insets. ``ValueError`` (with the plot's
+        old insets kept) when a plot's regions have nothing in them."""
+        specs = [dict(spec) for spec in (specs or [])]
+        if self._contour_spectrum is not None:
+            for spec in specs:
+                spec.pop("row", None)
+            self.set_inset_specs(specs)
+            return
+        axes = self._plain_axes()
+        if not axes:
+            if specs:
+                raise ValueError("There is no plot to put an inset on.")
+            return
+        _ax, default_row = self._inset_target_axes()
+        by_row: dict[int, list] = {}
+        for spec in specs:
+            row = spec.pop("row", None)
+            row = default_row if row is None or not 0 <= int(row) < len(axes) else int(row)
+            by_row.setdefault(row, []).append(spec)
+        failures = []
+        target = self._inset_target
+        for index, ax in enumerate(axes):
+            entry = self._inset_entry(index, ax)
+            wanted = by_row.get(index, [])
+            if not wanted and not (entry and entry["specs"]):
+                continue
+            self._inset_target = index
+            try:
+                self.set_inset_specs(wanted)
+            except ValueError as exc:
+                failures.append(str(exc))
+        self._inset_target = target
+        if failures:
+            raise ValueError(failures[0])
 
     #: The 2D contour's own spec keys, and what they are called generically.
     @staticmethod
@@ -4998,6 +5098,29 @@ class MplCanvas(QWidget):
                 "Type the true chemical shift of the peak under the cursor; "
                 "the reference (SR) is set so it lands there.")
 
+        # Relative integrals set on the plot (explicit user request,
+        # 2026-11-10: "a way to calibrate relative integrals on the plot"):
+        # right-click a region, type what it should read, and every other
+        # region's label follows. Offered wherever integration regions are
+        # shaded on a 1D spectrum (or their labels are on).
+        if (self._current_1d_spectrum is not None and self._last_right_click_xy is not None
+                and self.ax is not None
+                and (self._integral_label_items
+                     or any(p.get_gid() == self._REGION_PATCH_GID for p in self.ax.patches))):
+            integral_action = menu.addAction("Calibrate Integral Here…")
+            integral_action.setToolTip(
+                "Set the integral of the region under the cursor (e.g. 3 for a CH₃); every "
+                "other region's integral label is scaled to match. Turns the integral labels "
+                "on.")
+            integral_action.triggered.connect(
+                lambda _c=False, x=float(self._last_right_click_xy[0]):
+                self.integralCalibrationRequested.emit(x))
+            if self.integral_calibrated:
+                reset_integral_action = menu.addAction("Reset Integral Calibration")
+                reset_integral_action.setToolTip("Back to the smallest integral = 1.")
+                reset_integral_action.triggered.connect(
+                    lambda _c=False: self.integralCalibrationResetRequested.emit())
+
         unit_actions = {}
         if (self._current_1d_spectrum is not None or self._contour_spectrum is not None
                 or self._compare_spectra):
@@ -5110,10 +5233,26 @@ class MplCanvas(QWidget):
 
         exclude_point_action = None
         reset_points_action = None
-        if self._fit_mode:
-            exclude_point_action = menu.addAction("Exclude Nearest Point")
+        remove_slice_action = None
+        # A single peak's fit (_fit_mode) or every peak's together
+        # (_curve_fits_shown): either way the points are a series the
+        # owner can refit without one of them. Explicit user request,
+        # 2026-11-10: "to omit points from the integral profile for
+        # pseudo-2d data, we should right-click and 'remove point'".
+        if self._fit_mode or self._curve_fits_shown:
+            exclude_point_action = menu.addAction("Remove Point")
+            exclude_point_action.setToolTip(
+                "Take the point nearest the click out of its peak's curve fit and refit "
+                "that peak. It stays on the plot as a grey ×.")
             exclude_point_action.setEnabled(self._last_right_click_xy is not None)
-            reset_points_action = menu.addAction("Reset Excluded Points")
+            if self.series_slices_removable:
+                remove_slice_action = menu.addAction("Remove Slice from Every Fit")
+                remove_slice_action.setToolTip(
+                    "Drop the whole slice nearest the click from every fit on this "
+                    "spectrum – every peak's curve, SCORE and the DOSY ILT – and refit. "
+                    "The same as unticking it in Dynamics ▸ Slices used in fits.")
+                remove_slice_action.setEnabled(self._last_right_click_xy is not None)
+            reset_points_action = menu.addAction("Restore Removed Points")
 
         full_res_action = None
         if self.has_downsampled_data():
@@ -5188,6 +5327,9 @@ class MplCanvas(QWidget):
         elif exclude_point_action is not None and chosen is exclude_point_action:
             if self._last_right_click_xy is not None:
                 self.fitPointExcludeRequested.emit(*self._last_right_click_xy)
+        elif remove_slice_action is not None and chosen is remove_slice_action:
+            if self._last_right_click_xy is not None:
+                self.fitSliceRemoveRequested.emit(*self._last_right_click_xy)
         elif reset_points_action is not None and chosen is reset_points_action:
             self.fitPointsResetRequested.emit()
         elif full_res_action is not None and chosen is full_res_action:
@@ -8652,14 +8794,19 @@ class MplCanvas(QWidget):
     def show_relaxation_fits(self, results: list, xlabel: str = "Delay (s)",
                              x_scale: float = 1.0, ylabel: str = "Intensity",
                              fit_curves: list | None = None, fit_style: dict | None = None,
-                             normalise: bool = False) -> None:
+                             normalise: bool = False, excluded_points: list | None = None,
+                             ylabel_suffix: str | None = None) -> None:
         """Every peak's series and fit on one plot (explicit user request,
         2026-09-30: see all fits together), each peak in its own
         colour-blind-safe colour -- its points and its fit line, drawn in
         the fit line style. ``fit_curves``: per peak ``(t_fine, y_fine)``
         or None (then ``y_fit`` point to point). ``normalise`` scales each
         peak by its own fitted maximum, so curves of very different
-        intensity can be compared by shape (the y label says so)."""
+        intensity can be compared by shape (the y label says so).
+        ``excluded_points``: per peak ``(t, y)`` of the points removed
+        from its fit (right-click ▸ Remove Point), drawn as × in the
+        peak's colour, or None. ``ylabel_suffix`` replaces the
+        " (normalised)" the y label gets when normalising."""
         from ...plotting.accessibility import ordered_qualitative_colours
         style = {**self.DEFAULT_FIT_LINE, **(fit_style or {})}
         self._enter_plot_kind("curve")
@@ -8696,13 +8843,20 @@ class MplCanvas(QWidget):
             self.ax.plot(t, y / scale, "o", color=colour, markersize=6.0, label=label, zorder=2)
             self.ax.plot(cx, cy / scale, linestyle=style["linestyle"], color=colour,
                          linewidth=style["linewidth"], zorder=3, label="_nolegend_")
+            removed = excluded_points[k] if excluded_points and k < len(excluded_points) else None
+            if removed is not None and len(removed[0]):
+                self.ax.plot(np.asarray(removed[0], dtype=float) / x_scale,
+                             np.asarray(removed[1], dtype=float) / scale, "x", color=colour,
+                             markersize=8.0, markeredgewidth=2.0, alpha=0.6,
+                             label="_nolegend_", zorder=2)
             shown.append({"label": label, "x": t, "y": np.asarray(result["y"], dtype=float),
                           "y_fit": np.asarray(result["y_fit"], dtype=float),
                           "curve_x": cx, "curve_y": cy, "xlabel": xlabel, "ylabel": ylabel,
-                          "result": result})
+                          "result": result, "scale": scale})
         self.ax.set_xlabel(xlabel, fontsize=self._AXIS_LABELSIZE)
-        self.ax.set_ylabel(ylabel + (" (normalised)" if normalise else ""),
-                           fontsize=self._AXIS_LABELSIZE)
+        suffix = ylabel_suffix if ylabel_suffix is not None else (
+            " (normalised)" if normalise else "")
+        self.ax.set_ylabel(ylabel + suffix, fontsize=self._AXIS_LABELSIZE)
         plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=True,
                                    linewidth=self._AXIS_LINEWIDTH)
         plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH,

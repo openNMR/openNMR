@@ -268,6 +268,98 @@ def build_kernel(model=None, kind: str = "diffusion", x_values=None, y_values=No
     }
 
 
+#: The single-component form of each registry model that already
+#: describes several populations -- what SCORE resolves with instead,
+#: since its own component count is what describes the populations.
+SINGLE_COMPONENT_FORMS = {
+    "biexponential_decay": "exponential_decay",
+    "triexponential_decay": "exponential_decay",
+    "biexponential_recovery": "inversion_recovery",
+    "triexponential_recovery": "inversion_recovery",
+    "stejskal_tanner_biexponential": "stejskal_tanner",
+}
+
+
+def _model_name(model) -> str:
+    if model is None:
+        return ""
+    if isinstance(model, str):
+        return model
+    return str(model.get("name") or "custom")
+
+
+def _single_component_candidates(model, kind: str) -> list:
+    """Registry models to try, in order, in place of a multi-component
+    ``model``: its own single-component form where one is known, then a
+    form that keeps a stretched or recovery shape, then the published
+    default for ``kind``."""
+    candidates = []
+    name = _model_name(model)
+    if name in SINGLE_COMPONENT_FORMS:
+        candidates.append(SINGLE_COMPONENT_FORMS[name])
+    params = [] if isinstance(model, str) or model is None else list(model.get("params", []))
+    if isinstance(model, str):
+        from .relaxation import RELAXATION_MODELS
+        params = list(RELAXATION_MODELS.get(model, {}).get("params", []))
+    stretched = any(str(p).startswith("beta") for p in params)
+    recovery = "recovery" in name or "C" in params
+    if kind == "diffusion":
+        candidates.append("stejskal_tanner_stretched" if stretched else "stejskal_tanner")
+    elif recovery:
+        candidates.append("stretched_recovery" if stretched else "inversion_recovery")
+    elif stretched:
+        candidates.append("stretched_decay")
+    candidates.append(DEFAULT_MODELS[kind])
+    seen, ordered = set(), []
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
+def kernel_model(model=None, kind: str = "diffusion", x_values=None, y_values=None) -> dict:
+    """The model SCORE should resolve with for a requested ``model``.
+
+    A model with a single amplitude parameter is used as it is. One that
+    already describes several populations (a biexponential, an
+    N-component Stejskal-Tanner, a triexponential) cannot be a SCORE
+    kernel -- see :func:`build_kernel` -- so instead of refusing, its
+    **single-component form** is used: SCORE's own component count does
+    the job the extra exponentials did (explicit user request,
+    2026-11-10: "SCORE doesn't function with a multicomponent fit, so can
+    it default to the single component model rather than flag an
+    error?").
+
+    Returns a dict: ``model`` (what to pass to :func:`score`),
+    ``requested`` (the name asked for), ``substituted`` (bool) and
+    ``note`` (one sentence saying what was used instead, for the report;
+    empty when nothing was substituted). Other errors -- an unknown
+    model name, an unknown ``kind`` -- are still raised.
+    """
+    try:
+        build_kernel(model, kind=kind, x_values=x_values, y_values=y_values)
+        return {"model": model, "requested": _model_name(model) or DEFAULT_MODELS.get(kind, ""),
+                "substituted": False, "note": ""}
+    except ValueError as exc:
+        if "no single amplitude parameter" not in str(exc):
+            raise
+    for candidate in _single_component_candidates(model, kind):
+        try:
+            build_kernel(candidate, kind=kind, x_values=x_values, y_values=y_values)
+        except ValueError:
+            continue
+        requested = _model_name(model)
+        return {
+            "model": candidate, "requested": requested, "substituted": True,
+            "note": (f"The curve-fit model '{requested}' already describes several "
+                     f"populations, so SCORE used its single-component form "
+                     f"'{candidate}': the number of components set here does the job "
+                     f"its extra terms did."),
+        }
+    raise ValueError(f"No single-component form of '{_model_name(model)}' can be a SCORE kernel.")
+
+
 def _model_p0(spec, x, y, param_names) -> list:
     """The model's own automatic starting guesses, or 1.0 each when it
     does not supply a ``p0`` callable (a custom equation carries a
@@ -715,6 +807,7 @@ def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
     residual = matrix - reconstructed
     ss_res = float(np.sum(residual ** 2))
     ss_tot = float(np.sum((matrix - matrix.mean()) ** 2))
+    quality = residual_metrics(matrix, reconstructed, columns)
     weights = np.sum(np.abs(spectra), axis=1)
     total = float(np.sum(weights))
 
@@ -725,6 +818,12 @@ def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
         "fit": reconstructed,
         "residual_norm": float(np.linalg.norm(residual)),
         "r_squared": 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan"),
+        # How well the components reproduce the data, beyond one R²:
+        # see residual_metrics. "residual_first" is the residual of the
+        # first (least attenuated) level, the spectrum the "Measured"
+        # entry shows, so the two can be drawn one above the other.
+        **quality,
+        "residual_first": residual[0].copy(),
         "columns": columns,
         "n_components": n_components,
         "kind": kind,
@@ -769,6 +868,46 @@ def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
         with np.errstate(divide="ignore"):
             result["rates"] = np.where(constants > 0, 1.0 / constants, np.inf)
     return result
+
+
+def residual_metrics(data, fit, columns=None) -> dict:
+    """Goodness-of-fit numbers for a SCORE/OUTSCORE resolution, beyond R².
+
+    * ``rmse`` -- root-mean-square residual over the fitted points.
+    * ``relative_rmse`` -- that as a fraction of the RMS signal over the
+      same points: "the components leave 2 % of the signal unexplained".
+    * ``residual_by_level`` -- the relative RMS residual of each gradient
+      level (or delay) on its own. The number that finds a spoiled slice:
+      one level far above the rest is a level the model cannot reproduce,
+      which a single R² averages away.
+    * ``worst_level`` -- the index of the largest of those.
+
+    ``columns`` restricts the numbers to the points that were fitted
+    (``score()``'s threshold); None uses every point."""
+    data = np.asarray(data, dtype=float)
+    fit = np.asarray(fit, dtype=float)
+    if columns is not None and len(columns):
+        data = data[:, columns]
+        fit = fit[:, columns]
+    residual = data - fit
+    rms_signal = float(np.sqrt(np.mean(data ** 2))) if data.size else 0.0
+    rmse = float(np.sqrt(np.mean(residual ** 2))) if residual.size else float("nan")
+    level_signal = np.sqrt(np.mean(data ** 2, axis=1)) if data.size else np.array([])
+    level_rmse = np.sqrt(np.mean(residual ** 2, axis=1)) if residual.size else np.array([])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # Relative to the *first* level's signal, not each level's own:
+        # a heavily attenuated last level has almost no signal, and its
+        # own ratio would flag noise as misfit.
+        reference = float(level_signal[0]) if level_signal.size and level_signal[0] > 0 \
+            else (rms_signal or 1.0)
+        by_level = level_rmse / reference
+    return {
+        "rmse": rmse,
+        "relative_rmse": rmse / rms_signal if rms_signal > 0 else float("nan"),
+        "residual_by_level": np.asarray(by_level, dtype=float),
+        "worst_level": int(np.nanargmax(by_level)) if by_level.size and np.isfinite(by_level).any()
+        else None,
+    }
 
 
 #: Cross-talk above which OUTSCORE is reporting that it *could not*
@@ -944,6 +1083,8 @@ def format_score_report(result: dict, width: int = 66) -> str:
         amplitude = result.get("amplitude_param")
         note = f" (amplitude {amplitude} is the component spectrum)" if amplitude else ""
         lines.append(f"  Model: {model}{note}")
+        if result.get("model_note"):
+            lines.extend("  " + line for line in _wrap_text(result["model_note"], width - 4))
         lines.append("")
     lines.append("  Component        share    decay constant")
     lines.append("  " + "-" * (width - 4))
@@ -968,6 +1109,19 @@ def format_score_report(result: dict, width: int = 66) -> str:
     lines.append("  " + "-" * (width - 4))
     if np.isfinite(result.get("r_squared", np.nan)):
         lines.append(f"    R²            = {result['r_squared']:.5f}")
+    if np.isfinite(result.get("rmse", np.nan)):
+        lines.append(f"    RMSE          = {result['rmse']:.4g}"
+                     + (f"   ({result['relative_rmse'] * 100:.2f}% of the RMS signal)"
+                        if np.isfinite(result.get("relative_rmse", np.nan)) else ""))
+    by_level = np.asarray(result.get("residual_by_level", []), dtype=float)
+    if by_level.size and result.get("worst_level") is not None:
+        worst = int(result["worst_level"])
+        rows = result.get("rows")
+        # Named by slice number when the caller recorded which slices
+        # were resolved (excluded slices shift the level numbering).
+        number = int(rows[worst]) + 1 if rows is not None and worst < len(rows) else worst + 1
+        lines.append(f"    worst slice   = {number}"
+                     f"   (residual {by_level[worst] * 100:.2f}% of the first slice's signal)")
     lines.append(f"    cross-talk    = {result.get('crosstalk', float('nan')):.4f}"
                   "   (0 = fully separated)")
     lines.append(f"    points fitted = {len(result['columns'])} (≥ {result['threshold']:.0%} of max)")

@@ -165,6 +165,31 @@ def align_echo(fid: np.ndarray, target_index: int = 0, echo_offset: float = 0.0)
     return roll_fid(fid, target_index - top)
 
 
+def digital_filter_points(td: int, n_points: int) -> int:
+    """Complex points TopSpin's TD has that the FID here does not: the
+    digital filter's group delay, removed on reading. ``td`` counts real
+    and imaginary points (TopSpin's convention), ``n_points`` complex
+    points after the filter; 0 when TD is unknown."""
+    td, n_points = int(td or 0), int(n_points or 0)
+    if td <= 0 or n_points <= 0:
+        return 0
+    return max(0, td // 2 - n_points)
+
+
+def tdeff_to_points(tdeff: int, filter_points: int = 0) -> int:
+    """TopSpin's TDeff (real + imaginary points of the raw FID, digital
+    filter included) as the complex points kept after the filter -- what
+    :func:`prepare_fid`'s ``truncate`` counts. ``TDeff = 1024`` with a
+    78-point filter keeps 512 - 78 = 434. At least 1."""
+    return max(1, int(tdeff) // 2 - int(filter_points))
+
+
+def points_to_tdeff(points: int, filter_points: int = 0) -> int:
+    """The inverse of :func:`tdeff_to_points`: complex points kept after
+    the filter, as TopSpin's TDeff."""
+    return 2 * (int(points) + int(filter_points))
+
+
 def prepare_fid(fid: np.ndarray, *, fid_shift: float = 0.0, align_echo_enabled: bool = False,
                  echo_offset: float = 0.0, truncate: int | None = None,
                  linear_predict_points: int = 0,

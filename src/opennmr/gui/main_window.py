@@ -768,6 +768,9 @@ class MainWindow(QMainWindow):
         # after a point exclusion rather than silently reverting to the
         # model's automatic defaults. ``None`` until a fit has run.
         self._relaxation_fit_context: dict | None = None
+        #: The spectrum whose slices the curve fit on show came from
+        #: (None for a Compare-stack fit) -- see _curve_fit_is_own_series.
+        self._relaxation_fit_spectrum = None
         # {peak_index: {excluded array-indices into that peak's own
         # _relaxation_fit_original[peak_index]["t"]/["y"]}} -- which
         # points the user has right-click-excluded from each peak's
@@ -825,6 +828,8 @@ class MainWindow(QMainWindow):
         self.canvas.referenceShiftRequested.connect(self._on_reference_shift_from_plot)
         self.canvas.contourSlicesChanged.connect(self._on_contour_slices_changed)
         self.canvas.referenceCalibrationRequested.connect(self._on_reference_calibration_from_plot)
+        self.canvas.integralCalibrationRequested.connect(self._on_integral_calibration_requested)
+        self.canvas.integralCalibrationResetRequested.connect(self._on_integral_calibration_reset)
         self.canvas.sliceKeepRequested.connect(self._on_slice_keep_requested)
         self.canvas.measurementCompleted.connect(self._on_measurement_completed)
         self.canvas.externalProjectionDropped.connect(self._on_external_projection_dropped)
@@ -848,6 +853,7 @@ class MainWindow(QMainWindow):
         self.fit_canvas = MplCanvas()
         self.fit_canvas.fitPointExcludeRequested.connect(self._on_fit_point_exclude_requested)
         self.fit_canvas.fitPointsResetRequested.connect(self._on_fit_points_reset_requested)
+        self.fit_canvas.fitSliceRemoveRequested.connect(self._on_fit_slice_remove_requested)
         self.fit_canvas.measurementCompleted.connect(self._on_measurement_completed)
         self.fit_canvas.dosyExtractRequested.connect(self._on_dosy_extract_requested)
         # The Fit canvas is shared by four different kinds of result
@@ -4469,6 +4475,7 @@ class MainWindow(QMainWindow):
         self.gradient_calibration_label.setText("")
         self.pfg_params_source_label.setText("")
         self._clear_spectral_fit_report()
+        self._adopt_score_state(None)
         self.analysis_status_label.setText("Select a pseudo-2D spectrum (e.g. a T1/T2 relaxation series) to fit.")
         self._current_analysis_index = None
         self._slice_fit_results = None
@@ -4477,6 +4484,7 @@ class MainWindow(QMainWindow):
         self._relaxation_fit_results = None
         self._relaxation_fit_original = None
         self._relaxation_fit_context = None
+        self._relaxation_fit_spectrum = None
         self._excluded_relaxation_indices = {}
         self._dosy_result = None
         if hasattr(self, "dosy_display_box"):
@@ -7809,6 +7817,11 @@ class MainWindow(QMainWindow):
         if isinstance(self._ui_settings.get("curve_fit_line"), dict):
             self.curve_fit_plot_box.apply_settings(self._ui_settings["curve_fit_line"])
 
+        # Truncate to's units (Process ▸ FID), as last chosen.
+        index = self.tdeff_unit_combo.findData(self._ui_settings.get("truncate_units"))
+        if index >= 0 and index != self.tdeff_unit_combo.currentIndex():
+            self.tdeff_unit_combo.setCurrentIndex(index)
+
     def _on_ui_font_size_changed(self, value: int) -> None:
         self._apply_ui_font_size(value, fast=self.isVisible())
         self._ui_settings["ui_font_size"] = int(value)
@@ -7935,6 +7948,49 @@ class MainWindow(QMainWindow):
             action.setVisible(shown)
             action.setEnabled(shown)
 
+    def _truncate_units(self) -> str:
+        """"tdeff" (TopSpin's TDeff) or "points" (complex points after the
+        filter): which Truncate to box is shown."""
+        combo = getattr(self, "tdeff_unit_combo", None)
+        return (combo.currentData() if combo is not None else None) or "tdeff"
+
+    def _on_tdeff_unit_changed(self, remember: bool = True) -> None:
+        """Show the Truncate to box in the chosen units, and remember the
+        choice (``remember``: a user's choice, not the initial one)."""
+        topspin = self._truncate_units() == "tdeff"
+        self.tdeff_spin.setVisible(not topspin)
+        self.tdeff_topspin_spin.setVisible(topspin)
+        self._sync_tdeff_topspin()
+        settings = getattr(self, "_ui_settings", None)
+        if (remember and isinstance(settings, dict)
+                and settings.get("truncate_units") != self._truncate_units()):
+            settings["truncate_units"] = self._truncate_units()
+            self._save_ui_settings()
+
+    def _sync_tdeff_topspin(self) -> None:
+        """Make the TDeff box show what the complex-point box holds."""
+        box = getattr(self, "tdeff_topspin_spin", None)
+        if box is None:
+            return
+        f = int(getattr(self, "_truncate_filter_points", 0) or 0)
+        box.blockSignals(True)
+        try:
+            box.setMaximum(processing_ft.points_to_tdeff(self.tdeff_spin.maximum(), f))
+            box.setValue(processing_ft.points_to_tdeff(self.tdeff_spin.value(), f))
+        finally:
+            box.blockSignals(False)
+        box.setEnabled(self.tdeff_spin.isEnabled())
+
+    def _on_tdeff_topspin_changed(self, tdeff: int) -> None:
+        """A TDeff was typed: set the complex-point box from it (which is
+        what reprocesses), then show the TDeff that actually means -- an
+        odd number, or one inside the filter, rounds."""
+        f = int(getattr(self, "_truncate_filter_points", 0) or 0)
+        points = min(processing_ft.tdeff_to_points(tdeff, f), self.tdeff_spin.maximum())
+        if points != self.tdeff_spin.value():
+            self.tdeff_spin.setValue(points)
+        self._sync_tdeff_topspin()
+
     def _show_truncate_units(self, spectrum, n_points: int, shown: bool) -> None:
         """Under Truncate to: how many points there are to truncate, in
         the box's units (complex points, after the digital filter), set
@@ -7948,6 +8004,9 @@ class MainWindow(QMainWindow):
             td = int(float(acqus.get("TD", 0) or 0))
         except (TypeError, ValueError):
             td = 0
+        self._truncate_filter_points = (
+            processing_ft.digital_filter_points(td, n_points)
+            if shown and spectrum.metadata.vendor == "bruker" else 0)
         if not shown or n_points <= 0:
             self.tdeff_units_label.setVisible(False)
             return
@@ -9428,7 +9487,41 @@ class MainWindow(QMainWindow):
         # (user report, 2026-10-15: "typing 1024 resets to 424").
         self.tdeff_spin.setKeyboardTracking(False)
         self.tdeff_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
-        form.addRow("Truncate to:", self.tdeff_spin)
+        self.tdeff_spin.valueChanged.connect(lambda _v: self._sync_tdeff_topspin())
+        # The same number in TopSpin's own terms (explicit user request,
+        # 2026-11-10: "Truncate to should maybe be in the TopSpin parlance
+        # rather than picking only the complex points - filter"): TDeff
+        # counts real *and* imaginary points of the raw FID, digital filter
+        # included, so it can be typed straight from TopSpin's edp. Shown
+        # instead of the complex-point box by default; tdeff_spin stays the
+        # one value processing reads, and the two are converted by
+        # processing.ft.tdeff_to_points / points_to_tdeff.
+        self._truncate_filter_points = 0
+        self.tdeff_topspin_spin = TypedSpinBox()
+        self.tdeff_topspin_spin.setRange(2, 1 << 21)
+        self.tdeff_topspin_spin.setKeyboardTracking(False)   # see tdeff_spin
+        self.tdeff_topspin_spin.setToolTip(
+            "TopSpin's TDeff: how many points of the raw FID to use, counting real and "
+            "imaginary points and including the digital filter's – the number TopSpin's "
+            "edp shows, so it can be copied across as it is. TDeff = TD uses the whole "
+            "FID. Converted here to complex points after the filter (shown under the box).")
+        self.tdeff_topspin_spin.valueChanged.connect(self._on_tdeff_topspin_changed)
+        self.tdeff_unit_combo = QComboBox()
+        self.tdeff_unit_combo.addItem("TDeff (TopSpin)", "tdeff")
+        self.tdeff_unit_combo.addItem("complex points", "points")
+        self.tdeff_unit_combo.setToolTip(
+            "TDeff (TopSpin): real + imaginary points, digital filter included – as TopSpin "
+            "counts them.\ncomplex points: the points of the FID as processed here, after "
+            "the digital filter is removed.")
+        self.tdeff_unit_combo.currentIndexChanged.connect(lambda _i: self._on_tdeff_unit_changed())
+        truncate_row = QWidget()
+        truncate_layout = QHBoxLayout(truncate_row)
+        truncate_layout.setContentsMargins(0, 0, 0, 0)
+        truncate_layout.addWidget(self.tdeff_spin, 1)
+        truncate_layout.addWidget(self.tdeff_topspin_spin, 1)
+        truncate_layout.addWidget(self.tdeff_unit_combo)
+        form.addRow("Truncate to:", truncate_row)
+        self._on_tdeff_unit_changed(remember=False)
         # What the box counts, beside TopSpin's TD (which counts real and
         # imaginary points, and includes the digital filter's points).
         self.tdeff_units_label = QLabel("")
@@ -11201,6 +11294,7 @@ class MainWindow(QMainWindow):
             default_tdeff = recorded_tdeff if recorded_tdeff else raw_length
         self.tdeff_spin.setValue(max(1, default_tdeff))
         self.tdeff_spin.blockSignals(False)
+        self._sync_tdeff_topspin()
 
         # F1 (indirect dimension) TD/SI -- vendor-agnostic (unlike F2's
         # tdeff_spin above, which only applies to X-Pulse), gated on
@@ -22303,12 +22397,13 @@ class MainWindow(QMainWindow):
         # use. Reported directly: "why is the SCORE report in the peak
         # picking tab? it should be with the SCORE in analysis".
         #
-        # Monospaced for the same reason the other report labels are:
-        # format_score_report aligns its columns with spaces.
+        # Laid out like the curve fit's read-out (explicit user request,
+        # 2026-11-10: "the output of the SCORE fitting should be made to
+        # match the new output for the regular fitting"): rich text from
+        # the result (report_format.score_report_html), while text()
+        # stays the plain format_score_report that is logged and saved.
         self.score_results_label = ReportLabel("")
         self.score_results_label.setWordWrap(True)
-        self.score_results_label.setFont(QFontDatabase.systemFont(
-            QFontDatabase.SystemFont.FixedFont))
         self.score_results_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         relax_form.addRow(self.score_results_label)
@@ -22436,12 +22531,23 @@ class MainWindow(QMainWindow):
         # which you answer by looking at them, and a list can show each
         # slice's own delay/b-value beside its number. Ticked = used,
         # so the default state reads as "everything is in".
-        self.excluded_slice_group = QGroupBox("Slices used in fits")
-        excluded_layout = QVBoxLayout(self.excluded_slice_group)
+        #
+        # A collapsible section like its neighbours (explicit user
+        # request, 2026-11-10: it was the one section of the panel that
+        # could not be folded away). ``excluded_slice_group`` is the
+        # section itself, so showing/hiding it for a non-series spectrum
+        # hides the header too; its title carries the excluded count, so
+        # a folded section still says that something is left out.
+        excluded_body = QWidget()
+        excluded_layout = QVBoxLayout(excluded_body)
+        excluded_layout.setContentsMargins(0, 0, 0, 0)
+        self.excluded_slice_group = CollapsibleSection(
+            self._EXCLUDED_SLICES_TITLE, content=excluded_body)
         excluded_hint = QLabel(
             "Untick a slice to drop it from every fit on this spectrum — the "
-            "curve fit, SCORE and the DOSY ILT alike. For a single bad point "
-            "on one peak only, right-click that point on the Fit plot instead."
+            "curve fit, SCORE and the DOSY ILT alike. Or right-click a point on "
+            "the Fit plot: Remove Point drops it from that peak's curve only, "
+            "Remove Slice from Every Fit unticks it here."
         )
         excluded_hint.setWordWrap(True)
         excluded_layout.addWidget(excluded_hint)
@@ -24275,19 +24381,91 @@ class MainWindow(QMainWindow):
         if check is None:
             return
         items = None
+        calibrated = False
         index = self._selected_index()
         if check.isChecked() and index is not None:
             spectrum = self.session.spectra[index]
             regions = self._read_region_defs()
             if spectrum.ndim == 1 and regions:
+                reference = self._integral_reference(spectrum, regions)
                 try:
                     items = integral_labels_module.integral_labels(
                         spectrum, regions, decimals=self.integral_labels_decimals_spin.value(),
                         method=self.integration_method_combo.currentData() or "trapezoid",
-                        symbol=self.integral_labels_symbol_check.isChecked())
+                        symbol=self.integral_labels_symbol_check.isChecked(),
+                        reference=reference)
+                    calibrated = reference is not None
                 except Exception:  # noqa: BLE001 -- a region too narrow to integrate has no label
                     items = None
+        self.canvas.integral_calibrated = calibrated
         self.canvas.set_integral_labels(items, **self._integral_label_style())
+
+    @staticmethod
+    def _integral_reference(spectrum, regions):
+        """``(region index, value)`` the integral labels are calibrated to
+        on ``spectrum``, or None (smallest = 1). Stored as the region's
+        limits rather than its row, so it follows the region when the
+        table is reordered or the region nudged
+        (peak_integral_labels.reference_region)."""
+        calibration = (spectrum.metadata.raw or {}).get("integral_calibration")
+        if not calibration:
+            return None
+        try:
+            k = integral_labels_module.reference_region(regions, None, calibration=calibration)
+        except Exception:  # noqa: BLE001 -- a malformed stored value is no calibration
+            return None
+        return None if k is None else (k, float(calibration["value"]))
+
+    def _on_integral_calibration_requested(self, x: float) -> None:
+        """Right-click ▸ Calibrate Integral Here…: the region under (or
+        nearest) the click is set to the typed value, and every other
+        region's label scales with it. Kept with the spectrum, and turns
+        the labels on (they are what shows the result)."""
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        regions = self._read_region_defs()
+        if spectrum.ndim != 1 or not regions:
+            self.statusBar().showMessage(
+                "Draw an integration region first (Integrate ▸ Integration Regions).", 6000)
+            return
+        k = integral_labels_module.reference_region(regions, x)
+        lo, hi = sorted(regions[k])
+        current = 1.0
+        existing = self._integral_reference(spectrum, regions)
+        if existing is not None and existing[0] == k:
+            current = existing[1]
+        value, ok = QInputDialog.getDouble(
+            self, "Calibrate integral",
+            f"Integral of the region {lo:.4g} to {hi:.4g} (the others scale with it):",
+            current, 1e-9, 1e12, 4)
+        if not ok:
+            return
+        try:
+            method = self.integration_method_combo.currentData() or "trapezoid"
+            # Refused here, with the reason, rather than leaving a stored
+            # calibration that silently draws no labels.
+            integral_labels_module.integral_labels(
+                spectrum, regions, method=method, reference=(k, value))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Calibrate integral", str(exc))
+            return
+        spectrum.metadata.raw["integral_calibration"] = {"region": [lo, hi], "value": float(value)}
+        if not self.integral_labels_check.isChecked():
+            self.integral_labels_check.setChecked(True)      # redraws the labels
+        else:
+            self._sync_integral_labels()
+        self.statusBar().showMessage(
+            f"Integrals calibrated: {lo:.4g} to {hi:.4g} = {value:g}.", 6000)
+
+    def _on_integral_calibration_reset(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        self.session.spectra[index].metadata.raw.pop("integral_calibration", None)
+        self._sync_integral_labels()
+        self.statusBar().showMessage("Integral labels back to smallest = 1.", 5000)
 
     def _regions_tab_active(self) -> bool:
         """Integration regions are shaded on the Integrate tile, where they
@@ -25620,6 +25798,21 @@ class MainWindow(QMainWindow):
     #
     # Stored 0-based on the spectrum, so it survives a reselection the
     # way every other per-spectrum analysis state here does.
+
+    #: The "Slices used in fits" section's title; the excluded count is
+    #: added to it (see _sync_excluded_slice_title).
+    _EXCLUDED_SLICES_TITLE = "Slices used in fits"
+
+    def _sync_excluded_slice_title(self, n_excluded: int) -> None:
+        """Name the excluded count in the section header, so it is seen
+        with the section folded."""
+        group = getattr(self, "excluded_slice_group", None)
+        if group is None or not hasattr(group, "setTitle"):
+            return
+        title = self._EXCLUDED_SLICES_TITLE
+        if n_excluded:
+            title += f" ({n_excluded} excluded)"
+        group.setTitle(title)
 
     @staticmethod
     def excluded_slices(spectrum) -> set[int]:
@@ -27121,6 +27314,10 @@ class MainWindow(QMainWindow):
         self._relaxation_fit_original = list(results)
         self._relaxation_fit_context = fit_context
         self._excluded_relaxation_indices = {}
+        # Which spectrum's slices these are (None: a Compare stack), so
+        # the right-click can offer removing a whole slice only for a
+        # series that has a slice list (_curve_fit_is_own_series).
+        self._relaxation_fit_spectrum = persist_to
         self._relaxation_fit_xlabel = xlabel
         self.view_relaxation_peak_spin.blockSignals(True)
         self.view_relaxation_peak_spin.setEnabled(True)
@@ -27186,6 +27383,7 @@ class MainWindow(QMainWindow):
             values = None
 
         excluded = self.excluded_slices(spectrum)
+        self._sync_excluded_slice_title(len(excluded))
         self.excluded_slice_list.blockSignals(True)
         try:
             self.excluded_slice_list.clear()
@@ -27219,6 +27417,7 @@ class MainWindow(QMainWindow):
         # list's own signal, and rebuilding it mid-signal would drop the
         # item that is still being delivered.
         spectrum.metadata.raw["excluded_slices"] = sorted(excluded)
+        self._sync_excluded_slice_title(len(excluded))
         kept = self.excluded_slice_list.count() - len(excluded)
         self.statusBar().showMessage(
             f"{kept} of {self.excluded_slice_list.count()} slices used in fits"
@@ -28143,12 +28342,16 @@ class MainWindow(QMainWindow):
         # (a typed equation, a generalised N-component model) has no
         # name to pass and goes as the spec itself.
         model = key if key in processing_relaxation.RELAXATION_MODELS else spec
-        # Raises with the reason if this model cannot be a kernel --
-        # checked now, while it can still be reported against the Model
-        # combo the user would have to change.
-        processing_score.build_kernel(
+        # A multi-component model (biexponential, N-component diffusion)
+        # cannot be a kernel -- SCORE's component count already describes
+        # the populations -- so its single-component form is used instead
+        # of refusing (explicit user request, 2026-11-10), and the report
+        # says so. Anything else that cannot be a kernel still raises,
+        # here, while it can be reported against the Model combo.
+        chosen = processing_score.kernel_model(
             model, kind="diffusion" if self._is_diffusion_fit() else "relaxation")
-        return model
+        self._score_model_note = chosen["note"]
+        return chosen["model"]
 
     def _on_score_clicked(self) -> None:
         """Resolve the selected series into component spectra by SCORE.
@@ -28221,9 +28424,12 @@ class MainWindow(QMainWindow):
         data = np.real(spectrum.data)[:n_slices][rows]
         x_values = x_values[rows]
         suggestion = processing_score.estimate_components(data)
+        model_note = getattr(self, "_score_model_note", "")
+        model_label = (report_format.model_name(model) if model_note and isinstance(model, str)
+                       else self.relaxation_model_combo.currentText())
         dialog = _ScoreSettingsDialog(self, suggested=suggestion["n_components"],
                                        is_diffusion=is_diffusion,
-                                       model_label=self.relaxation_model_combo.currentText())
+                                       model_label=model_label, model_note=model_note)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         settings = dialog.values()
@@ -28245,16 +28451,18 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
             self.statusBar().clearMessage()
 
+        # Which slices were resolved (0-based), so the residual and the
+        # measured spectrum are the same row as the fit's first level, and
+        # the report names a slice by its own number.
+        result["rows"] = [int(r) for r in rows]
+        if model_note:
+            result["model_note"] = model_note
         self._score_result = result
         spectrum.metadata.raw["score_result"] = result
         ppm = spectrum.axes[1].values("ppm")
         self._score_ppm = ppm
         self._populate_score_component_list()
-        report = processing_score.format_score_report(result, width=58)
-        self.score_results_label.setText(
-            report + "\n\nFits the whole data matrix — the peak table and integration\n"
-                     "regions are not used, and do not need to be set."
-        )
+        self._show_score_report(result)
         self._refresh_score_export_buttons()
         self._redraw_score_components()
         self._claim_fit_view(spectrum, "score")
@@ -28271,6 +28479,47 @@ class MainWindow(QMainWindow):
                   "not reveal this — the error surface is flat enough that a badly "
                   "wrong answer reproduces the data just as well.",
             )
+
+    #: Under the SCORE report: what it did not use.
+    _SCORE_FOOTNOTE = ("Fits the whole data matrix — the peak table and integration "
+                       "regions are not used, and do not need to be set.")
+
+    def _show_score_report(self, result) -> None:
+        """The SCORE/OUTSCORE read-out: the plain report (logged, saved)
+        laid out like the curve fit's (report_format.score_report_html)."""
+        if result is None:
+            self.score_results_label.setText("")
+            return
+        plain = (processing_score.format_score_report(result, width=58)
+                 + "\n\n" + self._SCORE_FOOTNOTE)
+        muted, warn = self.score_results_label.colours()
+        try:
+            rich = report_format.score_report_html(result, muted=muted, warn=warn,
+                                                   footnote=self._SCORE_FOOTNOTE)
+        except Exception:  # noqa: BLE001 -- an older stored result: the plain layout
+            rich = ""
+        if rich:
+            self.score_results_label.setReport(plain, rich)
+        else:
+            self.score_results_label.setText(plain)
+
+    def _adopt_score_state(self, spectrum) -> None:
+        """Make the SCORE panel describe ``spectrum``'s own resolution, or
+        none. The result was never reset on selecting another experiment,
+        so its component list and display tick boxes stayed on screen --
+        with the previous experiment's components in them (explicit user
+        report, 2026-11-10: "SCORE result checkbox persists between
+        experiments")."""
+        result = spectrum.metadata.raw.get("score_result") if spectrum is not None else None
+        if result and spectrum is not None and len(spectrum.axes) >= 2:
+            self._score_result = result
+            self._score_ppm = spectrum.axes[1].values("ppm")
+            self._show_score_report(result)
+        else:
+            self._score_result = None
+            self._score_ppm = None
+        self._populate_score_component_list()
+        self._refresh_score_export_buttons()
 
     def _refresh_score_export_buttons(self) -> None:
         """Show the component list and export buttons only once there
@@ -28302,6 +28551,22 @@ class MainWindow(QMainWindow):
             measured.setCheckState(Qt.CheckState.Unchecked)
             measured.setData(Qt.ItemDataRole.UserRole, -1)
             self.score_component_list.addItem(measured)
+            # What the components leave unexplained, on the same scale
+            # (explicit user request, 2026-11-10: "some metric for
+            # goodness of fit, residuals ... in a graphical format ...
+            # could go into the checkmark list"). Off by default, like
+            # Measured: it is for checking the answer, not part of it.
+            if result.get("residual_first") is not None:
+                residual = QListWidgetItem("Residual (measured − fit, lowest level)")
+                residual.setFlags(residual.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                residual.setCheckState(Qt.CheckState.Unchecked)
+                residual.setData(Qt.ItemDataRole.UserRole, self._SCORE_RESIDUAL_ENTRY)
+                residual.setToolTip(
+                    "The measured lowest-level spectrum minus the sum of the components, "
+                    "drawn on the same scale as them (with True relative heights on). "
+                    "Structure in it – a peak, a dispersive shape – is signal the "
+                    "components do not reproduce; noise alone is what a good fit leaves.")
+                self.score_component_list.addItem(residual)
         self.score_component_list.blockSignals(False)
 
     def _checked_score_entries(self) -> list[int]:
@@ -28314,9 +28579,15 @@ class MainWindow(QMainWindow):
                 entries.append(int(item.data(Qt.ItemDataRole.UserRole)))
         return entries
 
+    #: The component list's UserRole for the residual entry (-1 is
+    #: Measured, 0.. the components).
+    _SCORE_RESIDUAL_ENTRY = -2
+
     def _measured_spectrum_for_score(self):
         """The row the components were resolved against, as a spectrum
-        -- the lowest gradient level, i.e. the ordinary spectrum."""
+        -- the lowest gradient level, i.e. the ordinary spectrum. The
+        first slice *used*: with slice 1 excluded, row 0 was not part of
+        the resolution and is not what the fit's first level describes."""
         result = self._score_result
         parent_index = self._selected_index()
         parent = self.session.spectra[parent_index] if parent_index is not None else None
@@ -28326,8 +28597,23 @@ class MainWindow(QMainWindow):
             raw={"score_component": 0},
         )
         reference = np.real(np.asarray(result["fit"])) * 0
-        source = parent.data[0] if parent is not None else reference
+        rows = result.get("rows") or [0]
+        source = parent.data[int(rows[0])] if parent is not None else reference
         return NMRSpectrum(data=np.real(np.asarray(source, dtype=float)),
+                            axes=[axis], metadata=metadata)
+
+    def _residual_spectrum_for_score(self):
+        """Measured minus the components' sum at the lowest level, as a
+        spectrum on the parent's axis."""
+        result = self._score_result
+        parent_index = self._selected_index()
+        parent = self.session.spectra[parent_index] if parent_index is not None else None
+        axis = dataclasses.replace(parent.axes[1]) if parent is not None else None
+        metadata = dataclasses.replace(
+            parent.metadata, vendor="derived", source_path="Residual",
+            raw={"score_component": 0},
+        )
+        return NMRSpectrum(data=np.asarray(result["residual_first"], dtype=float),
                             axes=[axis], metadata=metadata)
 
     def _redraw_score_components(self) -> None:
@@ -28341,7 +28627,10 @@ class MainWindow(QMainWindow):
             return
         spectra, labels = [], []
         for entry in entries:
-            if entry < 0:
+            if entry == self._SCORE_RESIDUAL_ENTRY:
+                spectra.append(self._residual_spectrum_for_score())
+                labels.append("Residual (measured − fit)")
+            elif entry < 0:
                 spectra.append(self._measured_spectrum_for_score())
                 labels.append("Measured")
             else:
@@ -29341,10 +29630,13 @@ class MainWindow(QMainWindow):
         if box.view() == "all":
             self._display_all_relaxation_peaks()
             return
+        mode, i0 = self._curve_y_transform(result)
         uncertainty = None
         if self.relaxation_uncertainty_checkbox.isChecked():
             try:
                 uncertainty = processing_relaxation.fit_curve_uncertainty(result)
+                if mode != "intensity":
+                    uncertainty = processing_relaxation.attenuation_band(*uncertainty, i0, mode)
             except Exception:  # noqa: BLE001 -- best-effort; fall back to the plain fit curve
                 uncertainty = None
 
@@ -29353,19 +29645,23 @@ class MainWindow(QMainWindow):
         if excluded_idx and self._relaxation_fit_original:
             original = self._relaxation_fit_original[index]
             idx_array = sorted(excluded_idx)
-            excluded_points = (original["t"][idx_array], original["y"][idx_array])
+            excluded_points = (original["t"][idx_array],
+                               processing_relaxation.attenuation_values(
+                                   original["y"][idx_array], i0, mode))
 
+        shown, fit_curve = self._curve_display_result(result, mode, i0)
         xlabel, x_scale = self._fit_plot_axis()
         self.fit_canvas.show_relaxation_fit(
-            result, uncertainty=uncertainty, xlabel=xlabel, excluded_points=excluded_points,  # noqa: E501
-            x_scale=x_scale, fit_curve=self._relaxation_fit_curve(result),
-            fit_style=box.fit_style(),
+            shown, uncertainty=uncertainty, xlabel=xlabel, excluded_points=excluded_points,  # noqa: E501
+            x_scale=x_scale, fit_curve=fit_curve,
+            fit_style=box.fit_style(), ylabel=self._CURVE_Y_LABELS.get(mode, "Intensity"),
         )
         # Claim the canvas, so a later right-click reaches this fit and
         # not whichever eNMR series was last plotted here. Both
         # directions matter: the owner has to be *set* by every writer,
         # not only read by one of them.
         self._fit_canvas_owner = "relaxation"
+        self.fit_canvas.series_slices_removable = self._curve_fit_is_own_series()
         self._sync_curve_peak_bar()
 
         # The full report, not a single line: this panel sits directly
@@ -29389,6 +29685,55 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 -- a record without a model to evaluate
             return None
 
+    #: The y-axis label for each Curve Fit Plot ▸ y axis choice (mathtext,
+    #: so I is italic -- project rule for algebraic symbols).
+    _CURVE_Y_LABELS = {"intensity": "Intensity", "relative": r"$I/I_0$",
+                       "ln": r"$\ln(I/I_0)$"}
+
+    def _curve_y_transform(self, result) -> tuple[str, float]:
+        """``(mode, I0)`` the curve fit ``result`` is drawn in (Curve Fit
+        Plot ▸ y axis). A fit with no positive I0 -- an inversion recovery
+        crosses zero, so has no logarithm -- is drawn as intensity, and
+        the status bar says why rather than the setting silently doing
+        nothing."""
+        mode = self.curve_fit_plot_box.y_mode()
+        if mode == "intensity":
+            return "intensity", 1.0
+        try:
+            i0, _how = processing_relaxation.attenuation_reference(result)
+        except ValueError as exc:
+            self.statusBar().showMessage(f"Drawn as intensity – {exc}", 8000)
+            return "intensity", 1.0
+        return mode, i0
+
+    def _curve_display_result(self, result, mode: str, i0: float):
+        """``(result as drawn, fit curve as drawn)``: the fit dict itself
+        for the intensity axis, else a copy with ``y``/``y_fit`` divided by
+        I0 (and logged for ln). The stored fit is never changed -- this is
+        a display transform, like the x unit."""
+        if mode == "intensity":
+            return result, self._relaxation_fit_curve(result)
+        drawn = processing_relaxation.attenuation(result, mode=mode)
+        shown = dict(result)
+        shown["y"], shown["y_fit"] = drawn["y"], drawn["y_fit"]
+        if drawn["dropped"]:
+            self.statusBar().showMessage(
+                f"{drawn['dropped']} point(s) at or below zero have no logarithm and are "
+                f"not drawn on the ln(I/I₀) axis.", 8000)
+        return shown, (drawn["curve_x"], drawn["curve_y"])
+
+    def _curve_fit_is_own_series(self) -> bool:
+        """Whether the curve fit on show is the selected pseudo-2D's own
+        slices -- the case where a whole slice can be taken out of every
+        fit (a Compare-stack fit is of separate files, and has no slice
+        list to untick)."""
+        owner = getattr(self, "_relaxation_fit_spectrum", None)
+        index = self._selected_index()
+        if owner is None or index is None:
+            return False
+        spectrum = self.session.spectra[index]
+        return spectrum is owner and spectrum.ndim == 2 and spectrum.is_pseudo_2d
+
     def _display_all_relaxation_peaks(self) -> None:
         """Every peak's series and fit on one plot (Fit plot ▸ Show: All
         peaks together), with every report under it."""
@@ -29397,11 +29742,33 @@ class MainWindow(QMainWindow):
             return
         xlabel, x_scale = self._fit_plot_axis()
         box = self.curve_fit_plot_box
+        shown_results, curves, removed = [], [], []
+        mode = box.y_mode()
+        # One y axis for every peak: if any peak has no positive I0 to
+        # divide by, they are all drawn as intensity.
+        if any(self._curve_y_transform(result)[0] != mode for result in results):
+            mode = "intensity"
+        for k, result in enumerate(results):
+            i0 = 1.0 if mode == "intensity" else self._curve_y_transform(result)[1]
+            shown, curve = self._curve_display_result(result, mode, i0)
+            shown_results.append(shown)
+            curves.append(curve)
+            excluded_idx = self._excluded_relaxation_indices.get(k)
+            if excluded_idx and self._relaxation_fit_original and k < len(self._relaxation_fit_original):
+                original = self._relaxation_fit_original[k]
+                idx_array = sorted(excluded_idx)
+                removed.append((original["t"][idx_array],
+                                processing_relaxation.attenuation_values(
+                                    original["y"][idx_array], i0, mode)))
+            else:
+                removed.append(None)
         self.fit_canvas.show_relaxation_fits(
-            results, xlabel=xlabel, x_scale=x_scale,
-            fit_curves=[self._relaxation_fit_curve(r) for r in results],
-            fit_style=box.fit_style(), normalise=box.normalise())
+            shown_results, xlabel=xlabel, x_scale=x_scale, fit_curves=curves,
+            fit_style=box.fit_style(), normalise=box.normalise() and mode == "intensity",
+            excluded_points=removed, ylabel=self._CURVE_Y_LABELS.get(mode, "Intensity"),
+            ylabel_suffix=None if mode == "intensity" else "")
         self._fit_canvas_owner = "relaxation"
+        self.fit_canvas.series_slices_removable = self._curve_fit_is_own_series()
         self._sync_curve_peak_bar()
         titles = [r.get("peak_label") or f"Peak {k + 1}" for k, r in enumerate(results)]
         muted, warn = self.relaxation_fit_params_label.colours()
@@ -29435,6 +29802,7 @@ class MainWindow(QMainWindow):
             list(self._relaxation_fit_results) if self._relaxation_fit_results else None)
         self._excluded_relaxation_indices = {}
         self._relaxation_fit_context = spectrum.metadata.raw.get("relaxation_fit_context")
+        self._relaxation_fit_spectrum = spectrum
 
     def _on_fit_point_exclude_requested(self, x: float, y: float) -> None:
         """Right-click "Exclude Nearest Point" on the Fit tab -- finds
@@ -29452,33 +29820,124 @@ class MainWindow(QMainWindow):
         if str(self._fit_canvas_owner or "").startswith("enmr"):
             self._exclude_enmr_point(x, y)
             return
-        if not self._relaxation_fit_original:
+        hit = self._nearest_curve_point(x, y)
+        if hit is None:
             return
-        index = self.view_relaxation_peak_spin.value() - 1
-        if not (0 <= index < len(self._relaxation_fit_original)):
-            return
-        original = self._relaxation_fit_original[index]
-        t_orig, y_orig = original["t"], original["y"]
-        # The axis is drawn in the panel's own unit (see
-        # _fit_plot_axis), so a coordinate read back off it is in that
-        # unit too and has to come back to seconds before being
-        # compared with the stored series. Without this, "nearest"
-        # would be measured against a number 1000x off and would always
-        # pick the same end point.
-        x = float(x) * self._fit_plot_axis()[1]
+        index, nearest = hit
         excluded = self._excluded_relaxation_indices.setdefault(index, set())
-        candidates = [i for i in range(len(t_orig)) if i not in excluded]
-        if not candidates:
-            return
-        t_range = float(np.ptp(t_orig)) or 1.0
-        y_range = float(np.ptp(y_orig)) or 1.0
-        distances = [
-            ((t_orig[i] - x) / t_range) ** 2 + ((y_orig[i] - y) / y_range) ** 2 for i in candidates
-        ]
-        nearest = candidates[int(np.argmin(distances))]
         excluded.add(nearest)
         if not self._refit_relaxation_peak(index):
             excluded.discard(nearest)  # not enough points left -- undo
+
+    def _curve_peaks_on_show(self) -> list[int]:
+        """The peaks whose points are on the Fit plot: the one browsed to,
+        or every one with Curve Fit Plot ▸ Show: All peaks together."""
+        if not self._relaxation_fit_original:
+            return []
+        if self.fit_canvas._curve_fits_shown and not self.fit_canvas._fit_mode:
+            return list(range(len(self._relaxation_fit_original)))
+        index = self.view_relaxation_peak_spin.value() - 1
+        return [index] if 0 <= index < len(self._relaxation_fit_original) else []
+
+    def _nearest_curve_point(self, x: float, y: float):
+        """``(peak, point)`` of the still-included point nearest a
+        right-click on the curve-fit plot, or None.
+
+        Measured **as drawn**: the click is read off the axes, so the
+        stored series goes through the same transforms first -- the x
+        unit (a coordinate in ms has to come back to seconds, or
+        "nearest" is measured against a number 1000x off and always picks
+        the same end point), Curve Fit Plot ▸ y axis (I/I0, ln) and the
+        all-peaks normalisation. Distances are scaled by each axis's
+        range, so the x and y axes -- usually on very different numeric
+        scales -- both count."""
+        peaks = self._curve_peaks_on_show()
+        if not peaks:
+            return None
+        x = float(x) * self._fit_plot_axis()[1]
+        scales = {}
+        for entry_index, entry in enumerate(self.fit_canvas._curve_fits_shown or []):
+            scales[entry_index] = float(entry.get("scale", 1.0)) or 1.0
+        all_peaks = len(peaks) > 1 or bool(self.fit_canvas._curve_fits_shown
+                                            and not self.fit_canvas._fit_mode)
+        results = self._relaxation_fit_results
+        mode = self.curve_fit_plot_box.y_mode()
+        if all_peaks and any(self._curve_y_transform(results[k])[0] != mode for k in peaks):
+            mode = "intensity"         # as _display_all_relaxation_peaks draws it
+        candidates = []          # (peak, point, t, y as drawn)
+        for k in peaks:
+            original = self._relaxation_fit_original[k]
+            if all_peaks:
+                peak_mode = mode
+                i0 = 1.0 if mode == "intensity" else self._curve_y_transform(results[k])[1]
+                scale = scales.get(k, 1.0)
+            else:
+                peak_mode, i0 = self._curve_y_transform(results[k])
+                scale = 1.0
+            drawn = processing_relaxation.attenuation_values(original["y"], i0, peak_mode) / scale
+            excluded = self._excluded_relaxation_indices.get(k, set())
+            for i, (t_value, y_value) in enumerate(zip(np.asarray(original["t"], dtype=float),
+                                                       drawn)):
+                if i not in excluded and np.isfinite(y_value):
+                    candidates.append((k, i, float(t_value), float(y_value)))
+        if not candidates:
+            return None
+        ts = np.array([c[2] for c in candidates])
+        ys = np.array([c[3] for c in candidates])
+        t_range = float(np.ptp(ts)) or 1.0
+        y_range = float(np.ptp(ys)) or 1.0
+        distances = ((ts - x) / t_range) ** 2 + ((ys - float(y)) / y_range) ** 2
+        best = candidates[int(np.argmin(distances))]
+        return best[0], best[1]
+
+    def _on_fit_slice_remove_requested(self, x: float, y: float) -> None:
+        """Right-click ▸ Remove Slice from Every Fit on a curve fit: the
+        slice behind the point nearest the click is unticked in "Slices
+        used in fits" and the curve fit is run again, so every peak (and
+        SCORE and the DOSY ILT, which read the same list) leaves it out.
+
+        The point is mapped to its slice by its x value -- the delay or
+        b-value it was fitted against -- among the slices still included,
+        which is exact for the series this fit came from."""
+        if not self._curve_fit_is_own_series():
+            self.statusBar().showMessage(
+                "Only a pseudo-2D's own curve fit has slices to remove.", 6000)
+            return
+        hit = self._nearest_curve_point(x, y)
+        if hit is None:
+            return
+        peak, point = hit
+        t_value = float(self._relaxation_fit_original[peak]["t"][point])
+        spectrum = self._relaxation_fit_spectrum
+        n_slices = self._fit_slice_count(spectrum)
+        try:
+            values = self._resolve_independent_values(
+                spectrum, self._is_diffusion_fit(), n_slices=n_slices)
+            values = np.asarray(values["seconds"] if isinstance(values, dict) else values,
+                                dtype=float)
+        except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
+            QMessageBox.critical(self, "Remove slice", str(exc))
+            return
+        excluded = self.excluded_slices(spectrum)
+        candidates = [i for i in range(min(n_slices, values.size)) if i not in excluded]
+        if not candidates:
+            return
+        row = min(candidates, key=lambda i: abs(values[i] - t_value))
+        if len(candidates) - 1 < 2:
+            QMessageBox.information(
+                self, "Not enough slices",
+                "That would leave fewer than 2 slices to fit – re-include some first.")
+            return
+        shown_peak = self.view_relaxation_peak_spin.value()
+        self.set_excluded_slices(spectrum, excluded | {row})
+        self._on_fit_curve_button_clicked()
+        # Back to the peak that was on show (a new fit starts at peak 1).
+        if self._relaxation_fit_results and 1 <= shown_peak <= len(self._relaxation_fit_results):
+            self.view_relaxation_peak_spin.setValue(shown_peak)
+        self.statusBar().showMessage(
+            f"Slice {row + 1} ({values[row]:.4g}) removed from every fit "
+            f"({len(excluded) + 1} excluded) – Dynamics ▸ Slices used in fits to put it back.",
+            8000)
 
     def _exclude_enmr_point(self, x: float, y: float) -> None:
         """Right-click "Exclude Nearest Point" on an eNMR plot.
@@ -29568,13 +30027,10 @@ class MainWindow(QMainWindow):
             self._rerun_enmr_after_exclusion()
             self.statusBar().showMessage("Re-included every eNMR point.", 5000)
             return
-        if not self._relaxation_fit_original:
-            return
-        index = self.view_relaxation_peak_spin.value() - 1
-        if not (0 <= index < len(self._relaxation_fit_original)):
-            return
-        self._excluded_relaxation_indices.pop(index, None)
-        self._refit_relaxation_peak(index)
+        # Every peak on show: the browsed one, or all of them together.
+        for index in self._curve_peaks_on_show():
+            if self._excluded_relaxation_indices.pop(index, None):
+                self._refit_relaxation_peak(index)
 
     def _refit_relaxation_peak(self, index: int) -> bool:
         """Re-run :func:`processing.relaxation.fit_relaxation` for
@@ -30189,6 +30645,7 @@ class MainWindow(QMainWindow):
         self.gradient_calibration_label.setText("")
         self.pfg_params_source_label.setText("")
         self._clear_spectral_fit_report()
+        self._adopt_score_state(spectrum)
 
         state = spectrum.metadata.raw.get("analysis_state")
         if state is None:
@@ -30287,7 +30744,10 @@ class MainWindow(QMainWindow):
             self._restore_region_options(state)
             self.analysis_results_label.setText(state["results_text"])
             self.integration_results_label.setText(state.get("integration_results_text", ""))
-            self.score_results_label.setText(state.get("score_results_text", ""))
+            if self._score_result is None:
+                # A saved report without its result (an older session):
+                # the plain text is all there is.
+                self.score_results_label.setText(state.get("score_results_text", ""))
             summary_html = state.get("curve_fit_summary_html")
             if summary_html and report_format.is_rich(summary_html):
                 self.curve_fit_summary_label.setReport(
@@ -30694,6 +31154,7 @@ class MainWindow(QMainWindow):
         self._score_result = result
         self._score_ppm = spectrum.axes[1].values("ppm")
         self._populate_score_component_list()
+        self._show_score_report(result)
         self._refresh_score_export_buttons()
         self._redraw_score_components()
         self._fit_canvas_owner = "score"
@@ -31386,7 +31847,7 @@ class _ScoreSettingsDialog(QDialog):
     """
 
     def __init__(self, parent=None, suggested: int = 2, is_diffusion: bool = True,
-                  model_label: str | None = None) -> None:
+                  model_label: str | None = None, model_note: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle("Resolve components (SCORE)")
         layout = QVBoxLayout(self)
@@ -31409,14 +31870,21 @@ class _ScoreSettingsDialog(QDialog):
             # fixed exponential buried in this method, so leaving it
             # unstated would make it invisible which curve each
             # component is being fitted to.
-            model_note = QLabel(
-                f"Each component decays as <b>{model_label}</b> — the Model set in the "
-                f"Curve Fitting sub-tab, with its amplitude carried by the component's "
-                f"own resolved spectrum. Change it there to resolve against a different "
-                f"curve."
-            )
-            model_note.setWordWrap(True)
-            layout.addWidget(model_note)
+            if model_note:
+                # The panel's model has several components of its own, so
+                # its single-component form is used (processing.score.
+                # kernel_model) -- said here, before the run, not only in
+                # the report after it.
+                text = (f"Each component decays as <b>{model_label}</b> — {model_note} "
+                        f"Its amplitude is carried by the component's own resolved spectrum.")
+            else:
+                text = (f"Each component decays as <b>{model_label}</b> — the Model set in the "
+                        f"Curve Fitting sub-tab, with its amplitude carried by the component's "
+                        f"own resolved spectrum. Change it there to resolve against a different "
+                        f"curve.")
+            model_note_label = QLabel(text)
+            model_note_label.setWordWrap(True)
+            layout.addWidget(model_note_label)
 
         form = QFormLayout()
 

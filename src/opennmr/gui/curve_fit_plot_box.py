@@ -5,6 +5,10 @@ since 2026-10-16 (formatting a plot is a right-click on it).
 * **Show**: the selected peak (the spin box above browses peaks) or every
   peak together, each in its own colour-blind-safe colour, optionally
   normalised to its own fitted maximum to compare shapes.
+* **y axis**: the intensity as measured, I/I0, or ln(I/I0) -- the
+  Stejskal-Tanner plot of a PFG series (explicit user request,
+  2026-11-10). I0 is the fitted curve at x = 0
+  (``processing.relaxation.attenuation``).
 * **Fit line**: its colour, line style (solid, dashed, dotted, dash-dot,
   long dash, dash-dot-dot) and width. Remembered between sessions
   (``~/.opennmr/ui_settings.json``, key ``curve_fit_line``).
@@ -32,7 +36,15 @@ LINE_STYLES = (
 _MPL_STYLE = {key: mpl for _label, key, mpl in LINE_STYLES}
 
 DEFAULTS = {"colour": "#d62728", "style": "dashed", "width": 2.0, "view": "one",
-            "normalise": False}
+            "normalise": False, "y_mode": "intensity"}
+
+#: (label, key) of the y-axis choices; keys are
+#: processing.relaxation.ATTENUATION_MODES.
+Y_MODES = (
+    ("Intensity (as measured)", "intensity"),
+    ("I/I₀ (normalised to the fit at x = 0)", "relative"),
+    ("ln(I/I₀) – Stejskal–Tanner / log plot", "ln"),
+)
 
 
 class CurveFitPlotBox(QGroupBox):
@@ -64,6 +76,20 @@ class CurveFitPlotBox(QGroupBox):
             "maximum, to compare curves of very different intensity by shape.")
         self.normalise_check.toggled.connect(self._on_changed)
         form.addRow("", self.normalise_check)
+
+        self.y_mode_combo = QComboBox()
+        for label, key in Y_MODES:
+            self.y_mode_combo.addItem(label, key)
+        self.y_mode_combo.setToolTip(
+            "What the y axis shows.\n\n"
+            "I/I₀: every point divided by I₀, the fitted curve at x = 0 (so a fit "
+            "of the whole series, not one noisy point, sets the scale).\n\n"
+            "ln(I/I₀): the log plot. For a PFG series this is the Stejskal–Tanner "
+            "plot – one freely diffusing species is a straight line of slope −D "
+            "against b, and curvature shows more than one. Points at or below zero "
+            "have no logarithm and are left out (the status bar says how many).")
+        self.y_mode_combo.currentIndexChanged.connect(self._on_changed)
+        form.addRow("y axis:", self.y_mode_combo)
 
         self.colour_button = QPushButton()
         self.colour_button.setToolTip("Colour of the fitted line (the selected-peak view; with "
@@ -104,7 +130,12 @@ class CurveFitPlotBox(QGroupBox):
         return self.view_combo.currentData()
 
     def normalise(self) -> bool:
-        return self.normalise_check.isChecked()
+        """Normalise each peak to its fitted maximum -- only with all peaks
+        shown on the intensity axis (I/I0 is already normalised)."""
+        return self.normalise_check.isChecked() and self.y_mode() == "intensity"
+
+    def y_mode(self) -> str:
+        return self.y_mode_combo.currentData() or "intensity"
 
     def fit_style(self) -> dict:
         """The fit line, as MplCanvas.show_relaxation_fit takes it."""
@@ -114,11 +145,12 @@ class CurveFitPlotBox(QGroupBox):
     def settings(self) -> dict:
         return {"colour": self._colour, "style": self.style_combo.currentData(),
                 "width": float(self.width_spin.value()), "view": self.view(),
-                "normalise": self.normalise()}
+                "normalise": self.normalise_check.isChecked(), "y_mode": self.y_mode()}
 
     def apply_settings(self, settings: dict | None) -> None:
         settings = {**DEFAULTS, **(settings or {})}
-        widgets = (self.view_combo, self.normalise_check, self.style_combo, self.width_spin)
+        widgets = (self.view_combo, self.normalise_check, self.style_combo, self.width_spin,
+                   self.y_mode_combo)
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -132,6 +164,8 @@ class CurveFitPlotBox(QGroupBox):
             if index >= 0:
                 self.view_combo.setCurrentIndex(index)
             self.normalise_check.setChecked(bool(settings["normalise"]))
+            index = self.y_mode_combo.findData(settings.get("y_mode", "intensity"))
+            self.y_mode_combo.setCurrentIndex(index if index >= 0 else 0)
         finally:
             for w in widgets:
                 w.blockSignals(False)
@@ -157,5 +191,5 @@ class CurveFitPlotBox(QGroupBox):
         self.colour_button.setStyleSheet(
             f"QPushButton {{ background-color: {self._colour}; "
             f"color: {'black' if QColor(self._colour).lightness() > 140 else 'white'}; }}")
-        self.normalise_check.setEnabled(self.view() == "all")
+        self.normalise_check.setEnabled(self.view() == "all" and self.y_mode() == "intensity")
         self.colour_button.setEnabled(self.view() == "one")

@@ -11,6 +11,13 @@ as you change them.
 Limits are in the units the plot is showing (ppm, Hz, seconds ...). The
 drawing is :mod:`opennmr.plotting.inset` (a 2D contour:
 :func:`opennmr.plotting.twod.draw_insets`).
+
+On a figure of several plots (a Compare stack) the list holds **every**
+plot's insets, each named by the spectrum it magnifies, and *Placed in*
+puts an inset in another plot's area -- so an inset of one spectrum can
+sit beside an inset of another (explicit user request, 2026-11-10: an
+inset made on one spectrum could not be removed once another spectrum
+had one).
 """
 
 from __future__ import annotations
@@ -81,6 +88,7 @@ class InsetDialog(QDialog):
         self.resize(460, 720)
         self._specs: list[dict] = []
         self._loading = False
+        self._rows: list[str] = []
 
         v = QVBoxLayout(self)
         hint = QLabel(
@@ -106,7 +114,10 @@ class InsetDialog(QDialog):
         v.addLayout(row)
 
         self.inset_list = QListWidget()
-        self.inset_list.setMaximumHeight(90)
+        self.inset_list.setMaximumHeight(110)
+        self.inset_list.setToolTip(
+            "Every inset on this figure – on a Compare stack, every spectrum's, each "
+            "named by the spectrum it magnifies.")
         self.inset_list.currentRowChanged.connect(self._load_editor)
         v.addWidget(self.inset_list)
 
@@ -140,6 +151,15 @@ class InsetDialog(QDialog):
         # -- where it sits
         position_box = QGroupBox("Position and size")
         position = QFormLayout(position_box)
+        # Which plot's area the inset sits in (a Compare stack only).
+        self.host_combo = QComboBox()
+        self.host_combo.setToolTip(
+            "Which spectrum's area the inset sits in. Its own (the default), or another "
+            "spectrum's – to put insets of two spectra side by side. Position and size "
+            "below are then fractions of that spectrum's area; the lines still run to the "
+            "region it magnifies.")
+        self.host_label = QLabel("Placed in:")
+        position.addRow(self.host_label, self.host_combo)
         self.corner_combo = QComboBox()
         self.corner_combo.addItems(_CORNERS)
         self.corner_combo.setToolTip("A corner of the plot, or Custom to place it by hand.")
@@ -235,7 +255,7 @@ class InsetDialog(QDialog):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(300)
         self._debounce.timeout.connect(self.apply)
-        for widget in (self.corner_combo, self.connector_style_combo):
+        for widget in (self.corner_combo, self.connector_style_combo, self.host_combo):
             widget.currentIndexChanged.connect(self._on_edit)
         for check in (self.auto_y_check, self.show_axes_check, self.frame_check, self.bold_check,
                       self.italic_check, self.connectors_check, self.same_font_check,
@@ -266,8 +286,9 @@ class InsetDialog(QDialog):
 
     def refresh(self) -> None:
         """Re-read the insets from the canvas (it may have been redrawn
-        for another spectrum)."""
-        self._specs = self.canvas.inset_specs()
+        for another spectrum) -- every plot's, each with its ``row``."""
+        self._specs = self.canvas.all_inset_specs()
+        self._rows = self.canvas.inset_rows()
         self._refresh_list()
 
     def _start_drawing(self) -> None:
@@ -293,7 +314,7 @@ class InsetDialog(QDialog):
             self.status_label.setText(f"Inset not drawn: {exc}")
             return None
         self.refresh()
-        self.inset_list.setCurrentRow(len(self._specs) - 1)
+        self._select_last_added()
         self.canvas.reset_view()          # back to the full view, inset drawn on it
         return dict(spec)
 
@@ -314,7 +335,7 @@ class InsetDialog(QDialog):
         """Draw the insets on the canvas. False (with a message) if a
         region has nothing in it; the previous insets stay."""
         try:
-            self.canvas.set_inset_specs(self._specs)
+            self.canvas.set_all_inset_specs(self._specs)
         except ValueError as exc:
             self.status_label.setText(f"Inset not drawn: {exc}")
             return False
@@ -356,10 +377,49 @@ class InsetDialog(QDialog):
         return (abs(abs(view[1] - view[0]) - span) < 1e-3 * span
                 and abs(min(view) - min(full)) < 1e-3 * span)
 
-    @staticmethod
-    def _describe(i: int, spec: dict) -> str:
+    def _select_last_added(self) -> None:
+        """Select the inset just added: the last one of the plot it was
+        drawn on (the list is ordered by plot)."""
+        _ax, row = self.canvas._inset_target_axes() if self.canvas.contour_view_region() is None \
+            else (None, 0)
+        indices = [i for i, spec in enumerate(self._specs) if spec.get("row", 0) == row]
+        self.inset_list.setCurrentRow(indices[-1] if indices else len(self._specs) - 1)
+
+    def _row_name(self, row) -> str:
+        rows = getattr(self, "_rows", None) or []
+        if row is None or not 0 <= int(row) < len(rows):
+            return ""
+        return rows[int(row)]
+
+    def _describe(self, i: int, spec: dict) -> str:
         (x1, x2), (y1, y2) = spec["xlim"], spec["ylim"]
-        return f"Inset {i + 1}: {x1:.4g} to {x2:.4g}, {y1:.3g} to {y2:.3g} ({spec['corner']})"
+        text = f"Inset {i + 1}: {x1:.4g} to {x2:.4g}, {y1:.3g} to {y2:.3g} ({spec['corner']})"
+        if len(getattr(self, "_rows", None) or []) > 1:
+            text = f"{self._row_name(spec.get('row', 0))} – " + text
+            host = spec.get("host")
+            if host is not None and host != spec.get("row", 0):
+                text += f", placed in {self._row_name(host)}"
+        return text
+
+    def _fill_host_combo(self, spec: dict) -> None:
+        """The plots an inset can sit in: its own first, then every other."""
+        rows = getattr(self, "_rows", None) or []
+        several = len(rows) > 1
+        self.host_label.setVisible(several)
+        self.host_combo.setVisible(several)
+        self.host_combo.blockSignals(True)
+        try:
+            self.host_combo.clear()
+            own = spec.get("row", 0)
+            self.host_combo.addItem(f"Its own ({self._row_name(own)})", None)
+            for index, name in enumerate(rows):
+                if index != own:
+                    self.host_combo.addItem(name, index)
+            host = spec.get("host")
+            found = self.host_combo.findData(host) if host is not None and host != own else 0
+            self.host_combo.setCurrentIndex(max(found, 0))
+        finally:
+            self.host_combo.blockSignals(False)
 
     def _refresh_list(self, select: int | None = None) -> None:
         self.inset_list.blockSignals(True)
@@ -371,6 +431,9 @@ class InsetDialog(QDialog):
         self.editor.setEnabled(has)
         self.remove_button.setEnabled(has)
         self.clear_button.setEnabled(has)
+        several = len(getattr(self, "_rows", None) or []) > 1
+        self.host_label.setVisible(several)
+        self.host_combo.setVisible(several)
         contour = self._is_contour()
         self.floor_spin.setVisible(contour)
         self.floor_label.setVisible(contour)
@@ -387,6 +450,7 @@ class InsetDialog(QDialog):
         spec = {**inset_module.INSET_DEFAULTS, **self._specs[row]}
         self._loading = True
         try:
+            self._fill_host_combo(spec)
             self.x_from.setValue(spec["xlim"][0])
             self.x_to.setValue(spec["xlim"][1])
             self.y_from.setValue(spec["ylim"][0])
@@ -469,6 +533,8 @@ class InsetDialog(QDialog):
         spec["connector_colour"] = self.connector_colour.colour()
         spec["connector_width"] = self.connector_width.value()
         spec["connector_style"] = self.connector_style_combo.currentData()
+        if self.host_combo.isVisible() or self.host_combo.count() > 1:
+            spec["host"] = self.host_combo.currentData()
         self.inset_list.item(row).setText(self._describe(row, spec))
         self._sync_enabled()
         self._debounce.start()

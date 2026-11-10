@@ -188,6 +188,11 @@ from .plot_inset import add_inset, remove_insets, insets_of, INSET_DEFAULTS, INS
 from .peak_integral_labels import (
     integral_labels, add_integral_labels, remove_integral_labels, normalised_integrals,
 )
+from .peak_integral_labels import reference_region as integral_reference_region
+# The log / normalised plot of a curve fit (Stejskal-Tanner for PFG), and the
+# model SCORE resolves with -- the same functions the GUI calls.
+from ..processing.relaxation import attenuation, attenuation_values, ATTENUATION_MODES
+from ..processing.score import kernel_model as score_kernel_model, residual_metrics
 from .multi_fitting import (
     make_experiment, fit_multi, default_scopes, multi_fit_table, multi_fit_to_csv,
     parameter_trend, print_multi_fit_report, plot_multi_fit, plot_parameter_trend,
@@ -378,6 +383,8 @@ from .experiment_notebook import (
 __all__ = [
     "add_inset", "remove_insets", "insets_of", "INSET_DEFAULTS", "INSET_CORNERS",
     "integral_labels", "add_integral_labels", "remove_integral_labels", "normalised_integrals",
+    "integral_reference_region", "attenuation", "attenuation_values", "ATTENUATION_MODES",
+    "score_kernel_model", "residual_metrics",
     # utils
     "find_gamma", "NUC_label", "read_bruker_metadata", "read_bruker_fid",
     "read_vdlist", "compute_BF1_SFO1",

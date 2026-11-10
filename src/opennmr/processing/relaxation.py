@@ -1250,6 +1250,129 @@ def fit_curve(fit_result: dict, n_points: int = 400):
     return t_fine, y_fine
 
 
+#: How a curve fit's y axis can be drawn (Dynamics ▸ Curve Fit Plot ▸ y
+#: axis): as measured, divided by I0, or as ln(I/I0) -- the
+#: Stejskal-Tanner plot of a PFG series, a straight line of slope -D
+#: against b for one freely diffusing species (explicit user request,
+#: 2026-11-10: "a way to plot the log version of the PFG, maybe needs to
+#: be normalised first").
+ATTENUATION_MODES = {
+    "intensity": "Intensity",
+    "relative": "I/I0",
+    "ln": "ln(I/I0)",
+}
+
+
+def attenuation_reference(fit_result: dict, reference: str = "fit") -> tuple[float, str]:
+    """``(I0, how)``: the intensity a series is divided by before it is
+    drawn as I/I0 or ln(I/I0).
+
+    ``reference="fit"`` (default) evaluates the fitted model at x = 0 --
+    for a Stejskal-Tanner fit that is the fitted I0, for a multi-
+    component one the sum of the amplitudes -- so the normalisation
+    carries the fit's averaging over every point rather than the noise of
+    one. ``"first"`` divides by the measured point at the smallest x.
+    Falls back from "fit" to "first" when the model cannot be evaluated
+    at 0 or gives a value that is not positive (an inversion recovery,
+    whose curve crosses zero, has no meaningful logarithm), and raises
+    ``ValueError`` when neither is positive."""
+    if reference not in ("fit", "first"):
+        raise ValueError("reference must be 'fit' or 'first'.")
+    if reference == "fit":
+        try:
+            spec = fit_result.get("spec") or RELAXATION_MODELS[fit_result["model"]]
+            params = dict(fit_result["params"])
+            value = float(np.asarray(spec["func"](np.array([0.0]),
+                                                  *[params[p] for p in spec["params"]]))[0])
+        except Exception:  # noqa: BLE001 -- an unevaluable model falls back to the data
+            value = float("nan")
+        if np.isfinite(value) and value > 0:
+            return value, "fitted value at x = 0"
+    t = np.asarray(fit_result["t"], dtype=float)
+    y = np.asarray(fit_result["y"], dtype=float)
+    if t.size:
+        value = float(y[int(np.argmin(t))])
+        if np.isfinite(value) and value > 0:
+            return value, "measured point at the smallest x"
+    raise ValueError("No positive I0 to normalise by: the series is not a decay from a "
+                     "positive intensity (an inversion recovery crosses zero), so I/I0 and "
+                     "ln(I/I0) are not defined for it.")
+
+
+def attenuation_values(values, i0: float, mode: str = "ln") -> np.ndarray:
+    """``values`` as drawn in ``mode`` (see :data:`ATTENUATION_MODES`).
+    For ``"ln"`` a value that is not positive has no logarithm and comes
+    back NaN, so it leaves a gap rather than a made-up point -- positions
+    are kept, so index ``i`` is still point ``i``."""
+    values = np.asarray(values, dtype=float)
+    if mode == "intensity":
+        return values.copy()
+    ratio = values / float(i0)
+    if mode == "relative":
+        return ratio
+    if mode == "ln":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(ratio > 0, np.log(np.where(ratio > 0, ratio, 1.0)), np.nan)
+    raise ValueError(f"mode must be one of {sorted(ATTENUATION_MODES)}, not {mode!r}.")
+
+
+def attenuation(fit_result: dict, mode: str = "ln", reference: str = "fit",
+                n_points: int = 400) -> dict:
+    """A curve fit's points and fitted curve as I/I0 or ln(I/I0) -- the
+    Stejskal-Tanner plot of a PFG series (ln(I/I0) against b is a line
+    of slope -D for one species; curvature means more than one).
+
+    Returns a dict: ``x`` (the fit's own x values), ``y`` and ``y_fit``
+    (transformed, NaN where a logarithm does not exist), ``curve_x`` /
+    ``curve_y`` (the fitted function on a fine grid, transformed),
+    ``i0`` and ``i0_source`` (see :func:`attenuation_reference`),
+    ``dropped`` (how many points had no logarithm), ``mode`` and
+    ``ylabel`` (plain text: "ln(I/I0)").
+
+    Usable from a notebook::
+
+        a = relaxation.attenuation(fit, mode="ln")
+        ax.plot(a["x"], a["y"], "o"); ax.plot(a["curve_x"], a["curve_y"])
+    """
+    if mode not in ATTENUATION_MODES:
+        raise ValueError(f"mode must be one of {sorted(ATTENUATION_MODES)}, not {mode!r}.")
+    if mode == "intensity":
+        i0, source = 1.0, "none"
+    else:
+        i0, source = attenuation_reference(fit_result, reference)
+    x = np.asarray(fit_result["t"], dtype=float)
+    y = attenuation_values(fit_result["y"], i0, mode)
+    y_fit = attenuation_values(fit_result.get("y_fit", fit_result["y"]), i0, mode)
+    try:
+        curve_x, curve_y = fit_curve(fit_result, n_points=n_points)
+        curve_y = attenuation_values(curve_y, i0, mode)
+    except Exception:  # noqa: BLE001 -- no model to evaluate: join the fitted points
+        order = np.argsort(x)
+        curve_x, curve_y = x[order], y_fit[order]
+    dropped = int(np.sum(~np.isfinite(y) & np.isfinite(np.asarray(fit_result["y"], dtype=float))))
+    return {"x": x, "y": y, "y_fit": y_fit, "curve_x": np.asarray(curve_x, dtype=float),
+            "curve_y": np.asarray(curve_y, dtype=float), "i0": float(i0), "i0_source": source,
+            "dropped": dropped, "mode": mode, "ylabel": ATTENUATION_MODES[mode]}
+
+
+def attenuation_band(t_fine, y_fine, y_band, i0: float, mode: str = "ln"):
+    """An uncertainty band (:func:`fit_curve_uncertainty`) in ``mode``:
+    ``(t_fine, centre, half_width)``. For ln(I/I0) the half-width is
+    ``band / |y|`` (first-order propagation), which grows where the
+    curve approaches zero -- as it should: the logarithm of a small,
+    uncertain intensity is very uncertain."""
+    y_fine = np.asarray(y_fine, dtype=float)
+    y_band = np.asarray(y_band, dtype=float)
+    if mode == "intensity":
+        return t_fine, y_fine, y_band
+    if mode == "relative":
+        return t_fine, y_fine / float(i0), y_band / abs(float(i0))
+    centre = attenuation_values(y_fine, i0, "ln")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        half = np.where(y_fine > 0, y_band / np.abs(y_fine), np.nan)
+    return t_fine, centre, half
+
+
 def fit_curve_uncertainty(fit_result: dict, n_points: int = 200, sigma: float = 3.0):
     """A smooth model curve over ``fit_result``'s own delay range, plus
     a linearized (delta-method) uncertainty band at ``sigma`` standard
