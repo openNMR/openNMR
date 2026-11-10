@@ -77,6 +77,14 @@ MATERIALS = {
     "ptfe": (-10.28e-6, "PTFE: −10.28 ppm (Wapler et al. 2014, measured)"),
     "peek": (-9.33e-6, "PEEK: −9.33 ppm (Wapler et al. 2014, measured)"),
     "kapton": (-8.92e-6, "Kapton (polyimide): −8.92 ppm (Wapler et al. 2014, measured)"),
+    # Rotor materials (explicit user request, 2026-11-10), derived as zirconia's
+    # is: χ_v = 4π χ_m / V_m, from the CRC molar susceptibility and density.
+    "diamond": (-21.7e-6, "Diamond: ≈ −21.7 ppm, from diamond's molar susceptibility "
+                          "(−5.9 × 10⁻⁶ cm³/mol, CRC) at 3.515 g/cm³; derived, not measured"),
+    "sapphire": (-18.1e-6, "Sapphire (Al₂O₃): ≈ −18.1 ppm, from Al₂O₃'s molar susceptibility "
+                           "(−37.0 × 10⁻⁶ cm³/mol, CRC) at 3.98 g/cm³; derived, not measured. "
+                           "Sapphire is uniaxial, so it differs slightly along and across "
+                           "its c axis"),
     "none": (0.0, "Nothing (air)"),
 }
 

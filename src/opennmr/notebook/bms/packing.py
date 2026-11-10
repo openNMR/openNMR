@@ -195,6 +195,8 @@ def _bounding_radius(equation, v1, v2, v3):
     elif equation == "donut":
         R0, r0 = v1, v2
         return R0 + r0
+    elif equation == "cuboid":          # half sides v1, v2, v3: the corner
+        return np.sqrt(v1**2 + v2**2 + v3**2)
     else:  # ellipsoid
         return np.maximum(np.maximum(v1, v2), v3)
 
@@ -217,6 +219,8 @@ def _particle_volume(equation, v1, v2, v3):
     elif equation == "donut":
         R0, r0 = v1, v2
         return 2 * np.pi**2 * R0 * r0**2
+    elif equation == "cuboid":
+        return 8.0 * v1 * v2 * v3
     else:
         return (4.0 / 3.0) * np.pi * v1 * v2 * v3
 

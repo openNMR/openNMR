@@ -2309,22 +2309,21 @@ class MainWindow(QMainWindow):
             current.toolbar.home()
 
     def _on_open_inset_dialog(self, canvas=None):
-        """Insets of the plot being styled (its own window): the plot the
-        right-click or the Inset button belongs to, else the tab on show."""
-        from .inset_dialog import InsetDialog
+        """Insets of a plot: Plot Style, opened on its Insets section for the
+        plot the right-click or the Inset button belongs to (else the tab on
+        show). Returns the inset panel (``inset_list``, ``apply()``...)."""
         if canvas is None:
             current = self.canvas_tabs.currentWidget()
             canvas = current if isinstance(current, MplCanvas) else self.canvas
-        dialogs = self.__dict__.setdefault("_inset_dialogs", {})
-        dialog = dialogs.get(id(canvas))
-        if dialog is None:
-            dialog = dialogs[id(canvas)] = InsetDialog(canvas, self)
-        self._inset_dialog = dialog
-        dialog.refresh()
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
-        return dialog
+        self._on_plot_style_clicked()
+        panel = self.style_inset_panel
+        panel.set_canvas(canvas)
+        section = self.style_sections.get("Insets")
+        if section is not None:
+            section.setExpanded(True)
+            self._style_dialog.scroll_to(section)
+        self._inset_dialog = panel
+        return panel
 
     def _toggle_inset_mode(self) -> None:
         """Cmd/Ctrl+I: switch the Inset tool on for the plot on show (a drag
@@ -5153,6 +5152,7 @@ class MainWindow(QMainWindow):
         style_form = _SectionedForm(style_box_layout)
         style_form.add_section("Core styling", expanded=True)
         style_form.add_section("Axis limits")
+        style_form.add_section("Insets")
         style_form.add_section("Legend")
         style_form.add_section("Compare")
         style_form.add_section("2-D")
@@ -5830,15 +5830,13 @@ class MainWindow(QMainWindow):
         self.output_limits_reset_button.clicked.connect(self._on_reset_view_limits_clicked)
         style_form.addRow(self.output_limits_reset_button, section="Axis limits")
 
-        # An inset of a zoomed region of the 2D on show, without Compare;
-        # its controls are in a pop-up so this panel stays as short as it is.
-        self.output_inset_button = QPushButton("Insets (zoomed regions)…")
-        self.output_inset_button.setToolTip(
-            "Magnified insets of the plot on show – a spectrum, a 2D contour, a curve or a "
-            "profile: their region, position, axes, typeface and the lines joining them to the "
-            "region. Draw one with the Inset button on the plot toolbar. Opens its own window.")
-        self.output_inset_button.clicked.connect(lambda: self._on_open_inset_dialog())
-        style_form.addRow(self.output_inset_button)
+        # Insets of the plot being styled, as a section of their own here
+        # rather than a separate window (explicit user request, 2026-11-10:
+        # the window was cut off, and one place for a plot's appearance is
+        # less confusing). Right-click ▸ Inset… opens Plot Style on it.
+        from .inset_dialog import InsetPanel
+        self.style_inset_panel = InsetPanel(None)
+        style_form.addRow(self.style_inset_panel, section="Insets")
 
         # --- Extracted slices, one row each ------------------------
         # Explicit user request: extracted slices beside a 2D "should
@@ -6608,6 +6606,9 @@ class MainWindow(QMainWindow):
     def _load_style_controls_from(self, canvas) -> None:
         """Point the style controls at ``canvas``'s own current
         settings, without firing their handlers back at it."""
+        panel = getattr(self, "style_inset_panel", None)
+        if panel is not None:
+            panel.set_canvas(canvas)
         settings = canvas.style_settings()
         for widget, value in (
             (self.output_linewidth_spin, settings["linewidth"]),
@@ -29642,7 +29643,7 @@ class MainWindow(QMainWindow):
 
         excluded_points = None
         excluded_idx = self._excluded_relaxation_indices.get(index)
-        if excluded_idx and self._relaxation_fit_original:
+        if excluded_idx and self._relaxation_fit_original and box.show_removed():
             original = self._relaxation_fit_original[index]
             idx_array = sorted(excluded_idx)
             excluded_points = (original["t"][idx_array],
@@ -29754,7 +29755,8 @@ class MainWindow(QMainWindow):
             shown_results.append(shown)
             curves.append(curve)
             excluded_idx = self._excluded_relaxation_indices.get(k)
-            if excluded_idx and self._relaxation_fit_original and k < len(self._relaxation_fit_original):
+            if (excluded_idx and box.show_removed() and self._relaxation_fit_original
+                    and k < len(self._relaxation_fit_original)):
                 original = self._relaxation_fit_original[k]
                 idx_array = sorted(excluded_idx)
                 removed.append((original["t"][idx_array],
@@ -31556,12 +31558,21 @@ class _PlotStyleDialog(QDialog):
         self.resize(max(self.MIN_WIDTH + 80, panel.sizeHint().width() + 40), 700)
         layout = QVBoxLayout(self)
 
+        # Scrolls up and down through every section (explicit user request,
+        # 2026-11-10), and never opens taller than the screen it is on.
         scroll = QScrollArea()
         scroll.setWidget(panel)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll = scroll
         layout.addWidget(scroll)
+        screen = (parent.screen() if parent is not None else None) or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry().height()
+            if available > 200 and self.height() > available - 60:
+                self.resize(self.width(), available - 60)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         self.apply_to_all_button = buttons.addButton(
@@ -31575,6 +31586,15 @@ class _PlotStyleDialog(QDialog):
             "and apply them everywhere now.")
         buttons.rejected.connect(self.close)
         layout.addWidget(buttons)
+
+    def scroll_to(self, widget) -> None:
+        """Bring ``widget`` (a section) to the top of the view."""
+        self.scroll.ensureWidgetVisible(widget, 0, 0)
+        try:
+            top = widget.mapTo(self.scroll.widget(), widget.rect().topLeft()).y()
+            self.scroll.verticalScrollBar().setValue(top)
+        except Exception:  # noqa: BLE001 -- only for placing the view
+            pass
 
 
 class _ProcessingReportDialog(QDialog):

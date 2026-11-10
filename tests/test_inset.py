@@ -289,7 +289,8 @@ def test_dialog_add_from_zoom_and_reachable_from_the_plot(qapp):
     assert dialog.add_from_view() is not None
     assert len(canvas.inset_specs()) == 1
     assert "inset" in canvas.current_plot_owners()
-    assert hasattr(window, "output_inset_button")
+    # Insets are a section of Plot Style now (2026-11-10), not a separate window.
+    assert "Insets" in window.style_sections and hasattr(window, "style_inset_panel")
     window.close()
 
 

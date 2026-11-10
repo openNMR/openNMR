@@ -36,7 +36,7 @@ LINE_STYLES = (
 _MPL_STYLE = {key: mpl for _label, key, mpl in LINE_STYLES}
 
 DEFAULTS = {"colour": "#d62728", "style": "dashed", "width": 2.0, "view": "one",
-            "normalise": False, "y_mode": "intensity"}
+            "normalise": False, "y_mode": "intensity", "show_removed": True}
 
 #: (label, key) of the y-axis choices; keys are
 #: processing.relaxation.ATTENUATION_MODES.
@@ -91,6 +91,19 @@ class CurveFitPlotBox(QGroupBox):
         self.y_mode_combo.currentIndexChanged.connect(self._on_changed)
         form.addRow("y axis:", self.y_mode_combo)
 
+        # Removed points (right-click ▸ Remove Point) are drawn as a faded ×
+        # by default, so it stays visible that something was left out;
+        # off leaves them off the plot entirely (explicit user request,
+        # 2026-11-10: "some users may want it omitted entirely").
+        self.show_removed_check = QCheckBox("Show removed points (faded ×)")
+        self.show_removed_check.setChecked(True)
+        self.show_removed_check.setToolTip(
+            "Points taken out of a fit with right-click ▸ Remove Point are drawn as a faded ×. "
+            "Untick to leave them off the plot (and the saved figure) entirely – they stay out "
+            "of the fit either way; right-click ▸ Restore Removed Points brings them back.")
+        self.show_removed_check.toggled.connect(self._on_changed)
+        form.addRow("", self.show_removed_check)
+
         self.colour_button = QPushButton()
         self.colour_button.setToolTip("Colour of the fitted line (the selected-peak view; with "
                                       "all peaks, each fit takes its peak's colour).")
@@ -137,6 +150,9 @@ class CurveFitPlotBox(QGroupBox):
     def y_mode(self) -> str:
         return self.y_mode_combo.currentData() or "intensity"
 
+    def show_removed(self) -> bool:
+        return self.show_removed_check.isChecked()
+
     def fit_style(self) -> dict:
         """The fit line, as MplCanvas.show_relaxation_fit takes it."""
         return {"color": self._colour, "linestyle": _MPL_STYLE[self.style_combo.currentData()],
@@ -145,12 +161,13 @@ class CurveFitPlotBox(QGroupBox):
     def settings(self) -> dict:
         return {"colour": self._colour, "style": self.style_combo.currentData(),
                 "width": float(self.width_spin.value()), "view": self.view(),
-                "normalise": self.normalise_check.isChecked(), "y_mode": self.y_mode()}
+                "normalise": self.normalise_check.isChecked(), "y_mode": self.y_mode(),
+                "show_removed": self.show_removed()}
 
     def apply_settings(self, settings: dict | None) -> None:
         settings = {**DEFAULTS, **(settings or {})}
         widgets = (self.view_combo, self.normalise_check, self.style_combo, self.width_spin,
-                   self.y_mode_combo)
+                   self.y_mode_combo, self.show_removed_check)
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -166,6 +183,7 @@ class CurveFitPlotBox(QGroupBox):
             self.normalise_check.setChecked(bool(settings["normalise"]))
             index = self.y_mode_combo.findData(settings.get("y_mode", "intensity"))
             self.y_mode_combo.setCurrentIndex(index if index >= 0 else 0)
+            self.show_removed_check.setChecked(bool(settings.get("show_removed", True)))
         finally:
             for w in widgets:
                 w.blockSignals(False)

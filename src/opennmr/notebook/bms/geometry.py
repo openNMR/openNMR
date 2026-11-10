@@ -130,8 +130,26 @@ def donut_mask(sim_part, x, y, z):
     return c0.reshape(shape)
 
 
+def cuboid_mask(sim_part, x, y, z):
+    """A rectangular block (cube when v1 = v2 = v3): half side lengths
+    v1, v2, v3 along the particle's x, y, z, with the same soft edge (the
+    slope filter) as the other shapes. Explicit user request, 2026-11-10:
+    cubic and cuboidal particles."""
+    shape = x.shape
+    xt, yt, zt = _to_local_frame(sim_part, x, y, z)
+    p = sim_part["sl"]
+    dx = np.abs(xt) / sim_part["v1"]
+    dy = np.abs(yt) / sim_part["v2"]
+    dz = np.abs(zt) / sim_part["v3"]
+    with np.errstate(over="ignore"):  # see note in ellipsoid_mask
+        c0 = 1.0 / (1.0 + (dx ** p + dy ** p + dz ** p))
+    return c0.reshape(shape)
+
+
 def shape_function(sim_part, x, y, z):
     eq = sim_part["Equation"]
+    if eq == "cuboid":
+        return cuboid_mask(sim_part, x, y, z)
     if eq == "hexagonal":
         return hexagonal_mask(sim_part, x, y, z)
     elif eq == "donut":

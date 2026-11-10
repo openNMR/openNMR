@@ -212,6 +212,18 @@ def block_shape(p, xs, ys, zs):
             with np.errstate(over="ignore"):
                 out[band] = 1.0 / (1.0 + (d_hex[band] ** sl + d_z[band] ** sl))
         return out
+    if eq == "cuboid":
+        # geometry.cuboid_mask: 1/(1 + Σ |x_i / v_i|^sl), the steep edge
+        # evaluated only in the surface shell (max_i |x_i / v_i| near 1).
+        dx, dy, dz = np.abs(xt) / v1, np.abs(yt) / v2, np.abs(zt) / v3
+        m = np.maximum(np.maximum(dx, dy), dz)
+        lo, hi = 10.0 ** (-17.0 / sl), 10.0 ** (17.0 / sl)
+        out = (m < lo).astype(float)
+        band = (m >= lo) & (m <= hi)
+        if band.any():
+            with np.errstate(over="ignore"):
+                out[band] = 1.0 / (1.0 + (dx[band] ** sl + dy[band] ** sl + dz[band] ** sl))
+        return out
     if eq == "donut":
         R0, r0 = v1, v2
         deform = p["Deformation"]
@@ -238,7 +250,7 @@ def _reach(p, margin):
     u = 10**(6/sl)), and a superellipsoid (r or t > 2) reaches its box
     corners, √3 times its largest semi-axis."""
     f = max(margin, 10.0 ** (6.0 / float(p["sl"])))
-    if p["Equation"] not in ("hexagonal", "donut") and (p["r"] > 2 or p["t"] > 2):
+    if p["Equation"] not in ("hexagonal", "donut", "cuboid") and (p["r"] > 2 or p["t"] > 2):
         f *= np.sqrt(3.0)
     return f
 

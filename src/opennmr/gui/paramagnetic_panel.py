@@ -49,7 +49,7 @@ from ..notebook.bms import interactions as bms_inter
 from ..notebook.bms import sample as bms_sample
 from ..notebook.bms import views as bms_views
 from ..notebook import susceptibility as chi_units
-from .combined_panels import _spin_box
+from .combined_panels import _nuclides, _spin_box
 from .widgets.collapsible_section import CollapsibleSection
 
 _CALC_FILTER = "Calculation output (*.out *.outp *.log *.magres OUTCAR*);;All files (*)"
@@ -567,14 +567,40 @@ class ParamagneticToolsPanel(QWidget):
 
     BMS_GRIDS = (64, 96, 128, 160, 192, 256)
 
+    #: Length units for the particle sizes and the simulated region:
+    #: key -> (text, metres).
+    LENGTH_UNITS = {"nm": ("nm", 1e-9), "um": ("µm", 1e-6), "mm": ("mm", 1e-3)}
+
+    #: What each Packing method does (its tooltip), and what both share.
+    PACKER_TIPS = {
+        "grow": ("Grow and separate (force-biased, Jodrey–Tory style): every particle starts "
+                 "small and grows towards its drawn size together, overlapping ones being "
+                 "pushed apart. Reaches dense random packings (about 55–64 % for spheres). A "
+                 "particle that runs out of room stops growing, so some can end up smaller than "
+                 "drawn; the result says how many."),
+        "rsa": ("Random sequential addition: particles are placed one at a time at random, at "
+                "their full drawn size, and a placement that overlaps an earlier one is "
+                "rejected. Never shrinks a particle, but jams at about 38 % for spheres, so not "
+                "every particle may fit; the result says how many were placed."),
+        "both": ("Both test overlaps with each particle's bounding sphere, so elongated "
+                 "particles and cubes (whose corners reach √3 × half an edge) pack less densely "
+                 "than they really could."),
+    }
+
+    #: What the three sizes are for each shape (the Mean size row's label).
+    SIZE_MEANINGS = {"ellipsoid": "semi-axes", "cuboid": "edge lengths",
+                     "hexagonal": "apothem, –, height", "donut": "radii R, r, –"}
+
     def _build_bms(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         hint = QLabel(
             "The spectrum of the bulk magnetic susceptibility (BMS) shifts in a packing of "
-            "magnetised particles. Every particle shares one set of FFTs, so the time depends "
-            "on the grid, not on the number of particles. Sizes and box share one length unit.")
+            "magnetised particles. Particles fill a small simulated region of the powder, "
+            "repeated periodically; the sample container (rotor, tube or plate) sets the "
+            "macroscopic shift around it. Every particle shares one set of FFTs, so the time "
+            "depends on the grid, not on the number of particles.")
         hint.setWordWrap(True)
         v.addWidget(hint)
 
@@ -597,17 +623,48 @@ class ParamagneticToolsPanel(QWidget):
         h.addWidget(b)
         pf.addRow("File:", self._bms_dump_row)
         self.pm_bms_n_spin = _spin_box(1, 20000, 150, 0, step=10,
-                                       tip="Number of particles to place in the box.")
+                                       tip="Number of particles in the simulated region.")
         pf.addRow("Number:", self.pm_bms_n_spin)
+        self.pm_bms_equation_combo = QComboBox()
+        for text, key, tip in (
+                ("Ellipsoid (sphere when all equal)", "ellipsoid",
+                 "Sizes are the three semi-axes; a sphere of 10 µm diameter is 5, 5, 5."),
+                ("Cuboid (cube when all equal)", "cuboid",
+                 "Sizes are the three edge lengths; a cube of 10 µm edge is 10, 10, 10."),
+                ("Hexagonal prism", "hexagonal",
+                 "Sizes: the hexagon's apothem (centre to flat side), unused, the height."),
+                ("Torus", "donut", "Sizes: the major radius R, the tube radius r, unused.")):
+            self.pm_bms_equation_combo.addItem(text, key)
+            self.pm_bms_equation_combo.setItemData(self.pm_bms_equation_combo.count() - 1, tip,
+                                                   Qt.ItemDataRole.ToolTipRole)
+        self.pm_bms_equation_combo.setToolTip("The particles' shape; hover over each for what "
+                                              "its three sizes mean.")
+        pf.addRow("Shape:", self.pm_bms_equation_combo)
+        # Sizes in a named length unit (explicit user request, 2026-11-10:
+        # "most people know (or can guess) their particle sizes as nm, µm").
+        self.pm_bms_length_unit_combo = QComboBox()
+        for key, (text, _metres) in self.LENGTH_UNITS.items():
+            self.pm_bms_length_unit_combo.addItem(text, key)
+        self.pm_bms_length_unit_combo.setCurrentIndex(
+            self.pm_bms_length_unit_combo.findData("um"))
+        self.pm_bms_length_unit_combo.setToolTip(
+            "The unit of the particle sizes and of the simulated region. Changing it keeps the "
+            "physical sizes (the numbers are converted). The BMS field depends only on shapes "
+            "and proportions, so the unit does not change the shifts; it names the sizes and "
+            "lets them be checked against the sample container's.")
+        self._bms_length_unit = "um"
+        pf.addRow("Length unit:", self.pm_bms_length_unit_combo)
         self.pm_bms_size_edit = QLineEdit("25, 25, 25")
         self.pm_bms_size_edit.setToolTip(
-            "Mean size per axis (v1, v2, v3): semi-axes of an ellipsoid; radius, unused, height of "
-            "a hexagonal prism; major and minor radii of a torus. One value for all three.")
+            "Mean size per axis (v1, v2, v3), in the length unit above: semi-axes of an "
+            "ellipsoid; edge lengths of a cuboid; apothem, unused, height of a hexagonal prism; "
+            "major and minor radii of a torus. One value for all three.")
         pf.addRow("Mean size:", self.pm_bms_size_edit)
         self.pm_bms_spread_edit = QLineEdit("4, 4, 4")
         self.pm_bms_spread_edit.setToolTip(
-            "Spread per axis: the standard deviation (Gaussian) or the half width at half maximum "
-            "(Lorentzian, pseudo-Voigt, which have no standard deviation).")
+            "Spread per axis, in the same unit and the same sense as the sizes: the standard "
+            "deviation (Gaussian) or the half width at half maximum (Lorentzian, pseudo-Voigt, "
+            "which have no standard deviation).")
         pf.addRow("Spread:", self.pm_bms_spread_edit)
         self.pm_bms_dist_combo = QComboBox()
         for text, key in (("Gaussian", "gaussian"), ("Lorentzian", "lorentzian"),
@@ -615,25 +672,56 @@ class ParamagneticToolsPanel(QWidget):
             self.pm_bms_dist_combo.addItem(text, key)
         pf.addRow("Size distribution:", self.pm_bms_dist_combo)
         self.pm_bms_packer_combo = QComboBox()
-        self.pm_bms_packer_combo.addItem("Grow and separate (dense)", "grow")
-        self.pm_bms_packer_combo.addItem("Random sequential addition (≤ ~38 %)", "rsa")
+        for text, key, tip in (("Grow and separate (dense)", "grow", self.PACKER_TIPS["grow"]),
+                               ("Random sequential addition (≤ ~38 %)", "rsa",
+                                self.PACKER_TIPS["rsa"])):
+            self.pm_bms_packer_combo.addItem(text, key)
+            self.pm_bms_packer_combo.setItemData(self.pm_bms_packer_combo.count() - 1, tip,
+                                                 Qt.ItemDataRole.ToolTipRole)
+        self.pm_bms_packer_combo.currentIndexChanged.connect(
+            lambda _i: self.pm_bms_packer_combo.setToolTip(
+                self.PACKER_TIPS.get(self.pm_bms_packer_combo.currentData(), "")
+                + "\n\n" + self.PACKER_TIPS["both"]))
+        self.pm_bms_packer_combo.setToolTip(self.PACKER_TIPS["grow"] + "\n\n"
+                                            + self.PACKER_TIPS["both"])
         pf.addRow("Packing:", self.pm_bms_packer_combo)
         self.pm_bms_seed_spin = _spin_box(0, 2 ** 31 - 1, 1, 0, step=1,
                                           tip="Random seed: the same seed gives the same packing.")
         pf.addRow("Seed:", self.pm_bms_seed_spin)
-        self.pm_bms_box_spin = _spin_box(1.0, 1e7, 300.0, 3, step=10.0,
-                                         tip="Side of the cubic box (same unit as the sizes).")
-        pf.addRow("Box:", self.pm_bms_box_spin)
-        self.pm_bms_equation_combo = QComboBox()
-        for text, key in (("Ellipsoid", "ellipsoid"), ("Hexagonal prism", "hexagonal"),
-                          ("Torus", "donut")):
-            self.pm_bms_equation_combo.addItem(text, key)
-        pf.addRow("Shape:", self.pm_bms_equation_combo)
+        # The simulated region, said for what it is: a small periodic piece
+        # of the powder, not a container (explicit user request, 2026-11-10:
+        # "what is the size of the box" beside "what sample container do we
+        # have" read as two containers). Its side follows from the packing
+        # fraction unless set.
+        self.pm_bms_region_mode_combo = QComboBox()
+        self.pm_bms_region_mode_combo.addItem("From the packing fraction", "fraction")
+        self.pm_bms_region_mode_combo.addItem("Set its side", "side")
+        self.pm_bms_region_mode_combo.setToolTip(
+            "The particles fill a small cubic region of the powder, which repeats "
+            "periodically (with Boundary: Periodic) to stand for the powder inside the sample "
+            "container. It is not the container: that is set under Sample container, and only "
+            "its shape matters. From the packing fraction: the side is worked out from the "
+            "number, size and shape of the particles. Set its side: type it.")
+        pf.addRow("Simulated region:", self.pm_bms_region_mode_combo)
+        self.pm_bms_fraction_spin = _spin_box(0.01, 0.74, 0.30, 3, step=0.05,
+                                              tip="The volume fraction of the powder that is "
+                                                  "particles (a loose powder about 0.3, a "
+                                                  "pressed one 0.5–0.6). Sets the region's "
+                                                  "side; the packing reports what it reached.")
+        pf.addRow("Packing fraction:", self.pm_bms_fraction_spin)
+        self.pm_bms_box_spin = _spin_box(1e-3, 1e9, 300.0, 3, step=10.0,
+                                         tip="Side of the cubic simulated region, in the length "
+                                             "unit above. Typing a side switches to Set its "
+                                             "side.")
+        self.pm_bms_box_spin.setSuffix(" µm")
+        pf.addRow("Region side:", self.pm_bms_box_spin)
+        self._bms_setting_box = False
         self.pm_bms_deform_combo = QComboBox()
         for key in "ABC":
             self.pm_bms_deform_combo.addItem(key, key)
         self.pm_bms_deform_combo.setToolTip("Which particle axis the prism or torus axis lies "
                                             "along (A: x, B: y, C: z of the particle).")
+        self.pm_bms_region_note = _label()
         pf.addRow("Orientation (A/B/C):", self.pm_bms_deform_combo)
         self.pm_bms_slope_spin = _spin_box(2.0, 1e5, 2000.0, 0, step=100.0,
                                            tip="Edge steepness of the shape function (large = sharp).")
@@ -641,6 +729,7 @@ class ParamagneticToolsPanel(QWidget):
         self.pm_bms_pack_button = QPushButton("Generate Packing")
         self.pm_bms_pack_button.clicked.connect(lambda: self.generate_bms_packing())
         pf.addRow("", self.pm_bms_pack_button)
+        pf.addRow(self.pm_bms_region_note)
         v.addWidget(pk)
 
         gb = QGroupBox("Susceptibility and grid")
@@ -718,7 +807,7 @@ class ParamagneticToolsPanel(QWidget):
         gf.addRow("", self.pm_bms_double_check)
         v.addWidget(gb)
 
-        smp = QGroupBox("Sample")
+        smp = QGroupBox("Sample container")
         smf = QFormLayout(smp)
         self._bms_sample_form = smf
         self.pm_bms_sample_combo = QComboBox()
@@ -727,10 +816,11 @@ class ParamagneticToolsPanel(QWidget):
                           ("Sphere (no macroscopic shift)", "sphere")):
             self.pm_bms_sample_combo.addItem(text, key)
         self.pm_bms_sample_combo.setToolTip(
-            "The shape of the packed powder. Its own demagnetising field shifts each part of the "
-            "sample differently: −χ_v (N(r) − 1/3), χ_v the powder's volume susceptibility. Only "
-            "the shape matters (its proportions), not its size.")
-        smf.addRow("Shape:", self.pm_bms_sample_combo)
+            "What holds the powder, and so the shape of the packed powder. Its own "
+            "demagnetising field shifts each part of the sample differently: −χ_v (N(r) − 1/3), "
+            "χ_v the powder's volume susceptibility. Only the shape matters (its proportions), "
+            "not its size. Its dimensions are in mm.")
+        smf.addRow("Container:", self.pm_bms_sample_combo)
         self.pm_bms_rotor_combo = QComboBox()
         for od in bms_sample.ROTORS:
             self.pm_bms_rotor_combo.addItem(f"{od:g} mm", od)
@@ -834,8 +924,16 @@ class ParamagneticToolsPanel(QWidget):
         sb = QGroupBox("Spectrum")
         sf = QFormLayout(sb)
         self._bms_spec_form = sf
-        self.pm_bms_nucleus_edit = QLineEdit("7Li")
-        sf.addRow("Nucleus:", self.pm_bms_nucleus_edit)
+        # Chosen, not typed (explicit user request, 2026-11-10): every
+        # NMR-active isotope, as in Solid-state NMR's own nucleus list.
+        self.pm_bms_nucleus_combo = QComboBox()
+        self.pm_bms_nucleus_combo.addItems(_nuclides())
+        index = self.pm_bms_nucleus_combo.findText("7Li")
+        self.pm_bms_nucleus_combo.setCurrentIndex(max(index, 0))
+        self.pm_bms_nucleus_combo.setMaxVisibleItems(20)
+        self.pm_bms_nucleus_combo.setToolTip("The observed nucleus: sets the Larmor frequency, "
+                                             "and with a quadrupolar coupling its spin.")
+        sf.addRow("Nucleus:", self.pm_bms_nucleus_combo)
         self.pm_bms_B0_spin = _spin_box(0.01, 40.0, 9.4, 4, " T", step=0.1)
         sf.addRow("B₀:", self.pm_bms_B0_spin)
         self.pm_bms_mode_combo = QComboBox()
@@ -927,8 +1025,20 @@ class ParamagneticToolsPanel(QWidget):
         v.addWidget(self.pm_bms_result_label)
         for combo in (self.pm_bms_source_combo, self.pm_bms_mode_combo,
                       self.pm_bms_boundary_combo, self.pm_bms_equation_combo,
-                      self.pm_bms_sample_combo, self.pm_bms_view_combo):
+                      self.pm_bms_sample_combo, self.pm_bms_view_combo,
+                      self.pm_bms_region_mode_combo):
             combo.currentIndexChanged.connect(lambda _i: self._sync_bms_rows())
+        self.pm_bms_length_unit_combo.currentIndexChanged.connect(
+            lambda _i: self._on_length_unit_changed())
+        # The region's side follows the packing fraction (until one is typed).
+        self.pm_bms_box_spin.valueChanged.connect(lambda _v: self._on_region_side_typed())
+        for wdg in (self.pm_bms_n_spin, self.pm_bms_fraction_spin):
+            wdg.valueChanged.connect(lambda _v: self._update_region())
+        for edit in (self.pm_bms_size_edit,):
+            edit.textChanged.connect(lambda _t: self._update_region())
+        for combo in (self.pm_bms_equation_combo, self.pm_bms_region_mode_combo,
+                      self.pm_bms_sample_combo):
+            combo.currentIndexChanged.connect(lambda _i: self._update_region())
         self.pm_bms_local_group.toggled.connect(lambda _c: self._sync_bms_rows())
         self.pm_bms_rotor_check.toggled.connect(lambda _c: (self._sync_bms_rows(), self._update_sample_note()))
         self.pm_bms_chi_unit_combo.currentIndexChanged.connect(lambda _i: self._sync_chi_rows())
@@ -944,10 +1054,117 @@ class ParamagneticToolsPanel(QWidget):
         self.pm_bms_rotor_combo.activated.connect(lambda _i: self._rotor_chosen())
         self.pm_bms_sample_combo.activated.connect(lambda _i: self._sample_shape_chosen())
         for wdg in (self.pm_bms_inner_spin, self.pm_bms_length_spin):
-            wdg.valueChanged.connect(lambda _v: self._update_sample_note())
+            wdg.valueChanged.connect(lambda _v: (self._update_sample_note(),
+                                                 self._update_region_note()))
+        self.pm_bms_plate_edit.textChanged.connect(lambda _t: self._update_region_note())
         self._sync_bms_rows()
         self._update_sample_note()
+        self._update_region()
         return w
+
+    # ---- the simulated region and the length unit -------------------------------
+
+    def bms_length_unit(self) -> str:
+        """The length unit's text ("µm")."""
+        return self.LENGTH_UNITS[self.pm_bms_length_unit_combo.currentData()][0]
+
+    def _on_length_unit_changed(self) -> None:
+        """Re-express the sizes and the region side in the new unit, so the
+        particles stay the same physical size."""
+        old = self._bms_length_unit
+        new = self.pm_bms_length_unit_combo.currentData()
+        self._bms_length_unit = new
+        if getattr(self, "_bms_restoring", False) or old == new:
+            self._sync_bms_rows()
+            return
+        factor = self.LENGTH_UNITS[old][1] / self.LENGTH_UNITS[new][1]
+        for edit in (self.pm_bms_size_edit, self.pm_bms_spread_edit):
+            try:
+                values = [_num(x, "size") for x in re.split(r"[,;\s]+", edit.text().strip()) if x]
+            except ValueError:
+                continue
+            edit.setText(", ".join(f"{v * factor:.6g}" for v in values))
+        self._bms_setting_box = True
+        try:
+            self.pm_bms_box_spin.setValue(self.pm_bms_box_spin.value() * factor)
+        finally:
+            self._bms_setting_box = False
+        self._sync_bms_rows()
+        self._update_region()
+
+    def _on_region_side_typed(self) -> None:
+        """A typed region side (not one worked out here) means Set its side."""
+        if self._bms_setting_box:
+            return
+        index = self.pm_bms_region_mode_combo.findData("side")
+        if self.pm_bms_region_mode_combo.currentIndex() != index:
+            self.pm_bms_region_mode_combo.blockSignals(True)
+            self.pm_bms_region_mode_combo.setCurrentIndex(index)
+            self.pm_bms_region_mode_combo.blockSignals(False)
+            self._sync_bms_rows()
+        self._update_region_note()
+
+    def _mean_half_sizes(self):
+        """The mean sizes as the packer takes them (half sides for a cuboid)."""
+        size = self._triplet(self.pm_bms_size_edit.text(), "Mean size")
+        if self.pm_bms_equation_combo.currentData() == "cuboid":
+            size = tuple(v / 2.0 for v in size)
+        return size
+
+    def _update_region(self) -> None:
+        """Work out the region's side from the packing fraction, when that
+        is how it is set: side = (N × mean particle volume / fraction)^(1/3)."""
+        if not hasattr(self, "pm_bms_region_note"):
+            return
+        if (self.pm_bms_region_mode_combo.currentData() == "fraction"
+                and self.pm_bms_source_combo.currentData() == "pack"):
+            from ..notebook.bms import packing
+            try:
+                size = self._mean_half_sizes()
+                volume = float(packing._particle_volume(
+                    self.pm_bms_equation_combo.currentData(), *size))
+                side = (self.pm_bms_n_spin.value() * volume
+                        / self.pm_bms_fraction_spin.value()) ** (1.0 / 3.0)
+            except (ValueError, ZeroDivisionError):
+                side = None
+            if side is not None and np.isfinite(side) and side > 0:
+                self._bms_setting_box = True
+                try:
+                    self.pm_bms_box_spin.setValue(side)
+                finally:
+                    self._bms_setting_box = False
+        self._update_region_note()
+
+    def _container_min_mm(self):
+        """The container's smallest inside dimension, mm (None for a sphere)."""
+        shape = self.pm_bms_sample_combo.currentData()
+        if shape in ("rotor", "cylinder"):
+            return min(self.pm_bms_inner_spin.value(), self.pm_bms_length_spin.value())
+        if shape == "plate":
+            try:
+                return min(self._triplet(self.pm_bms_plate_edit.text(), "Plate sides"))
+            except ValueError:
+                return None
+        return None
+
+    def _update_region_note(self) -> None:
+        if not hasattr(self, "pm_bms_region_note"):
+            return
+        unit = self.bms_length_unit()
+        side = self.pm_bms_box_spin.value()
+        text = (f"Simulated region: a {side:.4g} {unit} cube of the powder, repeated "
+                "periodically; it sits inside the sample container below, which sets the "
+                "macroscopic shift.")
+        metres = self.LENGTH_UNITS[self.pm_bms_length_unit_combo.currentData()][1]
+        side_mm = side * metres / 1e-3
+        container = self._container_min_mm()
+        if container is not None and side_mm > container:
+            text += (f" ⚠ It is larger than the container ({container:g} mm across): check the "
+                     "length unit.")
+        if self.pm_bms_equation_combo.currentData() == "cuboid":
+            text += (" Cubes are kept apart by their corner-to-corner spheres, so they reach a "
+                     "lower packing fraction than they could.")
+        self.pm_bms_region_note.setText(text)
 
     def _sync_chi_rows(self) -> None:
         unit = self.pm_bms_chi_unit_combo.currentData()
@@ -1014,13 +1231,33 @@ class ParamagneticToolsPanel(QWidget):
                     self.pm_bms_dist_combo, self.pm_bms_packer_combo, self.pm_bms_seed_spin,
                     self.pm_bms_pack_button):
             pf.setRowVisible(wdg, pack)
-        pf.setRowVisible(self.pm_bms_deform_combo,
-                         self.pm_bms_equation_combo.currentData() != "ellipsoid")
+        equation = self.pm_bms_equation_combo.currentData()
+        pf.setRowVisible(self.pm_bms_deform_combo, equation not in ("ellipsoid", "cuboid"))
+        pf.setRowVisible(self.pm_bms_region_mode_combo, pack)
+        pf.setRowVisible(self.pm_bms_fraction_spin,
+                         pack and self.pm_bms_region_mode_combo.currentData() == "fraction")
+        unit = self.bms_length_unit()
+        meaning = self.SIZE_MEANINGS.get(equation, "sizes")
+        for wdg, text in ((self.pm_bms_size_edit, f"Mean {meaning} ({unit}):"),
+                          (self.pm_bms_spread_edit, f"Spread ({unit}):")):
+            label = pf.labelForField(wdg)
+            if label is not None:
+                label.setText(text)
+        self.pm_bms_box_spin.setSuffix(f" {unit}")
+        self.pm_bms_box_spin.setEnabled(
+            not pack or self.pm_bms_region_mode_combo.currentData() == "side")
         shape = self.pm_bms_sample_combo.currentData()
         smf = self._bms_sample_form
         smf.setRowVisible(self.pm_bms_rotor_combo, shape == "rotor")
         for wdg in (self.pm_bms_inner_spin, self.pm_bms_length_spin):
             smf.setRowVisible(wdg, shape in ("rotor", "cylinder"))
+        # The receptacle's own dimensions, named for what it is.
+        for wdg, (rotor_text, tube_text) in (
+                (self.pm_bms_inner_spin, ("Rotor inner diameter:", "Tube inner diameter:")),
+                (self.pm_bms_length_spin, ("Packed length:", "Filled height:"))):
+            label = smf.labelForField(wdg)
+            if label is not None:
+                label.setText(rotor_text if shape == "rotor" else tube_text)
         smf.setRowVisible(self.pm_bms_plate_edit, shape == "plate")
         rotor = shape == "rotor"
         smf.setRowVisible(self.pm_bms_rotor_check, rotor)
@@ -1161,6 +1398,11 @@ class ParamagneticToolsPanel(QWidget):
             raise ValueError("Mean size: every value must be positive.")
         if min(spread) < 0:
             raise ValueError("Spread: no negative values.")
+        if self.pm_bms_equation_combo.currentData() == "cuboid":
+            # Edge lengths here; the packer and the field take half sides
+            # (v1, v2, v3), as every other shape's radii.
+            size = tuple(v / 2.0 for v in size)
+            spread = tuple(v / 2.0 for v in spread)
         return {"n": int(self.pm_bms_n_spin.value()), "box_size": self.pm_bms_box_spin.value(),
                 "mean_size": size, "spread_size": spread,
                 "size_dist": self.pm_bms_dist_combo.currentData(),
@@ -1199,8 +1441,11 @@ class ParamagneticToolsPanel(QWidget):
 
     def _packing_text(self) -> str:
         st = self.bms_packing_stats or {}
-        text = (f"Packing: {st.get('n_placed', 0)} of {st.get('n_requested', 0)} particles, "
+        text = (f"Packing: {st.get('n_placed', 0)} of {st.get('n_requested', 0)} particles in a "
+                f"{self.pm_bms_box_spin.value():.4g} {self.bms_length_unit()} region, "
                 f"volume fraction {st.get('achieved_volume_fraction', 0):.3f}")
+        if self.pm_bms_region_mode_combo.currentData() == "fraction":
+            text += f" (asked {self.pm_bms_fraction_spin.value():.2f})"
         if "n_at_full_size" in st and st["n_at_full_size"] < st.get("n_placed", 0):
             text += (f"; {st['n_placed'] - st['n_at_full_size']} shrunk to fit (mean size "
                      f"{st.get('mean_achieved_size_fraction', 1):.2f} of nominal)")
@@ -1230,9 +1475,9 @@ class ParamagneticToolsPanel(QWidget):
                 "dtype": "float64" if self.pm_bms_double_check.isChecked() else "float32"}
 
     def bms_spectrum_arguments(self) -> dict:
-        nucleus = self.pm_bms_nucleus_edit.text().strip()
+        nucleus = self.pm_bms_nucleus_combo.currentText().strip()
         if not nucleus:
-            raise ValueError("Give the nucleus, e.g. 7Li.")
+            raise ValueError("Choose the nucleus, e.g. 7Li.")
         sample = self.bms_sample()
         return {"nuclide": nucleus, "B0_tesla": self.pm_bms_B0_spin.value(),
                 "mode": self.pm_bms_mode_combo.currentData(),
@@ -1490,6 +1735,7 @@ class ParamagneticToolsPanel(QWidget):
                                       box_size=fkw["box_size"], equation=fkw["equation"],
                                       deformation=fkw["deformation"],
                                       slope_filter=fkw["slope_filter"], figure=figure,
+                                      unit=self.bms_length_unit(),
                                       fontsize=self._fontsize(),
                                       tensor_style=style.get("tensor_style"))
         return self._show(draw, "tensor")
@@ -1520,7 +1766,11 @@ class ParamagneticToolsPanel(QWidget):
                          + ", ".join(f"{k}={v!r}" for k, v in kw.items()) + ", verbose=False)")
         quantity = "delta_zz" if bmsf.route(skw["mode"], skw["sample"], skw["local"])[0] or \
             skw["mode"] == "static" else "delta_iso"
-        lines = ["from opennmr.notebook.bms import fast as bmsf", *chi_lines,
+        sizes_note = (f"# Lengths (sizes, box_size) in {self.bms_length_unit()}"
+                      + ("; a cuboid's sizes are half its edge lengths"
+                         if fkw["equation"] == "cuboid" else "")
+                      + ". Only proportions change the shifts.")
+        lines = [sizes_note, "from opennmr.notebook.bms import fast as bmsf", *chi_lines,
                  "from opennmr.notebook.bms import views", particles,
                  "spectrum, field = bmsf.fast_bms_spectrum(particles, chi, "
                  + ", ".join(f"{k}={v!r}" for k, v in {**fkw, **skw}.items()) + ")",
@@ -1528,7 +1778,7 @@ class ParamagneticToolsPanel(QWidget):
                  f"fig = bmsf.plot_bms_slice(field, quantity={quantity!r})",
                  "fig3d = views.plot_packing_3d(particles, chi, "
                  f"box_size={fkw['box_size']!r}, equation={fkw['equation']!r}, "
-                 f"deformation={fkw['deformation']!r})"]
+                 f"deformation={fkw['deformation']!r}, unit={self.bms_length_unit()!r})"]
         return "\n".join(lines) + "\n"
 
     # ==== 3. bond pathways ========================================================
@@ -1932,7 +2182,17 @@ class ParamagneticToolsPanel(QWidget):
     def set_state(self, state: dict) -> None:
         from . import panel_state
         state = state or {}
-        panel_state.restore_widgets(self, state.get("widgets") or {})
+        # Restored values are taken as they were saved: a restored unit does
+        # not convert sizes restored before it, and a restored region side
+        # does not switch how the region is set.
+        self._bms_restoring = True
+        self._bms_setting_box = True
+        try:
+            panel_state.restore_widgets(self, state.get("widgets") or {})
+        finally:
+            self._bms_restoring = False
+            self._bms_setting_box = False
+        self._bms_length_unit = self.pm_bms_length_unit_combo.currentData()
         self.pathway_files = []
         self.pm_bp_file_list.clear()
         self._add_pathway_files(state.get("pathway_files") or [])
@@ -1951,3 +2211,4 @@ class ParamagneticToolsPanel(QWidget):
         self._sync_bms_rows()
         self._sync_chi_rows()
         self._sync_T_rows()
+        self._update_region()

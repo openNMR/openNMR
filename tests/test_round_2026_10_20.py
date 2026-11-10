@@ -251,4 +251,4 @@ def test_plot_style_is_sectioned(qapp):  # noqa: F811
     sections = window.style_sections
     for name in ("Core styling", "Legend", "Compare", "2-D", "Export"):
         assert name in sections, name
-    assert hasattr(window, "output_inset_button")
+    assert "Insets" in sections and hasattr(window, "style_inset_panel")

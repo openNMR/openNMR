@@ -1,5 +1,11 @@
-"""Insets on the plot on show: right-click ▸ Inset…, Plot Style ▸ Insets…, or
-right-click the toolbar's Inset button.
+"""Insets on the plot on show: Plot Style ▸ Insets (right-click the plot ▸
+Inset… opens Plot Style there), or right-click the toolbar's Inset button.
+
+:class:`InsetPanel` is the controls themselves, shown as a collapsible
+section of Plot Style (explicit user request, 2026-11-10: the separate
+window was cut off and hard to see everything in; one place for a plot's
+appearance is less confusing). :class:`InsetDialog` puts the same panel in
+a window of its own, scrolling, for a notebook-style or scripted use.
 
 An inset is a magnified copy of part of the plot -- a 1D spectrum, a stack
 of spectra, a 2D contour, a fitted curve or a profile. Draw one with the
@@ -22,11 +28,12 @@ had one).
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QDoubleValidator, QFont
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QDoubleSpinBox, QFontComboBox, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from .widgets.typed_spinbox import TypedSpinBox
@@ -39,12 +46,48 @@ _LINE_STYLES = (("Solid", "-"), ("Dashed", "--"), ("Dotted", ":"), ("Dash-dot", 
 SAME_AS_PLOT = "Same as the plot"
 
 
-def _spin() -> QDoubleSpinBox:
-    spin = QDoubleSpinBox()
-    spin.setRange(-1e9, 1e9)
-    spin.setDecimals(4)
-    spin.setSingleStep(0.1)
-    return spin
+class _FloatEdit(QLineEdit):
+    """A number box for a region limit: any size, scientific notation
+    allowed. A spin box clamped the limits to ±1e9 -- an intensity axis of
+    1.6e10 (a real Bruker spectrum, 2026-11-10) was then rewritten as ±1e9
+    on the first edit, and the inset showed a flat line."""
+
+    valueChanged = Signal(float)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._value = 0.0
+        validator = QDoubleValidator(self)
+        validator.setNotation(QDoubleValidator.Notation.ScientificNotation)
+        self.setValidator(validator)
+        self.editingFinished.connect(self._on_edited)
+        self._show()
+
+    def value(self) -> float:
+        return self._value
+
+    def setValue(self, value: float) -> None:  # noqa: N802 -- matches the spin boxes it replaces
+        value = float(value)
+        changed = value != self._value
+        self._value = value
+        self._show()
+        if changed:
+            self.valueChanged.emit(value)
+
+    def _show(self) -> None:
+        self.setText(f"{self._value:.6g}")
+
+    def _on_edited(self) -> None:
+        try:
+            value = float(self.text().replace("−", "-"))
+        except ValueError:
+            self._show()
+            return
+        self.setValue(value)
+
+
+def _spin() -> _FloatEdit:
+    return _FloatEdit()
 
 
 class _ColourButton(QPushButton):
@@ -78,14 +121,13 @@ class _ColourButton(QPushButton):
             self._on_change()
 
 
-class InsetDialog(QDialog):
-    """Insets of the plot on ``canvas`` (an ``MplCanvas``)."""
+class InsetPanel(QWidget):
+    """The inset controls for the plot on ``canvas`` (an ``MplCanvas``; may
+    be None and set later with :meth:`set_canvas`)."""
 
-    def __init__(self, canvas, parent=None) -> None:
+    def __init__(self, canvas=None, parent=None) -> None:
         super().__init__(parent)
-        self.canvas = canvas
-        self.setWindowTitle("Insets")
-        self.resize(460, 720)
+        self.canvas = None
         self._specs: list[dict] = []
         self._loading = False
         self._rows: list[str] = []
@@ -98,7 +140,7 @@ class InsetDialog(QDialog):
         hint.setWordWrap(True)
         v.addWidget(hint)
 
-        row = QHBoxLayout()
+        row = QGridLayout()
         self.draw_button = QPushButton("Draw an inset")
         self.draw_button.setToolTip("Switch on the Inset tool: drag a box over the part of the "
                                     "plot to magnify.")
@@ -109,12 +151,19 @@ class InsetDialog(QDialog):
         self.remove_button.clicked.connect(lambda: self.remove_selected())
         self.clear_button = QPushButton("Clear")
         self.clear_button.clicked.connect(lambda: self.clear_insets())
-        for button in (self.draw_button, self.add_button, self.remove_button, self.clear_button):
-            row.addWidget(button)
+        # Two by two: four in a row did not fit a narrow window.
+        for k, button in enumerate((self.draw_button, self.add_button,
+                                    self.remove_button, self.clear_button)):
+            row.addWidget(button, k // 2, k % 2)
         v.addLayout(row)
 
         self.inset_list = QListWidget()
-        self.inset_list.setMaximumHeight(110)
+        self.inset_list.setMaximumHeight(130)
+        # Wrapped, not cut off at the edge (2026-11-10 screenshot): a long
+        # spectrum name and its region read in full, with no sideways scroll.
+        self.inset_list.setWordWrap(True)
+        self.inset_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.inset_list.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.inset_list.setToolTip(
             "Every inset on this figure – on a Compare stack, every spectrum's, each "
             "named by the spectrum it magnifies.")
@@ -268,7 +317,22 @@ class InsetDialog(QDialog):
                        self.pos_x_spin, self.pos_y_spin, self.width_spin, self.height_spin,
                        self.frame_width, self.font_size_spin, self.connector_width):
             widget.valueChanged.connect(self._on_edit)
-        canvas.insetsChanged.connect(self.refresh)
+        self.set_canvas(canvas)
+
+    def set_canvas(self, canvas) -> None:
+        """Show (and edit) the insets of ``canvas`` -- Plot Style calls this
+        whenever the plot it styles changes."""
+        if canvas is self.canvas:
+            self.refresh()
+            return
+        if self.canvas is not None:
+            try:
+                self.canvas.insetsChanged.disconnect(self.refresh)
+            except (RuntimeError, TypeError):
+                pass
+        self.canvas = canvas
+        if canvas is not None:
+            canvas.insetsChanged.connect(self.refresh)
         self.refresh()
 
     @staticmethod
@@ -287,18 +351,23 @@ class InsetDialog(QDialog):
     def refresh(self) -> None:
         """Re-read the insets from the canvas (it may have been redrawn
         for another spectrum) -- every plot's, each with its ``row``."""
-        self._specs = self.canvas.all_inset_specs()
-        self._rows = self.canvas.inset_rows()
+        if self.canvas is None:
+            self._specs, self._rows = [], []
+        else:
+            self._specs = self.canvas.all_inset_specs()
+            self._rows = self.canvas.inset_rows()
         self._refresh_list()
 
     def _start_drawing(self) -> None:
+        if self.canvas is None:
+            return
         self.canvas.set_inset_mode(True)
         self.status_label.setText("Drag a box over the region on the plot.")
 
     def add_from_view(self) -> dict | None:
         """An inset showing the plot's current view. ``None`` (with a
         message) when there is no plot or it is not zoomed in."""
-        region = self.canvas.inset_view_region()
+        region = self.canvas.inset_view_region() if self.canvas is not None else None
         if region is None:
             self.status_label.setText("There is no plot to put an inset on.")
             return None
@@ -334,6 +403,8 @@ class InsetDialog(QDialog):
     def apply(self) -> bool:
         """Draw the insets on the canvas. False (with a message) if a
         region has nothing in it; the previous insets stay."""
+        if self.canvas is None:
+            return False
         try:
             self.canvas.set_all_inset_specs(self._specs)
         except ValueError as exc:
@@ -344,7 +415,7 @@ class InsetDialog(QDialog):
 
     # ---- internals ---------------------------------------------------------
     def _is_contour(self) -> bool:
-        return self.canvas.contour_view_region() is not None
+        return self.canvas is not None and self.canvas.contour_view_region() is not None
 
     def _is_unzoomed(self, xlim, ylim) -> bool:
         """Whether the view still shows the whole plot, so there is nothing
@@ -392,14 +463,21 @@ class InsetDialog(QDialog):
         return rows[int(row)]
 
     def _describe(self, i: int, spec: dict) -> str:
-        (x1, x2), (y1, y2) = spec["xlim"], spec["ylim"]
-        text = f"Inset {i + 1}: {x1:.4g} to {x2:.4g}, {y1:.3g} to {y2:.3g} ({spec['corner']})"
+        """The list's line: the inset, the plot it magnifies (on a stack)
+        and its horizontal range; the rest is in the editor below."""
+        (x1, x2), _y = spec["xlim"], spec["ylim"]
+        text = f"Inset {i + 1}: {x1:.4g} to {x2:.4g}"
         if len(getattr(self, "_rows", None) or []) > 1:
             text = f"{self._row_name(spec.get('row', 0))} – " + text
             host = spec.get("host")
             if host is not None and host != spec.get("row", 0):
                 text += f", placed in {self._row_name(host)}"
         return text
+
+    def _tooltip(self, i: int, spec: dict) -> str:
+        (x1, x2), (y1, y2) = spec["xlim"], spec["ylim"]
+        return (f"{self._describe(i, spec)}\nHorizontal {x1:.6g} to {x2:.6g}, vertical "
+                f"{y1:.6g} to {y2:.6g}; {spec.get('corner', '')}")
 
     def _fill_host_combo(self, spec: dict) -> None:
         """The plots an inset can sit in: its own first, then every other."""
@@ -425,7 +503,9 @@ class InsetDialog(QDialog):
         self.inset_list.blockSignals(True)
         self.inset_list.clear()
         for i, spec in enumerate(self._specs):
-            self.inset_list.addItem(self._describe(i, spec))
+            item = QListWidgetItem(self._describe(i, spec))
+            item.setToolTip(self._tooltip(i, spec))
+            self.inset_list.addItem(item)
         self.inset_list.blockSignals(False)
         has = bool(self._specs)
         self.editor.setEnabled(has)
@@ -538,3 +618,30 @@ class InsetDialog(QDialog):
         self.inset_list.item(row).setText(self._describe(row, spec))
         self._sync_enabled()
         self._debounce.start()
+
+
+class InsetDialog(QDialog):
+    """:class:`InsetPanel` in a window of its own, scrolling (so nothing is
+    cut off however short the screen). Attribute access is passed to the
+    panel, so ``dialog.inset_list``, ``dialog.apply()``... work as before."""
+
+    def __init__(self, canvas, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Insets")
+        self.panel = InsetPanel(canvas, self)
+        scroll = QScrollArea()
+        scroll.setWidget(self.panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(scroll)
+        self.resize(480, 640)
+
+    def __getattr__(self, name):
+        # Only reached for names QDialog does not have.
+        panel = self.__dict__.get("panel")
+        if panel is None:
+            raise AttributeError(name)
+        return getattr(panel, name)

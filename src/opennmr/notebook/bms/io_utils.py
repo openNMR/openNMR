@@ -57,6 +57,8 @@ def make_particle(x, y, z, size, quaternion=(1.0, 0.0, 0.0, 0.0), id=None):
                    ellipsoid -> (semi-axis-x, semi-axis-y, semi-axis-z)
                    hexagonal -> (hex radius, unused, height)
                    donut     -> (major radius R0, minor radius r0, unused)
+                   cuboid    -> (half side x, half side y, half side z);
+                                a cube of edge 50: (25, 25, 25)
     quaternion : orientation as (qw, qx, qy, qz), scalar-first. Default
                  (1,0,0,0) is "no rotation". Needn't be pre-normalized.
     id         : optional integer particle id; auto-numbered if omitted.
@@ -133,7 +135,10 @@ def inp_part(properties, shape):
     particles = []
     for row in data:
         v1, v2, v3 = row[4], row[5], row[6]
-        vol = (4.0 / 3.0) * np.pi * v1 * v2 * v3
+        # The far-field dipole volume. A block's own (its corners make it
+        # 6/π times the inscribed ellipsoid's); the other shapes keep the
+        # ellipsoid formula the original code used (see packing._particle_volume).
+        vol = 8.0 * v1 * v2 * v3 if equation == "cuboid" else (4.0 / 3.0) * np.pi * v1 * v2 * v3
         posc = row[1:4]
         qi, qj, qk, qr = row[7], row[8], row[9], row[10]
         q = np.array([qr, qi, qj, qk])

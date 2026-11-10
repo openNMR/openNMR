@@ -34,6 +34,8 @@ def particle_volume(p) -> float:
     (radii v1, v2)."""
     from scipy.special import beta as B
     eq = p["Equation"]
+    if eq == "cuboid":
+        return float(8.0 * p["v1"] * p["v2"] * p["v3"])
     if eq == "hexagonal":
         return float(2.0 * np.sqrt(3.0) * p["v1"] ** 2 * p["v3"])
     if eq == "donut":
@@ -96,6 +98,15 @@ def _hex_prism(p):
     return faces
 
 
+def _cuboid(p):
+    """The six faces of a block, particle frame (half sides v1, v2, v3)."""
+    a, b, c = p["v1"], p["v2"], p["v3"]
+    corners = np.array([[sx * a, sy * b, sz * c] for sx in (-1, 1) for sy in (-1, 1)
+                        for sz in (-1, 1)])
+    index = ((0, 1, 3, 2), (4, 5, 7, 6), (0, 1, 5, 4), (2, 3, 7, 6), (0, 2, 6, 4), (1, 3, 7, 5))
+    return [corners[list(f)] for f in index]
+
+
 def plot_packing_3d(particles, magnetic_susceptibility=(1e-3, 1e-3, 1e-3), *, box_size=None,
                     equation="ellipsoid", deformation="A", r=2, t=2, slope_filter=2000,
                     figure=None, fontsize=11.0, colour_by="size", cmap="viridis",
@@ -134,8 +145,9 @@ def plot_packing_3d(particles, magnetic_susceptibility=(1e-3, 1e-3, 1e-3), *, bo
         R = quat_to_rotmat(p["q"])
         pos = np.asarray(p["posc"], float)
         colour = cm(norm(val)) if colour_by != "none" else "0.6"
-        if p["Equation"] == "hexagonal":
-            faces = [f @ R + pos for f in _hex_prism(p)]          # Rᵀ f: particle -> packing
+        if p["Equation"] in ("hexagonal", "cuboid"):
+            shape_faces = _hex_prism(p) if p["Equation"] == "hexagonal" else _cuboid(p)
+            faces = [f @ R + pos for f in shape_faces]           # Rᵀ f: particle -> packing
             ax.add_collection3d(Poly3DCollection(faces, facecolor=colour, edgecolor="0.25",
                                                  linewidths=0.2, alpha=alpha))
         else:
