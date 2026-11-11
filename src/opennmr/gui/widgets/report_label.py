@@ -23,6 +23,14 @@ def _mix(a: QColor, b: QColor, t: float) -> str:
                   round(a.blue() + (b.blue() - a.blue()) * t)).name()
 
 
+def palette_colours(widget) -> tuple[str, str]:
+    """(muted, warning) colours for rich text shown in ``widget``: the
+    muted one mixed from its own palette, so light and dark themes read."""
+    pal = widget.palette()
+    text, window = pal.color(QPalette.ColorRole.WindowText), pal.color(QPalette.ColorRole.Window)
+    return _mix(text, window, 0.42), report_format.WARN
+
+
 class ReportLabel(QLabel):
     """A word-wrapped, selectable QLabel whose ``text()`` is the plain
     report and whose display is rich text (see the module notes)."""
@@ -38,9 +46,7 @@ class ReportLabel(QLabel):
 
     # -- colours from the palette, so light and dark themes both read --
     def colours(self) -> tuple[str, str]:
-        pal = self.palette()
-        text, window = pal.color(QPalette.ColorRole.WindowText), pal.color(QPalette.ColorRole.Window)
-        return _mix(text, window, 0.42), report_format.WARN
+        return palette_colours(self)
 
     def setText(self, text: str) -> None:  # noqa: N802 -- Qt's name
         self._plain = "" if text is None else str(text)

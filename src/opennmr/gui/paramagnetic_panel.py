@@ -50,7 +50,9 @@ from ..notebook.bms import sample as bms_sample
 from ..notebook.bms import views as bms_views
 from ..notebook import susceptibility as chi_units
 from .combined_panels import _nuclides, _spin_box
+from . import report_format
 from .widgets.collapsible_section import CollapsibleSection
+from .widgets.report_label import ReportLabel
 
 _CALC_FILTER = "Calculation output (*.out *.outp *.log *.magres OUTCAR*);;All files (*)"
 
@@ -101,6 +103,13 @@ def _label():
     lab.setWordWrap(True)
     lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     return lab
+
+
+def _result_label():
+    """A result read-out: plain text kept (``text()``), shown laid out
+    like Fit's read-outs (explicit user request, 2026-11-11: the BMS
+    information should be "formatted nicely and easily readable")."""
+    return ReportLabel("")
 
 
 class ParamagneticToolsPanel(QWidget):
@@ -308,7 +317,7 @@ class ParamagneticToolsPanel(QWidget):
         row.addWidget(self.pm_T_python_button)
         row.addStretch(1)
         v.addLayout(row)
-        self.pm_T_result_label = _label()
+        self.pm_T_result_label = _result_label()
         v.addWidget(self.pm_T_result_label)
         self._sync_T_rows()
         return w
@@ -1021,7 +1030,7 @@ class ParamagneticToolsPanel(QWidget):
         self.pm_bms_slice_slider.valueChanged.connect(lambda _v: self._on_slice_changed())
         sr.addWidget(self.pm_bms_slice_slider, 1)
         v.addWidget(self._bms_slice_row)
-        self.pm_bms_result_label = _label()
+        self.pm_bms_result_label = _result_label()
         v.addWidget(self.pm_bms_result_label)
         for combo in (self.pm_bms_source_combo, self.pm_bms_mode_combo,
                       self.pm_bms_boundary_combo, self.pm_bms_equation_combo,
@@ -1434,10 +1443,25 @@ class ParamagneticToolsPanel(QWidget):
         self.bms_particles = particles
         self.bms_packing_stats = stats
         self._bms_packed_key = self._packing_key()
-        self.pm_bms_result_label.setText(self._packing_text())
+        self._show_packing_report()
         if not quiet and self.pm_bms_view_combo.currentData() == "packing":
             self.show_bms_view()
         return True
+
+    def _show_packing_report(self) -> None:
+        st = self.bms_packing_stats or {}
+        muted, warn = self.pm_bms_result_label.colours()
+        shrunk = 0
+        if "n_at_full_size" in st and st["n_at_full_size"] < st.get("n_placed", 0):
+            shrunk = st["n_placed"] - st["n_at_full_size"]
+        html = report_format.bms_packing_html(
+            st.get("n_placed", 0), st.get("n_requested", 0),
+            f"{self.pm_bms_box_spin.value():.4g} {self.bms_length_unit()}",
+            st.get("achieved_volume_fraction", 0),
+            asked=(self.pm_bms_fraction_spin.value()
+                   if self.pm_bms_region_mode_combo.currentData() == "fraction" else None),
+            shrunk=shrunk, mean_size=st.get("mean_achieved_size_fraction", 1), muted=muted)
+        self.pm_bms_result_label.setReport(self._packing_text(), html)
 
     def _packing_text(self) -> str:
         st = self.bms_packing_stats or {}
@@ -1557,7 +1581,7 @@ class ParamagneticToolsPanel(QWidget):
         self._bms_field_new = new
         self.bms_nmr_spectrum = self._bms_nmr_spectrum(spectrum, fkw, skw)
         self.pm_bms_keep_button.setEnabled(self._keep_spectrum is not None)
-        self.pm_bms_result_label.setText(self.bms_summary())
+        self._show_bms_report()
         self._sync_slice_controls()
         self.pm_bms_view_combo.setCurrentIndex(self.pm_bms_view_combo.findData("spectrum"))
         if self._plot_spectrum is not None:
@@ -1590,49 +1614,31 @@ class ParamagneticToolsPanel(QWidget):
         return NMRSpectrum(data=np.asarray(spectrum["real_spectrum"], dtype=float),
                            axes=[axis], metadata=metadata)
 
-    def bms_summary(self) -> str:
+    def bms_summary_parts(self) -> dict | None:
+        """What the last BMS run found, as the parts both the plain
+        summary and its laid-out form are made from (None before a run)."""
         if self.bms_field is None or self.bms_spectrum is None:
-            return ""
+            return None
         f, sp = self.bms_field, self.bms_spectrum
         st, par = sp["stats"], sp.get("parameters", {})
         tm = f["timings"]
-        lines = [f"{f['n_particles']} particles, volume fraction {f['volume_fraction']:.3f} "
-                 f"(on the grid), {'×'.join(str(n) for n in f['parameters']['gridpoints'])} grid, "
-                 f"{f['parameters']['boundary']}."]
+        chi = ""
         unit = self.pm_bms_chi_unit_combo.currentData()
         if unit != "si_volume":
             try:
-                lines.append(chi_units.describe(self._triplet(self.pm_bms_chi_edit.text(), "χ"),
-                                                unit, **self.chi_conversion()) + ".")
+                chi = chi_units.describe(self._triplet(self.pm_bms_chi_edit.text(), "χ"),
+                                         unit, **self.chi_conversion())
             except ValueError:
-                pass
+                chi = ""
         sample = par.get("sample")
-        if sample:
-            lines.append(f"Sample: {bms_sample.sample_from_dict(sample).describe()}, χ_v = "
-                         f"{st.get('chi_v', 0):.3g}.")
-        if par.get("local"):
-            lo = par["local"]
-            bits = [f"δ_iso {lo['contact_ppm']:g} ppm"]
-            if lo["aniso_ppm"]:
-                bits.append(f"δ {lo['aniso_ppm']:g} ppm, η {lo['eta']:g}")
-            if lo["C_Q_MHz"]:
-                bits.append(f"C_Q {lo['C_Q_MHz']:g} MHz, η_Q {lo['eta_Q']:g} "
-                            f"({par.get('quad_order', 'second')} order, "
-                            f"{'all transitions' if par.get('transitions') == 'all' else 'CT'})")
-            lines.append("Local: " + "; ".join(bits) + ".")
-        lines.append(f"Shift: mean {st['mean_ppm']:.4g} ppm, standard deviation "
-                     f"{st['std_ppm']:.4g} ppm (Gaussian FWHM equivalent "
-                     f"{st['fwhm_gauss_ppm']:.4g} ppm)"
-                     + (" (isotropic shifts)" if par.get("mode", "").startswith("mas") else "")
-                     + ".")
-        timing = (f"Time: field {tm['total']:.2f} s" if self._bms_field_new
-                  else "Time: field kept from the last run")
+        timing = [f"field {tm['total']:.2f} s" if self._bms_field_new
+                  else "field kept from the last run"]
         if sp.get("route") == "sampled":
-            timing += (f", spectrum {st['seconds']:.2f} s ({st['n_samples']:,} samples, Monte "
-                       f"Carlo noise {100 * st['mc_noise'] / 2:.2g} % of the peak).")
+            timing.append(f"spectrum {st['seconds']:.2f} s")
+            timing.append(f"{st['n_samples']:,} samples")
+            timing.append(f"Monte Carlo noise {100 * st['mc_noise'] / 2:.2g} % of the peak")
         else:
-            timing += ", spectrum on the grid (exact)."
-        lines.append(timing)
+            timing.append("spectrum on the grid (exact)")
         warn = []
         if st.get("sidebands_beyond_max_order", 0) > 1e-3:
             warn.append(f"{100 * st['sidebands_beyond_max_order']:.1f} % of the intensity lies in "
@@ -1651,8 +1657,67 @@ class ParamagneticToolsPanel(QWidget):
                 self.pm_bms_source_combo.currentData() == "pack":
             warn.append("the packer keeps particles inside the box walls, so the layer at the box "
                         "faces is a little less dense than the rest")
-        lines += [f"• {w_}." for w_ in warn]
+        return {
+            "n_particles": f["n_particles"], "volume_fraction": f["volume_fraction"],
+            "grid": "×".join(str(n) for n in f["parameters"]["gridpoints"]),
+            "boundary": f["parameters"]["boundary"],
+            "chi": chi,
+            "sample": bms_sample.sample_from_dict(sample).describe() if sample else "",
+            "chi_v": st.get("chi_v", 0) if sample else None,
+            "local": par.get("local") or None,
+            "quad_order": par.get("quad_order", "second"),
+            "transitions": par.get("transitions", ""),
+            "mean_ppm": st["mean_ppm"], "std_ppm": st["std_ppm"],
+            "fwhm_ppm": st["fwhm_gauss_ppm"],
+            "isotropic": par.get("mode", "").startswith("mas"),
+            "routed": sp.get("route"),
+            "timing": timing, "warnings": warn,
+        }
+
+    def bms_summary(self) -> str:
+        """The plain summary: logged, copied, and what ``text()`` of the
+        read-out returns."""
+        parts = self.bms_summary_parts()
+        if parts is None:
+            return ""
+        lines = [f"{parts['n_particles']} particles, volume fraction "
+                 f"{parts['volume_fraction']:.3f} (on the grid), {parts['grid']} grid, "
+                 f"{parts['boundary']}."]
+        if parts["chi"]:
+            lines.append(parts["chi"] + ".")
+        if parts["sample"]:
+            lines.append(f"Sample: {parts['sample']}, χ_v = {parts['chi_v']:.3g}.")
+        lo = parts["local"]
+        if lo:
+            bits = [f"δ_iso {lo['contact_ppm']:g} ppm"]
+            if lo["aniso_ppm"]:
+                bits.append(f"δ {lo['aniso_ppm']:g} ppm, η {lo['eta']:g}")
+            if lo["C_Q_MHz"]:
+                bits.append(f"C_Q {lo['C_Q_MHz']:g} MHz, η_Q {lo['eta_Q']:g} "
+                            f"({parts['quad_order'] or 'second'} order, "
+                            f"{'all transitions' if parts['transitions'] == 'all' else 'CT'})")
+            lines.append("Local: " + "; ".join(bits) + ".")
+        lines.append(f"Shift: mean {parts['mean_ppm']:.4g} ppm, standard deviation "
+                     f"{parts['std_ppm']:.4g} ppm (Gaussian FWHM equivalent "
+                     f"{parts['fwhm_ppm']:.4g} ppm)"
+                     + (" (isotropic shifts)" if parts["isotropic"] else "") + ".")
+        timing = parts["timing"]
+        if parts["routed"] == "sampled":
+            text = (f"Time: {timing[0]}, {timing[1]} ({timing[2]}, {timing[3]}).")
+        else:
+            text = f"Time: {timing[0]}, {timing[1]}."
+        lines.append(text)
+        lines += [f"• {w_}." for w_ in parts["warnings"]]
         return "\n".join(lines)
+
+    def _show_bms_report(self) -> None:
+        parts = self.bms_summary_parts()
+        if parts is None:
+            self.pm_bms_result_label.setText("")
+            return
+        muted, warn = self.pm_bms_result_label.colours()
+        self.pm_bms_result_label.setReport(
+            self.bms_summary(), report_format.bms_report_html(parts, muted=muted, warn=warn))
 
     def _sync_slice_controls(self) -> None:
         if self.bms_field is None:
@@ -1932,7 +1997,7 @@ class ParamagneticToolsPanel(QWidget):
         self.pm_bp_result_table = _table(["Shell", "Species", "Mean P (ppm)", "SD (ppm)", "n",
                                           "Min", "Max"], 0, 180)
         v.addWidget(self.pm_bp_result_table)
-        self.pm_bp_result_label = _label()
+        self.pm_bp_result_label = _result_label()
         v.addWidget(self.pm_bp_result_label)
         self.pm_bp_mode_combo.currentIndexChanged.connect(lambda _i: self._sync_bp_rows())
         self.pm_bp_route_combo.currentIndexChanged.connect(lambda _i: self._sync_bp_rows())

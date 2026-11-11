@@ -49,13 +49,29 @@ cross a folder heading should not quietly load everything under it.
 A plain double-click still opens just the experiment under the cursor,
 because its first click has already reduced the selection to that one.
 Explicit user request.
+
+**The list can be sorted** (right-click ▸ Sort by; explicit user request,
+2026-11-11): by name, A to Z (the default, and the order the scan
+already produces) or Z to A, or by date, newest or oldest first. Names
+sort *naturally* -- "2" before "10", as Bruker's numbered experiment
+folders expect. An experiment's date is when its data were written:
+the mtime of its ``fid``/``ser`` (or ``acqus``) for a Bruker-style
+folder, of the file itself otherwise -- not of the folder, whose mtime
+moves whenever anything is reprocessed into it. A folder sorts by the
+newest experiment in it for "newest first" and by the oldest for
+"oldest first", so the folder holding the experiment you are after is
+where you would look for it. Sorting reorders each level in place:
+folders and experiments stay where they are in the hierarchy, and what
+was expanded or selected stays so. Reading the dates is a stat per
+experiment, which never downloads a cloud placeholder.
 """
 
 from __future__ import annotations
 
 import os
+import re
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QLabel, QPushButton, QTreeWidget,
     QTreeWidgetItem, QTreeWidgetItemIterator, QVBoxLayout, QWidget,
@@ -70,6 +86,43 @@ _VENDOR_ROLE = Qt.ItemDataRole.UserRole + 1
 #: Set on a folder once its children have been described, so expanding
 #: it a second time doesn't re-peek.
 _DESCRIBED_ROLE = Qt.ItemDataRole.UserRole + 2
+#: An experiment's date (seconds since the epoch), read once when first needed.
+_DATE_ROLE = Qt.ItemDataRole.UserRole + 3
+
+#: The orders the tree can be sorted in: ``{key: menu text}``.
+SORT_MODES = {
+    "name_asc": "Name (A to Z)",
+    "name_desc": "Name (Z to A)",
+    "date_new": "Date (newest first)",
+    "date_old": "Date (oldest first)",
+}
+DEFAULT_SORT = "name_asc"
+
+_NATURAL_SPLIT = re.compile(r"(\d+)")
+#: Files whose mtime is an experiment's acquisition date, best first.
+_DATE_FILES = ("fid", "ser", "acqus", "acqu", "data.1d", "data.2d", "acqu.par", "procpar")
+
+
+def natural_key(name: str) -> list:
+    """"2" before "10": digit runs compare as numbers, the rest
+    case-insensitively. Each chunk is tagged so a number never meets a
+    string in a comparison."""
+    return [(0, int(chunk), "") if chunk.isdigit() else (1, 0, chunk.lower())
+            for chunk in _NATURAL_SPLIT.split(str(name)) if chunk != ""]
+
+
+def experiment_date(path: str) -> float:
+    """When an experiment's data were written (see the module notes);
+    0.0 if it cannot be read, so an unreadable one sorts as oldest."""
+    try:
+        if os.path.isdir(path):
+            for name in _DATE_FILES:
+                candidate = os.path.join(path, name)
+                if os.path.isfile(candidate):
+                    return os.stat(candidate).st_mtime
+        return os.stat(path).st_mtime
+    except OSError:
+        return 0.0
 
 
 class DataBrowser(QWidget):
@@ -82,10 +135,14 @@ class DataBrowser(QWidget):
     #: ``(path, vendor)``: right-click ▸ Proc Numbers… on a Bruker
     #: experiment (explicit user request, 2026-10-14).
     procnosRequested = Signal(str, str)
+    #: The sort order chosen from the right-click menu (a SORT_MODES key),
+    #: so the window can remember it.
+    sortModeChanged = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._root: str | None = None
+        self._sort_mode = DEFAULT_SORT
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -128,8 +185,8 @@ class DataBrowser(QWidget):
         self._tree.setToolTip(
             "Double-click an experiment to load it. Ctrl-click (Cmd-click on "
             "macOS) or Shift-click to select several, then Open Selected or "
-            "press Return. Folders group experiments; only things this app "
-            "can actually open are listed."
+            "press Return. Right-click to sort by name or date. Folders group "
+            "experiments; only things this app can actually open are listed."
         )
         self._tree.itemSelectionChanged.connect(self._update_open_selected_button)
         # `itemActivated` only -- **not** also `itemDoubleClicked`.
@@ -217,9 +274,102 @@ class DataBrowser(QWidget):
             else:
                 parent.addChild(leaf)
 
+        # The scan already lists by name, A to Z; any other order is
+        # applied here, before anything is described or shown.
+        if self._sort_mode != DEFAULT_SORT:
+            self._sort_tree()
+
         # Describe whatever is visible without expanding anything --
         # top-level leaves are on screen immediately.
         self._describe_children(self._tree.invisibleRootItem())
+
+    # -- sorting -------------------------------------------------------
+
+    def sort_mode(self) -> str:
+        return self._sort_mode
+
+    def set_sort_mode(self, mode: str, emit: bool = False) -> None:
+        """Sort the tree by ``mode`` (a :data:`SORT_MODES` key; anything
+        else means the default). ``emit``: say so through
+        :attr:`sortModeChanged` (the menu does; restoring a saved choice
+        does not)."""
+        mode = mode if mode in SORT_MODES else DEFAULT_SORT
+        self._sort_mode = mode
+        self._sort_tree()
+        if emit:
+            self.sortModeChanged.emit(mode)
+
+    def _item_date(self, item: QTreeWidgetItem, newest: bool) -> float:
+        path = item.data(0, _PATH_ROLE)
+        if path:
+            date = item.data(0, _DATE_ROLE)
+            if date is None:
+                date = experiment_date(path)
+                item.setData(0, _DATE_ROLE, date)
+            return float(date)
+        dates = [self._item_date(item.child(i), newest) for i in range(item.childCount())]
+        if not dates:
+            return 0.0
+        return max(dates) if newest else min(dates)
+
+    def _item_name(self, item: QTreeWidgetItem) -> str:
+        path = item.data(0, _PATH_ROLE)
+        # The leaf's text gains a "· 1H, 1D, ..." summary once described;
+        # its name is the path's own.
+        return os.path.basename(path) if path else item.text(0)
+
+    def _sort_tree(self) -> None:
+        mode = self._sort_mode
+        tree = self._tree
+        current = tree.currentItem()
+        selected = list(tree.selectedItems())
+        expanded = []
+        iterator = QTreeWidgetItemIterator(tree)
+        while iterator.value() is not None:
+            if iterator.value().isExpanded():
+                expanded.append(iterator.value())
+            iterator += 1
+
+        if mode.startswith("date"):
+            newest = mode == "date_new"
+
+            def key(item):
+                # Ties (equal dates, unreadable ones) fall back to the name.
+                return (self._item_date(item, newest), natural_key(self._item_name(item)))
+            reverse = newest
+        else:
+            def key(item):
+                return natural_key(self._item_name(item))
+            reverse = mode == "name_desc"
+
+        def sort_children(parent: QTreeWidgetItem) -> None:
+            children = parent.takeChildren()
+            children.sort(key=key, reverse=reverse)
+            parent.addChildren(children)
+            for child in children:
+                if child.childCount():
+                    sort_children(child)
+
+        tree.setUpdatesEnabled(False)
+        try:
+            sort_children(tree.invisibleRootItem())
+            for item in expanded:
+                item.setExpanded(True)
+            for item in selected:
+                item.setSelected(True)
+            if current is not None:
+                tree.setCurrentItem(current, 0,
+                                    QItemSelectionModel.SelectionFlag.NoUpdate)
+                tree.scrollToItem(current)
+        finally:
+            tree.setUpdatesEnabled(True)
+        self._update_open_selected_button()
+
+    def ordered_names(self, parent: QTreeWidgetItem | None = None) -> list[str]:
+        """The names at one level of the tree, top to bottom (the top
+        level by default) -- what a sort is checked against."""
+        parent = parent or self._tree.invisibleRootItem()
+        return [self._item_name(parent.child(i)) for i in range(parent.childCount())]
 
     def _describe_children(self, parent: QTreeWidgetItem) -> None:
         """Fill in "1H, 2D, 1024x4096" for a folder's own leaves.
@@ -322,12 +472,27 @@ class DataBrowser(QWidget):
         return actions
 
     def _on_context_menu(self, pos) -> None:
-        actions = self.context_actions(self._tree.itemAt(pos))
-        if not actions:
-            return
+        """Right-click: the item's own actions (Open, Proc Numbers…),
+        then Sort by -- offered anywhere in the tree, on folders and
+        empty space too."""
+        from PySide6.QtGui import QActionGroup
         from PySide6.QtWidgets import QMenu
+        actions = self.context_actions(self._tree.itemAt(pos))
         menu = QMenu(self)
         chosen = {menu.addAction(text): callback for text, callback in actions}
+        if self._tree.topLevelItemCount():
+            if actions:
+                menu.addSeparator()
+            sort_menu = menu.addMenu("Sort by")
+            group = QActionGroup(sort_menu)
+            for mode, text in SORT_MODES.items():
+                action = sort_menu.addAction(text)
+                action.setCheckable(True)
+                action.setChecked(mode == self._sort_mode)
+                group.addAction(action)
+                chosen[action] = (lambda m=mode: self.set_sort_mode(m, emit=True))
+        if not chosen:
+            return
         picked = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if picked in chosen:
             chosen[picked]()

@@ -318,14 +318,17 @@ def test_save_and_open_state_with_experiments_slices_and_kept_fits(window, tmp_p
     np.testing.assert_allclose(later.session.spectra[0].data, window.session.spectra[0].data)
 
 
-def test_file_open_on_a_state_folder_opens_the_state(window, tmp_path, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
-    shown = []
-    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[2]))
+def test_file_open_on_a_state_folder_opens_the_state(window, tmp_path):
+    # Said in a scrolling message since 2026-11-11 (a QMessageBox ran off
+    # the screen for a state of many spectra): its plain text is checked.
     folder = str(tmp_path / "st.opennmr")
     io_state.save_state(folder, "st", [{"label": "p", "kind": "derived", "spectrum": _derived()}])
     window._open_directory(folder)
-    assert len(window.session) == 1 and "Opened 1 spectra" in shown[0]
+    dialog = window._state_opened_dialog
+    try:
+        assert len(window.session) == 1 and "Opened 1 spectra" in dialog.plain_text()
+    finally:
+        dialog.close()
     assert window.session.spectra[0].metadata.raw["phase0"] == 12.5
 
 

@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWidgets import QColorDialog, QLayout
 from . import report_format
-from .widgets.report_label import ReportLabel
+from .widgets.report_label import ReportLabel, palette_colours
 from .widgets.notes_editor import ExperimentNotesEditor
 from .widgets.advice_box import AdviceBox
 from .widgets.side_drawer import SideDrawer
@@ -131,6 +131,7 @@ from .widgets.canvas import MplCanvas
 from .widgets.drag_control import DragHandle
 from .widgets.relative_spinbox import RelativeDoubleSpinBox
 from .widgets.data_browser import DataBrowser
+from .widgets.message_dialog import show_message
 from .widgets.wrapping_tabs import WrappingTabWidget
 from .widgets.collapsible_section import CollapsibleSection
 from .widgets.sim_sites import SimSiteList
@@ -2634,6 +2635,12 @@ class MainWindow(QMainWindow):
         self.data_browser.spectrumActivated.connect(self._on_browser_spectrum_activated)
         self.data_browser.procnosRequested.connect(
             lambda path, vendor: self._choose_procnos(path, vendor))
+        # Right-click ▸ Sort by (explicit user request, 2026-11-11):
+        # remembered in ui_settings.json. Restored here or in
+        # _build_settings_panel, whichever runs second.
+        self.data_browser.sortModeChanged.connect(self._on_browser_sort_changed)
+        if hasattr(self, "_ui_settings"):
+            self.data_browser.set_sort_mode(self._ui_settings.get("browser_sort", ""))
         browser_layout.addWidget(self.data_browser)
         layout.addWidget(browser_box, 1)
 
@@ -7275,6 +7282,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Removed the saved copies ({freed / 1024 ** 3:.2f} GB).",
                                      6000)
 
+    def _on_browser_sort_changed(self, mode: str) -> None:
+        """Remember the Browse panel's sort order for next time."""
+        if not hasattr(self, "_ui_settings"):
+            return
+        self._ui_settings["browser_sort"] = mode
+        self._save_ui_settings()
+
     def _load_ui_settings(self) -> dict:
         try:
             with open(self._UI_SETTINGS_PATH, encoding="utf-8") as handle:
@@ -7525,6 +7539,8 @@ class MainWindow(QMainWindow):
         data = QWidget()
         data_form = QFormLayout(data)
         data_directory.set_default_data_directory(self._ui_settings.get("data_folder") or "")
+        if hasattr(self, "data_browser"):
+            self.data_browser.set_sort_mode(self._ui_settings.get("browser_sort", ""))
         self.data_folder_edit = QLineEdit(data_directory.stored_default_data_directory())
         self.data_folder_edit.setPlaceholderText("None – dialogs start where they always did")
         self.data_folder_edit.setToolTip(
@@ -12517,12 +12533,19 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Couldn't open the state", str(exc))
             return
         QApplication.restoreOverrideCursor()
-        text = (f"Opened {len(opened)} spectra from “{info['name']}” (saved "
-                f"{str(info.get('created', '')).replace('T', ' ')}).")
+        saved = str(info.get("created", "")).replace("T", " ")
+        text = f"Opened {len(opened)} spectra from “{info['name']}” (saved {saved})."
         if info.get("notes"):
             text += f"\n\nNotes: {info['notes']}"
         text += "\n\n" + "\n".join("• " + m for m in messages)
-        QMessageBox.information(self, "openNMR state opened", text)
+        # A scrolling message, grouped by outcome (explicit user request,
+        # 2026-11-11): a QMessageBox grows with its text, so a state of
+        # 41 spectra ran off the bottom of the screen, OK button and all.
+        muted, warn = palette_colours(self)
+        html = report_format.state_opened_html(
+            info["name"], saved, len(opened), messages, notes=info.get("notes") or "",
+            muted=muted, warn=warn)
+        self._state_opened_dialog = show_message(self, "openNMR state opened", html, text)
 
     def _on_save_progress_clicked(self) -> None:
         index = self._selected_index()
@@ -22785,10 +22808,10 @@ class MainWindow(QMainWindow):
 
         # The DOSY summary, with the DOSY controls -- same move, same
         # reason as score_results_label.
+        # Laid out like the curve fit's read-out (explicit user request,
+        # 2026-11-11), so no longer in the fixed-width font.
         self.dosy_results_label = ReportLabel("")
         self.dosy_results_label.setWordWrap(True)
-        self.dosy_results_label.setFont(QFontDatabase.systemFont(
-            QFontDatabase.SystemFont.FixedFont))
         self.dosy_results_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
 
@@ -28050,7 +28073,10 @@ class MainWindow(QMainWindow):
         )
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
-        self.dosy_results_label.setText(self._format_dosy_summary(dosy))
+        muted, warn = self.dosy_results_label.colours()
+        self.dosy_results_label.setReport(
+            self._format_dosy_summary(dosy),
+            report_format.dosy_report_html(dosy, muted=muted, warn=warn))
         self._claim_fit_view(spectrum, "dosy")
 
     @staticmethod
@@ -28217,9 +28243,11 @@ class MainWindow(QMainWindow):
         )
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
-        self.dosy_results_label.setText(
+        muted, warn = self.dosy_results_label.colours()
+        self.dosy_results_label.setReport(
             "\n\n".join(f"{label}:\n{self._format_dosy_summary(dosy)}"
-                        for label, dosy in zip(labels, maps)))
+                        for label, dosy in zip(labels, maps)),
+            report_format.dosy_overlay_html(list(zip(labels, maps)), muted=muted, warn=warn))
 
     def _on_dosy_display_changed(self, *_args) -> None:
         """Redraw the DOSY at the panel's own level/D-axis settings.
@@ -30548,6 +30576,7 @@ class MainWindow(QMainWindow):
             "curve_fit_summary_text": self.curve_fit_summary_label.text(),
             "curve_fit_summary_html": self.curve_fit_summary_label.html(),
             "dosy_results_text": self.dosy_results_label.text(),
+            "dosy_results_html": self.dosy_results_label.html(),
             "gradient_calibration_text": self.gradient_calibration_label.text(),
             # The rest of the Curve Fitting panel. Everything in it is
             # siloed per spectrum, so anything added there has to be
@@ -30756,7 +30785,11 @@ class MainWindow(QMainWindow):
                     state.get("curve_fit_summary_text", ""), summary_html)
             else:
                 self.curve_fit_summary_label.setText(state.get("curve_fit_summary_text", ""))
-            self.dosy_results_label.setText(state.get("dosy_results_text", ""))
+            dosy_html = state.get("dosy_results_html")
+            if dosy_html and report_format.is_rich(dosy_html):
+                self.dosy_results_label.setReport(state.get("dosy_results_text", ""), dosy_html)
+            else:
+                self.dosy_results_label.setText(state.get("dosy_results_text", ""))
             self.gradient_calibration_label.setText(state.get("gradient_calibration_text", ""))
             # After the model combo above, since these are the shape of
             # the model the guesses belong to -- restored the other way

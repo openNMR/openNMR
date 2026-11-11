@@ -21,6 +21,12 @@ is unchanged; this module only decides how it is *shown*:
 * :func:`combined_simulation_html`, :func:`combined_fit_html`,
   :func:`combined_preview_html` -- Simulate's and Fit's CSA, Quad &
   J-coupling read-outs, from their structured results.
+* :func:`dosy_report_html`, :func:`bms_report_html`,
+  :func:`bms_packing_html` -- Dynamics' DOSY map and the paramagnetic
+  tools' BMS simulation, laid out like the curve fit (explicit user
+  request, 2026-11-11).
+* :func:`state_opened_html` -- what opening an openNMR state did, grouped
+  by outcome (shown in a scrolling message, 2026-11-11).
 
 Pure functions of strings and dicts (no Qt), so they are testable and
 usable from a notebook (``IPython.display.HTML(report_html(text))``).
@@ -699,4 +705,242 @@ def score_report_html(result: dict, muted: str = MUTED, warn: str = WARN,
         out.append(_warning(str(warning), warn))
     if footnote:
         out.append(f"{_P}{_muted(_e(footnote), muted)}</p>")
+    return "".join(out)
+
+
+# ---- Dynamics: DOSY ------------------------------------------------------------------------
+#
+# Explicit user request, 2026-11-11: the DOSY summary was still the
+# monospaced block; laid out here like the curve fit's read-out. The plain
+# text (MainWindow._format_dosy_summary) is still what is logged, copied
+# and saved.
+
+#: Peaks a DOSY read-out lists before summarising the rest (as the plain text).
+DOSY_MAX_PEAKS = 12
+
+
+def dosy_report_html(dosy: dict, title: str = "DOSY map", muted: str = MUTED,
+                     warn: str = WARN) -> str:
+    """A DOSY (inverse Laplace transform) result: the regularisation
+    weight and how much was inverted as the subtitle, the diffusion
+    coefficient of each resolved peak (largest first) as a table, then
+    what an ILT's widths do and do not mean. The same content as the
+    plain summary."""
+    from opennmr.processing import relaxation as rx
+
+    per_column = dosy.get("per_column") or {}
+    n_points = len(dosy.get("ppm") if dosy.get("ppm") is not None else [])
+    sub = ["inverse Laplace transform",
+           f"regularisation α = {float(dosy.get('alpha', float('nan'))):.3g}",
+           f"{len(per_column)} of {n_points} points inverted "
+           f"(≥ {float(dosy.get('threshold', 0)):.0%} of peak)"]
+    out = [_title_html(title, sub, muted)]
+
+    projection = dosy.get("projection")
+
+    def weight(item):
+        try:
+            return -abs(float(projection[item[0]]))
+        except (TypeError, IndexError, KeyError, ValueError):
+            return 0.0
+    columns = sorted(per_column.items(), key=weight)
+    if columns:
+        out.append(_section("Diffusion coefficients"))
+        head = "".join(
+            f'<th align="{align}" style="color:{muted}; font-weight:600; '
+            f'padding-right:14px;">{h}</th>'
+            for h, align in (("<i>δ</i> (ppm)", "right"), ("<i>D</i>", "left"),
+                             ("spread (decades)", "right")))
+        rows = []
+        for _column, info in columns[:DOSY_MAX_PEAKS]:
+            rows.append(
+                f'<tr><td align="right" style="padding-right:14px;">{float(info["ppm"]):.3f}</td>'
+                f'<td style="padding-right:14px; font-weight:600;">'
+                f"{_value_html(rx.format_diffusion_value(info['D_mode']))}</td>"
+                f'<td align="right" style="padding-right:14px;">'
+                f"{float(info['log10_width']):.2f}</td></tr>")
+        out.append(f'<table cellspacing="0" cellpadding="1" style="margin-bottom:4px;">'
+                   f"<tr>{head}</tr>{''.join(rows)}</table>")
+        out.append(f"{_P}" + _muted("Each <i>D</i> is the mode of its column's distribution, "
+                                    "largest peaks first.", muted) + "</p>")
+        if len(columns) > DOSY_MAX_PEAKS:
+            out.append(f"{_P}" + _muted(_e(f"… and {len(columns) - DOSY_MAX_PEAKS} more."),
+                                        muted) + "</p>")
+    else:
+        out.append(f"{_P}{_muted('No point was strong enough to invert.', muted)}</p>")
+    out.append(f'{_P}<span style="font-weight:600;">Peak positions are the result; '
+               f"peak widths are set by <i>α</i>, not by the sample.</span> "
+               + _muted("Where a discrete fit applies, Fit Curve gives a <i>D</i> with a real "
+                        "uncertainty, which an ILT does not.", muted) + "</p>")
+    return "".join(out)
+
+
+def dosy_overlay_html(labelled, muted: str = MUTED, warn: str = WARN) -> str:
+    """Several DOSY maps' read-outs, one under another: ``[(label, dosy)]``."""
+    return "<hr>".join(dosy_report_html(dosy, title=str(label), muted=muted, warn=warn)
+                       for label, dosy in labelled)
+
+
+# ---- Paramagnetic tools: BMS simulation ----------------------------------------------------
+
+def bms_packing_html(n_placed: int, n_requested: int, region: str, volume_fraction: float,
+                     asked: float | None = None, shrunk: int = 0, mean_size: float = 1.0,
+                     muted: str = MUTED) -> str:
+    """The particle packing's read-out (before a field is computed)."""
+    metrics = [("particles placed", _e(f"{n_placed} of {n_requested}")),
+               ("region", _e(region)),
+               ("volume fraction", _e(f"{volume_fraction:.3f}")
+                + (_muted(_e(f" (asked {asked:.2f})"), muted) if asked is not None else ""))]
+    out = [_title_html("Packing", [], muted), _metrics_html(metrics, muted)]
+    if shrunk:
+        out.append(f"{_P}" + _muted(_e(f"{shrunk} particles shrunk to fit (mean size "
+                                       f"{mean_size:.2f} of nominal)."), muted) + "</p>")
+    return "".join(out)
+
+
+def _local_items(local: dict, quad_order: str = "second", transitions: str = "",
+                 muted: str = MUTED) -> list[str]:
+    """The local (contact, CSA, quadrupolar) interactions, symbols italic."""
+    contact = float(local.get("contact_ppm", 0) or 0)
+    items = [f"<i>δ</i><sub>iso</sub> {contact:g} ppm"]
+    if local.get("aniso_ppm"):
+        items.append(f"<i>δ</i> {float(local['aniso_ppm']):g} ppm, "
+                     f"<i>η</i> {float(local.get('eta', 0)):g}")
+    if local.get("C_Q_MHz"):
+        which = "all transitions" if transitions == "all" else "central transition"
+        items.append(f"<i>C</i><sub>Q</sub> {float(local['C_Q_MHz']):g} MHz, "
+                     f"<i>η</i><sub>Q</sub> {float(local.get('eta_Q', 0)):g} "
+                     + _muted(_e(f"({quad_order or 'second'} order, {which})"), muted))
+    return items
+
+
+def bms_report_html(summary: dict, muted: str = MUTED, warn: str = WARN) -> str:
+    """A BMS shift simulation's read-out, from the parts
+    ``ParamagneticToolsPanel.bms_summary_parts`` gathers:
+
+    ``n_particles``, ``volume_fraction``, ``grid`` ("128×128×128"),
+    ``boundary``; ``chi`` (the susceptibility as entered, converted -- or
+    ""), ``sample`` (the sample's description -- or "") and ``chi_v``;
+    ``local`` (a dict, or None), ``quad_order``, ``transitions``;
+    ``mean_ppm``, ``std_ppm``, ``fwhm_ppm``, ``isotropic``; ``timing``
+    (short items) and ``warnings`` (sentences).
+    """
+    sub = [f"{summary['n_particles']} particles",
+           f"volume fraction {float(summary['volume_fraction']):.3f} (on the grid)",
+           f"{summary['grid']} grid", str(summary.get("boundary", ""))]
+    out = [_title_html("BMS shift simulation", sub, muted)]
+
+    out.append(_section("Shift distribution" + (" (isotropic shifts)"
+                                                 if summary.get("isotropic") else "")))
+    out.append(_metrics_html([
+        ("mean", _e(f"{float(summary['mean_ppm']):.4g} ppm")),
+        ("standard deviation", _e(f"{float(summary['std_ppm']):.4g} ppm")),
+        ("Gaussian FWHM equivalent", _e(f"{float(summary['fwhm_ppm']):.4g} ppm")),
+    ], muted))
+
+    chi, sample = summary.get("chi") or "", summary.get("sample") or ""
+    if chi or sample:
+        out.append(_section("Susceptibility"))
+        if chi:
+            out.append(f"{_P}{_e(chi)}</p>")
+        if sample:
+            chi_v = summary.get("chi_v")
+            tail = (f"<br>{_muted('<i>χ</i><sub>v</sub> = ' + _e(f'{float(chi_v):.3g}'), muted)}"
+                    if _finite(chi_v) else "")
+            out.append(f"{_P}<b>Sample:</b> {_e(sample)}{tail}</p>")
+
+    local = summary.get("local")
+    if local:
+        out.append(_section("Local interactions"))
+        items = _local_items(local, summary.get("quad_order", "second"),
+                             summary.get("transitions", ""), muted)
+        out.append(f"{_P}" + "&nbsp;&nbsp;·&nbsp; ".join(items) + "</p>")
+
+    timing = [t for t in summary.get("timing") or [] if t]
+    if timing:
+        out.append(f'<p style="margin-top:4px; margin-bottom:6px;">'
+                   f"{_items(timing, muted)}</p>")
+    for warning in summary.get("warnings") or []:
+        text = str(warning).strip()
+        out.append(_warning(text[:1].upper() + text[1:] + ("" if text.endswith(".") else "."),
+                            warn))
+    return "".join(out)
+
+
+# ---- Opening an openNMR state --------------------------------------------------------------
+
+_REOPENED = re.compile(r"^reopened from (?P<path>.+) and reprocessed as saved\.?$")
+
+
+def _split_message(message: str) -> tuple[str, str]:
+    label, sep, rest = str(message).partition(": ")
+    return (label, rest) if sep else ("", str(message))
+
+
+def _common_folder(paths: list[str]) -> str:
+    """The folder every path is in ("" if none, or only one path).
+    Works on Windows and POSIX spellings alike."""
+    import ntpath
+    import posixpath
+    if len(paths) < 2:
+        return ""
+    module = ntpath if any("\\" in p for p in paths) else posixpath
+    try:
+        common = module.commonpath([module.dirname(p) for p in paths])
+    except ValueError:
+        return ""
+    return common if common and common not in ("/", "\\") else ""
+
+
+def state_opened_html(name: str, saved: str, n_opened: int, messages: list[str],
+                      notes: str = "", muted: str = MUTED, warn: str = WARN) -> str:
+    """What opening a state did, grouped by outcome: anything not opened
+    first (as warnings), then the experiments re-read from their data
+    -- their shared folder said once, each by its label and the rest of
+    its path -- then everything opened from a saved copy."""
+    sub = [f"from “{name}”"] + ([f"saved {saved}"] if saved else [])
+    out = [_title_html(f"Opened {n_opened} spectr{'um' if n_opened == 1 else 'a'}", sub, muted)]
+    if notes:
+        out.append(f"{_P}<b>Notes:</b> {_e(notes)}</p>")
+
+    failed, reopened, other = [], [], []
+    for message in messages or []:
+        label, rest = _split_message(message)
+        match = _REOPENED.match(rest)
+        if rest.startswith("NOT opened"):
+            failed.append((label, rest))
+        elif match:
+            reopened.append((label, match.group("path")))
+        else:
+            other.append((label, rest))
+
+    for label, rest in failed:
+        out.append(_warning(f"{label}: {rest}" if label else rest, warn))
+
+    if reopened:
+        out.append(_section(f"Re-read from their data and reprocessed as saved ({len(reopened)})"))
+        folder = _common_folder([p for _l, p in reopened])
+        if folder:
+            out.append(f'<p style="margin-top:0px; margin-bottom:4px;">'
+                       f"{_muted('in ' + _e(folder), muted)}</p>")
+        rows = []
+        for label, path in reopened:
+            where = path[len(folder):].lstrip("\\/") if folder and path.startswith(folder) else path
+            if where == label.split(" · ")[0].strip():
+                where = ""        # "231 · 23Na · …" from folder 231: said already
+            rows.append(f'<tr><td style="padding-right:14px;"><b>{_e(label)}</b></td>'
+                        f"<td>{_muted(_e(where), muted)}</td></tr>")
+        out.append(f'<table cellspacing="0" cellpadding="1" style="margin-bottom:4px;">'
+                   f"{''.join(rows)}</table>")
+
+    if other:
+        out.append(_section(f"Opened from the saved copy ({len(other)})"))
+        rows = []
+        for label, rest in other:
+            if rest.startswith("opened from the saved copy."):
+                rest = ""
+            rows.append(f'<tr><td style="padding-right:14px;" valign="top"><b>{_e(label)}</b>'
+                        f"</td><td>{_muted(_e(rest), muted) if rest else ''}</td></tr>")
+        out.append(f'<table cellspacing="0" cellpadding="1" style="margin-bottom:4px;">'
+                   f"{''.join(rows)}</table>")
     return "".join(out)
