@@ -98,7 +98,7 @@ class _ContourCrosshair:
     """
 
     def __init__(self, canvas, ax, f1_ax, f2_ax, toolbar, stack_axes=None, panel_axes=None,
-                 **lineprops) -> None:
+                 free_axes=None, **lineprops) -> None:
         """``stack_axes``: the rows of a stacked Compare (one shared x
         axis). The vertical line then runs through every row, whichever
         one the cursor is over, and the horizontal one marks the row under
@@ -115,14 +115,23 @@ class _ContourCrosshair:
         # and in the panel under the cursor alone when they do not.
         panels = [a for a in (panel_axes or []) if a is not None]
         self._panels = tuple(panels) if len(panels) > 1 else ()
+        # A figure of several plots drawn elsewhere (Simulate: a SIMPSON
+        # shape's amplitude/phase/offset rows, a Bloch simulation's pulse
+        # and profile): the crosshair follows the cursor into whichever
+        # plot it is over, and its vertical line runs through every plot
+        # sharing that x axis -- as a stacked Compare does (explicit user
+        # request, 2026-11-12: it was "either just not present or only
+        # appears in one of the plots", being bound to the first alone).
+        free = [a for a in (free_axes or []) if a is not None]
+        self._free = tuple(free) if len(free) > 1 else ()
         self.axes = tuple(dict.fromkeys(
-            a for a in (ax, f1_ax, f2_ax, *stack, *self._panels) if a is not None))
+            a for a in (ax, f1_ax, f2_ax, *stack, *self._panels, *self._free) if a is not None))
         self._background = None
         self._vline_axes = list(dict.fromkeys(
-            a for a in (ax, f2_ax, *stack, *self._panels) if a is not None))
+            a for a in (ax, f2_ax, *stack, *self._panels, *self._free) if a is not None))
         self._vlines = [self._guide(a, "v", lineprops) for a in self._vline_axes]
         self._hline_axes = list(dict.fromkeys(
-            a for a in (ax, f1_ax, *stack, *self._panels) if a is not None))
+            a for a in (ax, f1_ax, *stack, *self._panels, *self._free) if a is not None))
         self._hlines = [self._guide(a, "h", lineprops) for a in self._hline_axes]
         self._cid_motion = canvas.mpl_connect("motion_notify_event", self._onmove)
         self._cid_draw = canvas.mpl_connect("draw_event", self._on_draw)
@@ -212,6 +221,22 @@ class _ContourCrosshair:
         fx, fy = first.get_xlim(), first.get_ylim()
         return all(same(p.get_xlim(), fx) and same(p.get_ylim(), fy) for p in self._panels[1:])
 
+    @staticmethod
+    def x_linked(a, b) -> bool:
+        """Whether one x position means the same thing in Axes ``a`` and
+        ``b``: they share their x axis (``sharex``, a twin), or they are
+        labelled alike and show the same x range."""
+        if a is None or b is None:
+            return False
+        if a is b or a.get_shared_x_axes().joined(a, b):
+            return True
+        label_a, label_b = a.xaxis.label.get_text(), b.xaxis.label.get_text()
+        if not label_a or label_a != label_b:
+            return False
+        (a0, a1), (b0, b1) = a.get_xlim(), b.get_xlim()
+        tol = 1e-6 * max(abs(a1 - a0), 1e-300)
+        return abs(a0 - b0) <= tol and abs(a1 - b1) <= tol
+
     def _hide(self) -> None:
         """Take the crosshair off screen when the cursor leaves the
         plot -- **by blitting the cached background back, not by
@@ -268,15 +293,22 @@ class _ContourCrosshair:
             # actually caused "filling the contour and not going away".
             self._canvas.draw()
         only_here = bool(self._panels) and not self.panels_match()
+        here = event.inaxes
         for ax, line in zip(self._vline_axes, self._vlines):
             line.set_xdata((event.xdata, event.xdata))
-            line.set_visible(not only_here or ax is event.inaxes)
+            if self._free and ax in self._free:
+                line.set_visible(ax is here or self.x_linked(ax, here))
+            else:
+                line.set_visible(not only_here or ax is here)
         for ax, line in zip(self._hline_axes, self._hlines):
             # In a stack each row has its own intensity scale: the
             # horizontal line belongs only to the row under the cursor.
             line.set_ydata((event.ydata, event.ydata))
-            line.set_visible((not self._stacked or ax is event.inaxes)
-                             and (not only_here or ax is event.inaxes))
+            if self._free and ax in self._free:
+                line.set_visible(ax is here)
+            else:
+                line.set_visible((not self._stacked or ax is here)
+                                 and (not only_here or ax is here))
         self._canvas.restore_region(self._background)
         for ax, line in zip(self._vline_axes, self._vlines):
             ax.draw_artist(line)
@@ -3632,6 +3664,8 @@ class MplCanvas(QWidget):
         self._spectrum_panel_groups = []
         self._spectrum_panel_link = None
         self._compare_panels_kwargs = None
+        # A heatmap's rows (for Measure's ppm/Hz, see _ppm_drawn_view).
+        self._heatmap_spectra = []
         # The labels belonged to the Axes about to go
         self._label_drag = None
         self.figure._opennmr_panel_labels = None
@@ -3718,8 +3752,22 @@ class MplCanvas(QWidget):
                         [a for a in self._spectrum_panels
                          if getattr(a, "_opennmr_panel_kind", "") != "pulse"]
                         if len(self._spectrum_panels) > 1 else None),
+            free_axes=self._crosshair_free_axes(),
             color=self._crosshair_color, linewidth=self._crosshair_width, linestyle="--",
         )
+
+    def _crosshair_free_axes(self) -> list | None:
+        """Every plot of a figure drawn elsewhere (show_external_plot),
+        for the crosshair to follow the cursor into -- not a 3D view, a
+        colour bar, or an Axes with its axis switched off (a legend or
+        text panel)."""
+        if not self._external_plot:
+            return None
+        axes = [ax for ax in self.figure.axes
+                if getattr(ax, "name", "") != "3d" and ax.get_visible() and ax.axison
+                and getattr(ax, "_colorbar", None) is None
+                and not getattr(ax, "_colorbar_info", None)]
+        return axes if len(axes) > 1 else None
 
     def _projection_intensity_limits(self) -> dict:
         """Each projection strip's own intensity limit -- the F2 (top)
@@ -7810,6 +7858,13 @@ class MplCanvas(QWidget):
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
         self._clear_figure()
+        # Every trace is drawn in ppm, so that is the display unit until
+        # a stack is converted back to the one in use below. Left as it
+        # was, a Compare drawn after switching a 1D to Hz was measured as
+        # if its ppm were Hz (found 2026-11-12, checking Measure on every
+        # plot).
+        previous_unit = self._axis_unit
+        self._axis_unit = "ppm"
 
         self._compare_kwargs = {"mode": mode, "normalize": normalize,
                                  "row_labels": row_labels, "shared_scale": shared_scale,
@@ -7954,6 +8009,8 @@ class MplCanvas(QWidget):
                                        labelsize=self._AXIS_LABELSIZE)
             self.ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
 
+        if previous_unit != "ppm" and self._compare_axes and self._compare_spectra:
+            self._set_axis_unit_for_stack(previous_unit)
         self._apply_view_limits()
         self._apply_view_options()
         # Crosshairs here too: reading a value off this plot is
@@ -8368,6 +8425,7 @@ class MplCanvas(QWidget):
         tick_mode = "none"
         if row_labels:
             tick_mode = "all" if len(row_labels) <= 15 else "auto"
+        self._heatmap_spectra = list(spectra)
         plotting.plot_1d_heatmap(
             spectra, ax=self.ax, fig=self.figure, normalize=normalize,
             y_values=row_labels, y_ticks=tick_mode,
@@ -9044,7 +9102,10 @@ class MplCanvas(QWidget):
         self.ax = self.figure.add_subplot(111)
         y = np.asarray(y, dtype=float)
         err = None if yerr is None else np.nan_to_num(np.asarray(yerr, dtype=float))
-        numeric = all(isinstance(v, (int, float, np.floating, np.integer)) for v in (x or []))
+        # ``list(...)``, not ``x or []``: a numpy array has no truth value,
+        # so passing one raised (found 2026-11-12).
+        x = [] if x is None else list(x)
+        numeric = all(isinstance(v, (int, float, np.floating, np.integer)) for v in x)
         if numeric and len(x) == len(y):
             xs = np.asarray(x, dtype=float)
             order = np.argsort(xs)
@@ -9911,6 +9972,15 @@ class MplCanvas(QWidget):
             position = self._compare_axes.index(ax)
             if position < len(self._compare_spectra):
                 return self._compare_spectra[position].axes[0], None
+        # **Compare ▸ Superimposed**: every trace on the one Axes, drawn
+        # in the display unit like the stack. It fell through to "no
+        # spectral axis" and came back as a bare Δx with no unit (user
+        # report, 2026-11-12). The first trace's axis gives Hz per ppm.
+        if (self._compare_spectra and not self._compare_axes and not self._spectrum_panels
+                and ax is self.ax and self._contour_spectrum is None
+                and self._current_1d_spectrum is None and not self._external_plot
+                and getattr(self._compare_spectra[0], "ndim", 1) == 1):
+            return self._compare_spectra[0].axes[0], None
         spectrum = self._contour_spectrum
         if spectrum is not None:
             if ax is self._proj_axes.get("f2"):
@@ -9922,6 +9992,153 @@ class MplCanvas(QWidget):
         if self._current_1d_spectrum is not None:
             return self._current_1d_spectrum.axes[0], None
         return None, None
+
+    def _ppm_drawn_view(self, ax):
+        """``(x_axis, y_axis)`` for a view drawn in **ppm whatever the
+        display unit** -- Compare's 2D panels and 2D overlay, Compare ▸
+        Panels, the heatmap, a DOSY map, the processing preview's
+        spectrum -- or None for any other Axes. ``None`` in either place:
+        no chemical-shift axis that way (a slice index, D, intensity).
+
+        Each was its own gap in Measure: a bare number, or nothing in Hz
+        (explicit user request, 2026-11-12: "go through all possible
+        plots and ensure that the measure always works and gives a
+        distance in ppm and Hz ... for both x and y in 2-d
+        experiments")."""
+        if self._panel_axes and self._panel_spectra and ax in self._panel_axes:
+            panel = self._panel_spectra[min(self._panel_axes.index(ax), len(self._panel_spectra) - 1)]
+            return panel.axes[1], (None if panel.is_pseudo_2d else panel.axes[0])
+        if self._spectrum_panels and ax in self._spectrum_panels:
+            if getattr(ax, "_opennmr_panel_kind", "1d") == "pulse":
+                return None
+            index = self._spectrum_panels.index(ax)
+            groups = self._spectrum_panel_groups or []
+            members = [self._compare_spectra[i] for i in (groups[index] if index < len(groups) else [])
+                       if i < len(self._compare_spectra)]
+            if not members:
+                return None
+            first = members[0]
+            if first.ndim == 2:
+                return first.axes[1], (None if first.is_pseudo_2d else first.axes[0])
+            return first.axes[0], None
+        if getattr(self, "_heatmap_spectra", None) and ax is self.ax:
+            return self._heatmap_spectra[0].axes[0], None
+        if self._dosy_result is not None and ax in (self.ax, self._dosy_projection_ax):
+            dosy = self._dosy_result
+            ppm = np.asarray(dosy.get("ppm", []), dtype=float)
+            hz_per_ppm = dosy.get("hz_per_ppm")
+            axis = NMRAxis(kind="frequency", ppm=ppm,
+                           hz=ppm * float(hz_per_ppm) if hz_per_ppm else None)
+            return axis, None
+        spec_ax = getattr(self, "_processing_preview_spec_ax", None)
+        preview = getattr(self, "_preview_1d_spectrum", None)
+        if spec_ax is not None and ax is spec_ax and preview is not None:
+            return preview.axes[0], None
+        return None
+
+    #: Units an axis label can name, as (pattern, key). Frequency units
+    #: become ppm/Hz pairs; anything else is quoted as written.
+    _LABEL_UNIT_PATTERNS = (
+        (r"\bppm\b", "ppm"), (r"\bMHz\b", "mhz"), (r"\bkHz\b", "khz"), (r"\bHz\b", "hz"),
+    )
+    _INTENSITY_LABEL = re.compile(r"intensity|a\.\s*u\.|arb|signal|normali[sz]ed|amplitude \(a",
+                                  re.IGNORECASE)
+
+    @staticmethod
+    def _plain_label(text: str) -> str:
+        """An axis label without its mathtext markup: ``$\\mathit{t}$ / µs``
+        -> ``t / µs``."""
+        text = re.sub(r"\\math(?:it|rm|bf|sf|tt|cal)\{([^{}]*)\}", r"\1", text or "")
+        text = re.sub(r"\\(?:mu)\b", "µ", text)
+        text = re.sub(r"\\(?:circ)\b", "°", text)
+        text = text.replace("^{2}", "²").replace("^2", "²").replace("^{-1}", "⁻¹")
+        # mathtext spacing (\, \; \: \!), then any other command.
+        text = re.sub(r"\\[,;:]", " ", text).replace("\\!", "")
+        text = re.sub(r"\\[A-Za-z]+", "", text)
+        text = re.sub(r"\s{2,}", " ", text)
+        return text.replace("$", "").replace("{", "").replace("}", "").strip()
+
+    @classmethod
+    def _label_unit(cls, text: str) -> str:
+        """The unit an axis label states: after its last " / ", else in
+        its last brackets ("Delay (s)", "Offset / kHz"); "" if none."""
+        text = cls._plain_label(text)
+        if " / " in text:
+            unit = text.rsplit(" / ", 1)[1].strip()
+        else:
+            match = re.search(r"[(\[]([^()\[\]]+)[)\]]\s*$", text)
+            unit = match.group(1).strip() if match else ""
+        return "" if unit.lower() in ("a.u.", "a. u.", "arb. units", "arb.") else unit
+
+    def _axis_label_text(self, ax, which: str) -> str:
+        """``ax``'s x or y label -- or, for a row of a stack with its x
+        label only on the bottom row, the label of an Axes sharing its x."""
+        axis = ax.xaxis if which == "x" else ax.yaxis
+        text = axis.label.get_text()
+        if text or which != "x":
+            return text
+        shared = ax.get_shared_x_axes()
+        for other in self.figure.axes:
+            if other is not ax and shared.joined(ax, other) and other.xaxis.label.get_text():
+                return other.xaxis.label.get_text()
+        return ""
+
+    def _known_hz_per_ppm(self) -> float | None:
+        """The spectrometer frequency behind whatever is on show, for a
+        ppm axis that carries no Hz of its own."""
+        external = (getattr(self, "_external_draw", None) or {}).get("hz_per_ppm")
+        if external:
+            return float(external)
+        if getattr(self, "_slice_fit_active", False):
+            mhz = self._slice_fit_hz_per_ppm()
+            if mhz:
+                return mhz
+        if self._dosy_result is not None and self._dosy_result.get("hz_per_ppm"):
+            return float(self._dosy_result["hz_per_ppm"])
+        for spectrum in (self._current_1d_spectrum, self._contour_spectrum,
+                         getattr(self, "_preview_1d_spectrum", None),
+                         *(self._compare_spectra or []), *(self._panel_spectra or []),
+                         *(getattr(self, "_heatmap_spectra", None) or [])):
+            if spectrum is not None and getattr(spectrum.metadata, "sfo1", None):
+                return float(spectrum.metadata.sfo1)
+        return None
+
+    def _label_delta(self, ax, which: str, a: float, b: float) -> dict:
+        """A separation along an axis with no spectrum behind it, in the
+        unit its label states: ppm/Hz (both, when the field is known) for
+        a frequency axis, otherwise the label's own unit ("12.5 µs",
+        "0.32 s"). A logarithmic axis also gets the ratio. ``{}`` when the
+        label names no unit, or is an intensity (see _complete_measurement)."""
+        text = self._axis_label_text(ax, which)
+        if not text or (which == "y" and self._INTENSITY_LABEL.search(self._plain_label(text))):
+            return {}
+        delta = abs(float(b) - float(a))
+        unit = self._label_unit(text)
+        plain = self._plain_label(text)
+        out: dict = {}
+        frequency = next((key for pattern, key in self._LABEL_UNIT_PATTERNS
+                          if re.search(pattern, unit or plain)), None)
+        if frequency is not None:
+            mhz = self._known_hz_per_ppm()
+            if frequency == "ppm":
+                out["ppm"] = delta
+                if mhz:
+                    out["hz"] = delta * mhz
+            else:
+                out["hz"] = delta * {"hz": 1.0, "khz": 1e3, "mhz": 1e6}[frequency]
+                if mhz:
+                    out["ppm"] = out["hz"] / mhz
+            if "hz" in out:
+                out["khz"] = out["hz"] / 1000.0
+        elif unit:
+            out["label_unit"] = unit
+            out["value"] = delta
+        else:
+            return {}
+        scale = ax.get_xscale() if which == "x" else ax.get_yscale()
+        if scale == "log" and min(a, b) > 0:
+            out["ratio"] = max(a, b) / min(a, b)
+        return out
 
     def _delta_in_units(self, axis, delta: float) -> dict:
         """A separation ``delta``, given in whatever unit the axis is
@@ -10256,6 +10473,8 @@ class MplCanvas(QWidget):
             parts.append(f"{deltas['ppm']:.4f} ppm")
         if "hz" in deltas:
             parts.append(f"{deltas['hz']:.2f} Hz")
+        if not parts and "label_unit" in deltas:
+            parts.append(f"{deltas['value']:.4g} {deltas['label_unit']}")
         if not parts:
             return f"Δ{label} = {raw:.4g}" + (" slices" if label == "y" else "")
         return f"Δ{label} = " + " / ".join(parts)
@@ -10266,11 +10485,19 @@ class MplCanvas(QWidget):
         not converted into (see :meth:`_measurement_unit_order`)."""
         parts = [fmt.format(deltas[unit])
                  for unit, fmt in self._measurement_unit_order() if unit in deltas]
+        if not parts and "ppm" in deltas and self._axis_unit == "mm":
+            parts = [self._MEASUREMENT_UNIT_FORMATS["ppm"].format(deltas["ppm"])]
+        if not parts and "label_unit" in deltas:
+            parts = [f"{deltas['value']:.4g} {deltas['label_unit']}"]
         if not parts:
-            # No spectral axis behind this direction -- an intensity, or
-            # a slice index. Report the plain difference, said plainly.
+            # No spectral axis behind this direction and no unit on its
+            # label -- an intensity, or a slice index. Report the plain
+            # difference, said plainly.
             return f"Δ{label} = {raw:.4g}"
-        return f"Δ{label} = " + " / ".join(parts)
+        text = f"Δ{label} = " + " / ".join(parts)
+        if deltas.get("ratio"):
+            text += f" (×{deltas['ratio']:.3g})"
+        return text
 
     def _record_measurement_point(self, ax, x: float, y: float) -> None:
         """Record one click of a measurement. The second click in the
@@ -10329,7 +10556,8 @@ class MplCanvas(QWidget):
             self._complete_cross_measurement(ax, x1, y1, ax2, x2, y2)
             return
 
-        x_axis, y_axis = self._measurement_axes_for(ax)
+        ppm_view = self._ppm_drawn_view(ax)
+        x_axis, y_axis = ppm_view if ppm_view is not None else self._measurement_axes_for(ax)
         dx_raw, dy_raw = abs(x2 - x1), abs(y2 - y1)
         slice_fit_deltas = self._slice_fit_delta(ax, dx_raw)
         if slice_fit_deltas is not None:
@@ -10338,10 +10566,12 @@ class MplCanvas(QWidget):
             # it used to come back as a bare number (explicit user report,
             # 2026-10-16: "does not give the units ... only ppm").
             dx_units, dy_units = slice_fit_deltas, {}
-        elif self._panel_axes and ax in self._panel_axes and x_axis is not None:
-            # Compare's 2D panels are drawn in ppm whatever the display unit:
-            # both separations in ppm and Hz.
-            dx_units, dy_units = self._delta_ppm_hz(x_axis, dx_raw), self._delta_ppm_hz(y_axis, dy_raw)
+        elif ppm_view is not None:
+            # Drawn in ppm whatever the display unit (Compare's panels,
+            # the heatmap, DOSY, the processing preview): both
+            # separations in ppm and Hz.
+            dx_units = self._delta_ppm_hz(ppm_view[0], dx_raw)
+            dy_units = self._delta_ppm_hz(ppm_view[1], dy_raw)
         elif self._external_plot and x_axis is None and y_axis is None:
             # A figure drawn elsewhere (Simulate): its axis labels say
             # what the axes are in.
@@ -10350,8 +10580,16 @@ class MplCanvas(QWidget):
         else:
             dx_units = self._delta_in_units(x_axis, dx_raw)
             dy_units = self._delta_in_units(y_axis, dy_raw)
+        # Whatever is left without a unit -- a time, a delay, a D, a
+        # field, an axis of a figure drawn elsewhere -- takes the unit
+        # its label states, so no measurement is a bare number. Not the
+        # y of a 1D spectrum: that is an intensity (see below).
+        if not dx_units:
+            dx_units = self._label_delta(ax, "x", x1, x2)
+        if not dy_units and y_axis is None:
+            dy_units = self._label_delta(ax, "y", y1, y2)
 
-        if self._panel_axes and ax in self._panel_axes and x_axis is not None:
+        if ppm_view is not None and self._panel_axes and ax in self._panel_axes:
             parts = [self._format_ppm_hz("x", dx_units, dx_raw)]
             if dy_raw:
                 parts.append(self._format_ppm_hz("y", dy_units, dy_raw))

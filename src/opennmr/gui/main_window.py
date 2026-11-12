@@ -28046,6 +28046,16 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
             self.statusBar().clearMessage()
 
+        # Hz per ppm of the F2 axis, so Measure on the map quotes Hz as
+        # well as ppm (explicit user request, 2026-11-12).
+        f2 = spectrum.axes[1]
+        hz_per_ppm = None
+        if f2.ppm is not None and f2.hz is not None and len(f2.ppm) > 1:
+            span = float(f2.ppm[-1] - f2.ppm[0])
+            if span:
+                hz_per_ppm = abs(float(f2.hz[-1] - f2.hz[0]) / span)
+        dosy["hz_per_ppm"] = hz_per_ppm or (float(spectrum.metadata.sfo1)
+                                            if spectrum.metadata.sfo1 else None)
         self._dosy_result = dosy
         spectrum.metadata.raw["dosy_result"] = dosy
         spectrum.metadata.raw["dosy_title"] = f"DOSY — {self.session.label(index)}"
