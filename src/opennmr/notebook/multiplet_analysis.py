@@ -28,6 +28,20 @@ Simulate/Fit for those. Overlapping multiplets picked as one group give
 the spectrum at each picked position, so a poorly phased or baseline-
 distorted spectrum gives wrong units -- phase and baseline first.
 
+**Finding the lines** (user report, 2026-11-12: Auto-Pick had taken only
+the tallest line of each multiplet, so every one read as a singlet). Given
+the spectrum, :func:`analyse_spectrum` finds every line itself: inside
+each integration region, around each picked line, or across the whole
+spectrum. A line counts when it stands :data:`DEFAULT_MIN_SNR` times the
+noise above the local baseline and is at least
+:data:`DEFAULT_MIN_FRACTION` of its multiplet's tallest line -- which
+keeps a septet's outer lines (1/20 of the centre) and leaves out ¹³C
+satellites (about 1/200). Heights are measured above a straight local
+baseline drawn under each multiplet, so a raised or sloping baseline does
+not distort the intensity units. (A straight baseline cannot follow the
+curved tail of a far larger peak right beside a multiplet: draw a tight
+region round the multiplet, or correct the baseline first.)
+
 Works on any nucleus: give the spectrometer frequency (MHz) for the axis.
 """
 
@@ -45,6 +59,18 @@ DEFAULT_MAX_GAP_HZ = 20.0
 DEFAULT_TOLERANCE_HZ = 0.5
 #: Most couplings sought for one multiplet (2**8 = 256 line units).
 MAX_COUPLINGS = 8
+#: A line must stand this many times the noise above the baseline ...
+DEFAULT_MIN_SNR = 5.0
+#: ... and be at least this fraction of its multiplet's tallest line.
+DEFAULT_MIN_FRACTION = 0.02
+#: How a multiplet is named in a report: the letters the peak table uses
+#: for 4-6 neighbours (p, x, h) written out as usual.
+_REPORT_NAMES = {"p": "quint", "x": "sext", "h": "sept"}
+
+
+def report_name(pattern: str) -> str:
+    """``"h"`` -> ``"sept"``, ``"dp"`` -> ``"dquint"``; others unchanged."""
+    return "".join(_REPORT_NAMES.get(ch, ch) for ch in str(pattern))
 
 _SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 
@@ -184,6 +210,102 @@ def name_couplings(js_hz, tolerance_hz: float = DEFAULT_TOLERANCE_HZ):
     return _mult.multiplet_name(counts), [float(np.mean(g)) for g in groups], counts
 
 
+#: Heights further than this (RMS, as a fraction of the tallest line) from
+#: the intensities a pattern predicts rule the pattern out.
+MAX_INTENSITY_MISFIT = 0.3
+#: Most candidate patterns tried for one multiplet.
+_MAX_CANDIDATES = 20000
+
+
+def _candidate_js(line_hz, tolerance_hz):
+    """Every spacing between two lines (merged within the tolerance) no
+    smaller than the first spacing -- the couplings a pattern can have."""
+    diffs = sorted(abs(b - a) for i, a in enumerate(line_hz) for b in line_hz[i + 1:])
+    first = line_hz[1] - line_hz[0]
+    out: list[float] = []
+    for d in diffs:
+        if d < first - tolerance_hz:
+            continue
+        if out and d - out[-1] <= tolerance_hz:
+            continue
+        out.append(d)
+    return out
+
+
+def _stick_counts(offsets, js, tolerance_hz):
+    """How many of the pattern ``js``'s 2**n lines fall on each observed
+    line (offsets from the first); None if a line of the pattern falls on
+    none, or an observed line gets none."""
+    counts = np.zeros(len(offsets), dtype=int)
+    for value, _flags in _subset_sums(js):
+        k = int(np.argmin(np.abs(offsets - value)))
+        if abs(offsets[k] - value) > tolerance_hz:
+            return None
+        counts[k] += 1
+    return None if np.any(counts == 0) else counts
+
+
+def best_pattern(line_hz, heights=None, tolerance_hz: float = DEFAULT_TOLERANCE_HZ):
+    """The first-order pattern that best explains lines at ``line_hz``
+    (sorted) with ``heights``: ``(js, counts, misfit)`` or None.
+
+    Every candidate set of couplings must contain the first spacing (the
+    smallest J of a first-order multiplet) and add up to the multiplet's
+    width, and its lines must fall on the observed ones and leave none
+    unexplained. Of those, the one whose predicted intensities (binomial
+    counts) best match the heights wins -- the misfit is the RMS
+    difference, as a fraction of the tallest line, at the best scale -- and
+    of near-equal fits the one with fewer couplings. Without heights,
+    the fewest couplings that explain the positions win."""
+    pos = np.asarray(line_hz, dtype=float)
+    if pos.size < 2:
+        return None
+    offsets = pos - pos[0]
+    span = offsets[-1]
+    candidates = _candidate_js(list(pos), tolerance_hz)
+    first = offsets[1]
+    h = None if heights is None else np.clip(np.asarray(heights, dtype=float), 0.0, None)
+    min_n = int(np.ceil(np.log2(pos.size)))
+    found = []
+    tried = [0]
+
+    def score(counts):
+        if h is None or not np.any(h > 0):
+            return 0.0
+        c = counts.astype(float)
+        scale = float(c @ h) / float(c @ c)
+        return float(np.sqrt(np.mean((h - scale * c) ** 2)) / h.max())
+
+    def search(js, total, start):
+        if tried[0] > _MAX_CANDIDATES:
+            return
+        n = len(js)
+        slack = tolerance_hz * max(n, 1)
+        if abs(total - span) <= slack and n >= min_n:
+            tried[0] += 1
+            counts = _stick_counts(offsets, js, tolerance_hz)
+            if counts is not None:
+                found.append((score(counts), n, list(js), counts))
+        if n >= MAX_COUPLINGS or total > span + slack:
+            return
+        for k in range(start, len(candidates)):
+            j = candidates[k]
+            if total + j > span + tolerance_hz * (n + 1):
+                break
+            search(js + [j], total + j, k)
+
+    search([first], first, 0)
+    if not found:
+        return None
+    best = min(s for s, *_ in found)
+    if best > MAX_INTENSITY_MISFIT:
+        return None
+    # Of fits as good as the best (within 0.02), the simplest.
+    misfit, _n, js, counts = min((f for f in found if f[0] <= best + 0.02),
+                                 key=lambda f: (f[1], f[0]))
+    return js, counts, misfit
+
+
 def analyse_multiplet(shifts_ppm, mhz: float, heights=None,
                       tolerance_hz: float = DEFAULT_TOLERANCE_HZ) -> dict:
     """One multiplet from its lines' shifts (ppm) and heights.
@@ -209,28 +331,28 @@ def analyse_multiplet(shifts_ppm, mhz: float, heights=None,
         result.update(pattern="s", centre_ppm=float(shifts[0]), J_hz=[], counts=[], units=[1],
                       rms_hz=0.0, first_order=True)
         return result
-    units, rounding = (intensity_units(heights) if heights is not None
-                       else (np.ones(shifts.size, dtype=int), 0.0))
-    result["units"] = [int(u) for u in units[::-1]]
-    if heights is None:
-        result["notes"].append("No heights given: every line counted as one unit, so lines of "
-                               "a triplet or quartet that coincide cannot be told apart.")
-    elif rounding > 0.35:
-        result["notes"].append(f"The heights do not fall into whole units well (off by up to "
-                               f"{rounding:.2f} of a unit): check phase and baseline, or the "
-                               "multiplet may not be first order.")
-    offsets = np.repeat(line_hz - line_hz[0], units)
-    js = decompose(offsets, tolerance_hz)
-    total = int(units.sum())
-    if js is None or 2 ** len(js) != total:
-        result.update(pattern="m", centre_ppm=float(np.average(shifts, weights=units)), J_hz=[],
-                      counts=[], rms_hz=float("nan"), first_order=False)
+    found = best_pattern(line_hz, heights, tolerance_hz)
+    if found is None:
+        result.update(pattern="m", centre_ppm=float(np.average(
+            shifts, weights=None if heights is None else np.clip(heights, 1e-12, None))),
+            J_hz=[], counts=[], units=[1] * shifts.size, rms_hz=float("nan"),
+            first_order=False, intensity_misfit=float("nan"))
         result["notes"].append(
             "Not a first-order pattern within the tolerance: reported as a multiplet (m) with "
-            "its range. Try a larger tolerance, check the picked lines and their heights, or fit "
-            "it as a strongly coupled spin system.")
+            "its range. Try a larger tolerance, check the lines found and their heights (phase "
+            "and baseline), or fit it as a strongly coupled spin system.")
         return result
-    first, js, rms = _refine(line_hz, units, js, max(tolerance_hz, 1e-9) * 4)
+    js, units, misfit = found
+    result["units"] = [int(u) for u in units[::-1]]
+    result["intensity_misfit"] = misfit
+    if heights is None:
+        result["notes"].append("No heights given: the pattern was read from the line positions "
+                               "alone, so coinciding lines (a triplet's centre) are assumed.")
+    elif misfit > MAX_INTENSITY_MISFIT / 2:
+        result["notes"].append(f"The heights fit the pattern only roughly (off by "
+                               f"{100 * misfit:.0f} % of the tallest line): check phase and "
+                               "baseline; strong coupling also skews them.")
+    first, js, rms = _refine(line_hz, np.asarray(units), js, max(tolerance_hz, 1e-9) * 4)
     pattern, j_values, counts = name_couplings(js, tolerance_hz)
     centre_hz = first + sum(js) / 2.0
     result.update(pattern=pattern, centre_ppm=float(centre_hz / mhz), J_hz=j_values, counts=counts,
@@ -302,6 +424,182 @@ def heights_at(spectrum, shifts_ppm) -> np.ndarray:
     return np.interp(np.asarray(shifts_ppm, dtype=float), ppm[order], data[order])
 
 
+def _sorted_axis(spectrum):
+    ppm = np.asarray(spectrum.axes[-1].ppm, dtype=float)
+    data = np.real(np.asarray(spectrum.data))
+    if data.ndim > 1:
+        raise ValueError("Multiplet analysis needs a 1D spectrum (or one slice of a series).")
+    order = np.argsort(ppm)
+    return ppm[order], data[order]
+
+
+def noise_level(spectrum) -> float:
+    """The noise's standard deviation, from the point-to-point differences
+    (robust: the median absolute difference), so lines and a sloping
+    baseline hardly affect it."""
+    _ppm, y = _sorted_axis(spectrum)
+    diff = np.diff(y)
+    return float(np.median(np.abs(diff - np.median(diff))) / 0.6745 / np.sqrt(2.0))
+
+
+def _baseline_level(ppm, y, lo, hi, margin):
+    """``(slope, intercept)`` of a straight baseline under ``lo``..``hi``
+    (ppm): through the lowest fifth of the points in a ``margin``-wide
+    strip on each side (one side alone when the other runs off the axis)."""
+    sides = []
+    for a, b in ((lo - margin, lo), (hi, hi + margin)):
+        m = (ppm >= a) & (ppm <= b)
+        if np.count_nonzero(m) >= 3:
+            yy = np.sort(y[m])
+            sides.append((0.5 * (a + b), float(np.mean(yy[:max(1, yy.size // 5)]))))
+    if not sides:
+        return 0.0, 0.0
+    if len(sides) == 1:
+        return 0.0, sides[0][1]
+    (x0, y0), (x1, y1) = sides
+    slope = (y1 - y0) / (x1 - x0) if x1 != x0 else 0.0
+    return slope, y0 - slope * x0
+
+
+def heights_above_baseline(spectrum, shifts_ppm, max_gap_hz: float = DEFAULT_MAX_GAP_HZ):
+    """The spectrum's height at each shift, above a straight baseline drawn
+    under the group of lines (:func:`_baseline_level`, the strips one
+    ``max_gap_hz`` wide beyond the outer lines)."""
+    shifts = np.asarray(shifts_ppm, dtype=float)
+    ppm, y = _sorted_axis(spectrum)
+    mhz = spectrum_mhz(spectrum) or 1.0
+    margin = max(max_gap_hz, 5.0) / mhz
+    lo, hi = float(shifts.min()) - 0.5 * margin, float(shifts.max()) + 0.5 * margin
+    slope, intercept = _baseline_level(ppm, y, lo, hi, margin)
+    return np.interp(shifts, ppm, y) - (slope * shifts + intercept)
+
+
+def find_lines(spectrum, low_ppm: float | None = None, high_ppm: float | None = None,
+               min_snr: float = DEFAULT_MIN_SNR) -> np.ndarray:
+    """Every line between ``low_ppm`` and ``high_ppm`` (the whole spectrum
+    by default) standing ``min_snr`` times the noise above the local
+    baseline -- each at the top of its peak (refined by a parabola) --
+    high shift first."""
+    from scipy.signal import find_peaks
+    ppm, y = _sorted_axis(spectrum)
+    lo = ppm[0] if low_ppm is None else min(low_ppm, high_ppm)
+    hi = ppm[-1] if high_ppm is None else max(low_ppm, high_ppm)
+    i0, i1 = np.searchsorted(ppm, lo), np.searchsorted(ppm, hi)
+    if i1 - i0 < 3:
+        return np.zeros(0)
+    seg = y[i0:i1]
+    noise = noise_level(spectrum) or float(np.std(seg)) or 1.0
+    peaks, _props = find_peaks(seg, prominence=min_snr * noise)
+    out = []
+    for k in peaks:
+        i = i0 + k
+        if 0 < i < ppm.size - 1:
+            y0, y1, y2 = y[i - 1], y[i], y[i + 1]
+            denom = y0 - 2 * y1 + y2
+            step = 0.5 * (y0 - y2) / denom if denom else 0.0
+            out.append(ppm[i] + float(np.clip(step, -0.5, 0.5)) * (ppm[i + 1] - ppm[i]))
+    return np.sort(np.asarray(out, dtype=float))[::-1]
+
+
+#: A multiplet's tallest line must stand this many times the noise above
+#: the baseline for a search to report it (a region, or the whole
+#: spectrum, holds baseline wiggles that clear :data:`DEFAULT_MIN_SNR`).
+DEFAULT_MIN_MULTIPLET_SNR = 20.0
+
+
+def _grow(lines, heights, seed, mhz, max_gap_hz, min_fraction):
+    """Indices of the multiplet around line ``seed``: neighbours no more
+    than ``max_gap_hz`` apart, each at least ``min_fraction`` of the
+    tallest line taken so far (lines sorted by shift)."""
+    group = [seed]
+    tallest = heights[seed]
+    for step in (-1, 1):
+        k = seed
+        while 0 <= k + step < len(lines):
+            nxt = k + step
+            if abs(lines[nxt] - lines[k]) * mhz > max_gap_hz or heights[nxt] < min_fraction * tallest:
+                break
+            group.append(nxt)
+            tallest = max(tallest, heights[nxt])
+            k = nxt
+    return sorted(group)
+
+
+def analyse_spectrum(spectrum, regions=None, around=None, picked=None,
+                     max_gap_hz: float = DEFAULT_MAX_GAP_HZ,
+                     tolerance_hz: float = DEFAULT_TOLERANCE_HZ,
+                     min_snr: float = DEFAULT_MIN_SNR,
+                     min_fraction: float = DEFAULT_MIN_FRACTION,
+                     min_multiplet_snr: float = DEFAULT_MIN_MULTIPLET_SNR) -> list[dict]:
+    """Find the multiplets' lines in ``spectrum`` and analyse them.
+
+    Where to look, in this order of preference:
+
+    * ``picked`` -- shifts (ppm) to use as they are (each moved to the top
+      of its peak), when every line has been picked by hand;
+    * ``regions`` -- ``[(low, high), …]`` in ppm (the integration regions):
+      the multiplets inside each;
+    * ``around`` -- shifts (ppm), e.g. one picked line per multiplet: the
+      multiplet each belongs to, grown outwards from it;
+    * nothing given: every multiplet in the spectrum, grown from its
+      strongest lines.
+
+    A line must stand ``min_snr`` times the noise above the baseline and
+    be at least ``min_fraction`` of its multiplet's tallest line; a
+    multiplet whose tallest line is under ``min_multiplet_snr`` times the
+    noise is not reported. Each result says how its lines were found
+    (``found_by``)."""
+    mhz = spectrum_mhz(spectrum)
+    if not mhz:
+        raise ValueError("The spectrometer frequency is unknown: set the field (or the nucleus "
+                         "and ¹H frequency) for this spectrum.")
+    if picked is not None and len(picked):
+        results = analyse_multiplets(picked, spectrum=spectrum, max_gap_hz=max_gap_hz,
+                                     tolerance_hz=tolerance_hz)
+        for r in results:
+            r["found_by"] = "picked lines"
+        return results
+    noise = noise_level(spectrum) or 1.0
+    groups = []
+    if regions:
+        how = "integration region"
+        for lo, hi in regions:
+            lines = find_lines(spectrum, min(lo, hi), max(lo, hi), min_snr)
+            for group in group_lines(lines, mhz, max_gap_hz):
+                groups.append(lines[group])
+    else:
+        lines = np.sort(find_lines(spectrum, min_snr=min_snr))
+        heights = np.array([heights_above_baseline(spectrum, [x], max_gap_hz)[0] for x in lines])
+        if around is not None and len(around):
+            how = "picked line"
+            seeds = []
+            for x in np.asarray(around, dtype=float):
+                if lines.size:
+                    k = int(np.argmin(np.abs(lines - x)))
+                    if abs(lines[k] - x) * mhz <= max(max_gap_hz, 2.0):
+                        seeds.append(k)
+        else:
+            how = "whole spectrum"
+            seeds = [int(k) for k in np.argsort(-heights) if heights[k] >= min_multiplet_snr * noise]
+        taken = set()
+        for seed in seeds:
+            if seed in taken:
+                continue
+            group = _grow(lines, heights, seed, mhz, max_gap_hz, min_fraction)
+            taken.update(group)
+            groups.append(lines[group])
+    results = []
+    for lines in groups:
+        heights = heights_above_baseline(spectrum, lines, max_gap_hz)
+        if heights.max() < min_multiplet_snr * noise:
+            continue
+        keep = heights >= min_fraction * heights.max()
+        result = analyse_multiplet(lines[keep], mhz, heights[keep], tolerance_hz)
+        result["found_by"] = how
+        results.append(result)
+    return sorted(results, key=lambda r: -r["centre_ppm"])
+
+
 def analyse_multiplets(shifts_ppm, mhz: float | None = None, heights=None, spectrum=None,
                        max_gap_hz: float = DEFAULT_MAX_GAP_HZ,
                        tolerance_hz: float = DEFAULT_TOLERANCE_HZ,
@@ -313,20 +611,24 @@ def analyse_multiplets(shifts_ppm, mhz: float | None = None, heights=None, spect
     ``heights``) directly. High shift first."""
     shifts = np.asarray(shifts_ppm, dtype=float)
     picked = shifts.copy()
+    from_spectrum = False
     if spectrum is not None:
         mhz = mhz or spectrum_mhz(spectrum)
         if snap:
             shifts = snap_to_maxima(spectrum, shifts)
         if heights is None:
-            heights = heights_at(spectrum, shifts)
+            from_spectrum = True
     if not mhz:
         raise ValueError("The spectrometer frequency is unknown: set the field (or the nucleus "
                          "and ¹H frequency) for this spectrum, or pass mhz=.")
     heights = None if heights is None else np.asarray(heights, dtype=float)
     out = []
     for group in group_lines(shifts, mhz, max_gap_hz):
-        result = analyse_multiplet(shifts[group], mhz,
-                                   None if heights is None else heights[group], tolerance_hz)
+        if from_spectrum:
+            group_heights = heights_above_baseline(spectrum, shifts[group], max_gap_hz)
+        else:
+            group_heights = None if heights is None else heights[group]
+        result = analyse_multiplet(shifts[group], mhz, group_heights, tolerance_hz)
         # Which of the lines given went into it, and where they were given
         # (before any snapping): what a caller matches its own list against.
         result["indices"] = list(group)
@@ -351,10 +653,11 @@ def format_multiplet(result: dict, decimals: int = 2, j_decimals: int = 1) -> st
         hi, lo = result["range_ppm"]
         return f"{hi:.{decimals}f}–{lo:.{decimals}f} (m)"
     centre = f"{result['centre_ppm']:.{decimals}f}"
+    name = report_name(result["pattern"])
     if not result["J_hz"]:
-        return f"{centre} ({result['pattern']})"
+        return f"{centre} ({name})"
     js = ", ".join(f"{j:.{j_decimals}f}" for j in result["J_hz"])
-    return f"{centre} ({result['pattern']}, J = {js} Hz)"
+    return f"{centre} ({name}, J = {js} Hz)"
 
 
 def format_report(results, nucleus: str | None = None, mhz: float | None = None,

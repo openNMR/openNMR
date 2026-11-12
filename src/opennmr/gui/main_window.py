@@ -24942,10 +24942,10 @@ class MainWindow(QMainWindow):
         content = QWidget()
         v = QVBoxLayout(content)
         blurb = QLabel(
-            "Pick every line of the multiplets (Pick Peak, or Auto-Pick Peaks), then Analyse. "
-            "Lines closer than the gap below are one multiplet; each is read as a first-order "
-            "pattern from the lines' positions and heights (phase and baseline first). One that "
-            "is not first order is reported as m, with its range.")
+            "Analyse Multiplets finds the lines of each multiplet – in the integration regions, "
+            "around a line you picked in each, or across the spectrum – and reads each as a "
+            "first-order pattern from the lines' positions and heights above the local baseline "
+            "(phase first). One that is not first order is reported as m, with its range.")
         blurb.setWordWrap(True)
         v.addWidget(blurb)
         form = QFormLayout()
@@ -24968,15 +24968,35 @@ class MainWindow(QMainWindow):
             "values must be to count as one (equivalent neighbours). About twice the digital "
             "resolution (Hz per point) is a good start.")
         form.addRow("Tolerance:", self.multiplet_tolerance_spin)
+        # Where the lines come from (user report, 2026-11-12: Auto-Pick had
+        # taken one line per multiplet, so each read as a singlet).
+        self.multiplet_source_combo = QComboBox()
+        for text, key in (("Automatic", "auto"),
+                          ("The integration regions", "regions"),
+                          ("Around each picked line", "around"),
+                          ("The whole spectrum", "whole"),
+                          ("The picked lines only", "picked")):
+            self.multiplet_source_combo.addItem(text, key)
+        self.multiplet_source_combo.setToolTip(
+            "Where to find each multiplet's lines.\n\n"
+            "Automatic: in the integration regions if there are any; else around each line in "
+            "the peak table (one picked line per multiplet is enough); else across the whole "
+            "spectrum.\n"
+            "The picked lines only: exactly the peak table's lines (each moved to the top of "
+            "its peak) – when you have picked every line yourself.\n\n"
+            "A line found must stand 5× the noise above the local baseline and be at least 2 % "
+            "of its multiplet's tallest line (a septet's outer lines are 5 %; ¹³C satellites "
+            "are about 0.5 %).")
+        form.addRow("Find the lines in:", self.multiplet_source_combo)
         v.addLayout(form)
         self.multiplet_tree_check = QCheckBox("Draw the coupling trees on the plot")
         self.multiplet_tree_check.setChecked(True)
         self.multiplet_tree_check.toggled.connect(lambda _on: self._draw_coupling_trees())
         v.addWidget(self.multiplet_tree_check)
         row = QHBoxLayout()
-        self.multiplet_analyse_button = QPushButton("Analyse Picked Lines")
+        self.multiplet_analyse_button = QPushButton("Analyse Multiplets")
         self.multiplet_analyse_button.setToolTip(
-            "Group the peak table's lines into multiplets and give each one's pattern, centre "
+            "Find each multiplet's lines (see Find the lines in) and give its pattern, centre "
             "and J values.")
         self.multiplet_analyse_button.clicked.connect(self._on_analyse_multiplets_clicked)
         row.addWidget(self.multiplet_analyse_button)
@@ -25000,22 +25020,9 @@ class MainWindow(QMainWindow):
         v.addWidget(self.multiplet_results_label)
         self._multiplet_results = []
         self._multiplet_report_text = ""
-        self._multiplet_rows = []
         self._coupling_tree_artists = []
-        # An edit to the peak table after an analysis: its rows no longer
-        # match the lines analysed, so Use in the Fit waits for a new one.
-        model = self.peak_table.model()
-        for signal in (model.rowsInserted, model.rowsRemoved, model.dataChanged):
-            signal.connect(lambda *_a: self._invalidate_multiplet_rows())
         self.multiplet_section = CollapsibleSection("Multiplets and J couplings", content=content)
         return self.multiplet_section
-
-    def _invalidate_multiplet_rows(self) -> None:
-        if getattr(self, "_multiplet_rows", None):
-            self._multiplet_rows = []
-            self.multiplet_to_fit_button.setEnabled(False)
-            self.multiplet_to_fit_button.setToolTip(
-                "The peak table has changed since the analysis: Analyse Picked Lines again first.")
 
     def _picked_line_shifts(self) -> list[float]:
         return [shift for _row, shift in self._picked_lines()]
@@ -25042,21 +25049,37 @@ class MainWindow(QMainWindow):
         if index is None:
             self.statusBar().showMessage("Select a spectrum first.", 5000)
             return None
-        lines = self._picked_lines()
-        shifts = [shift for _row, shift in lines]
-        self._multiplet_rows = [row for row, _shift in lines]
-        if not shifts:
+        shifts = self._picked_line_shifts()
+        regions = [tuple(r) for r in self._integration_regions()]
+        source = self.multiplet_source_combo.currentData()
+        if source == "auto":
+            source = "regions" if regions else ("around" if shifts else "whole")
+        if source == "regions" and not regions:
             self.multiplet_results_label.setText(
-                "No lines picked: use Pick Peak (click each line) or Auto-Pick Peaks first.")
+                "No integration regions: draw one over each multiplet (Integrate), or choose "
+                "another place to find the lines.")
+            return None
+        if source in ("around", "picked") and not shifts:
+            self.multiplet_results_label.setText(
+                "No lines picked: use Pick Peak (a line in each multiplet is enough) or "
+                "Auto-Pick Peaks, or choose another place to find the lines.")
             return None
         spectrum = self.session.spectra[index]
         try:
             target = self._peak_pick_target(spectrum)
-            results = nb_multiplets.analyse_multiplets(
-                shifts, spectrum=target, max_gap_hz=self.multiplet_gap_spin.value(),
+            results = nb_multiplets.analyse_spectrum(
+                target, regions=regions if source == "regions" else None,
+                around=shifts if source == "around" else None,
+                picked=shifts if source == "picked" else None,
+                max_gap_hz=self.multiplet_gap_spin.value(),
                 tolerance_hz=self.multiplet_tolerance_spin.value())
         except (ValueError, IndexError) as exc:
             self.multiplet_results_label.setText(f"Cannot analyse: {exc}")
+            return None
+        if not results:
+            self.multiplet_results_label.setText(
+                "No multiplet found clearly above the noise there (its tallest line must stand "
+                "20× the noise above the baseline).")
             return None
         mhz = nb_multiplets.spectrum_mhz(target)
         nucleus = target.metadata.nucleus or spectrum.metadata.nucleus
@@ -25075,7 +25098,7 @@ class MainWindow(QMainWindow):
         history = self._ensure_history(index)
         if history is not None:
             io_history.add_event(
-                history, f"Multiplet analysis of {len(shifts)} picked lines (lines within "
+                history, f"Multiplet analysis ({results[0].get('found_by', source)}; lines within "
                 f"{self.multiplet_gap_spin.value():g} Hz, tolerance "
                 f"{self.multiplet_tolerance_spin.value():g} Hz): {self._multiplet_report_text}",
                 kind="analysis")
@@ -25149,21 +25172,28 @@ class MainWindow(QMainWindow):
         results = getattr(self, "_multiplet_results", None) or []
         if not results:
             return
-        # The table rows the analysed lines came from (the analysis moves
-        # each line to its peak top, so positions no longer match the cells).
-        rows = list(getattr(self, "_multiplet_rows", []))
-        if not rows:
+        if not self.multiplet_to_fit_button.isEnabled():
             return
-        self._multiplet_rows = []
-        replaced_rows = {rows[i] for r in results if r["first_order"]
-                         for i in r.get("indices", []) if i < len(rows)}
+        # The rows inside each first-order multiplet (its lines, however
+        # they were found, plus a margin): replaced by one multiplet row.
+        mhz = results[0].get("mhz") or 1.0
+        margin = max(self.multiplet_tolerance_spin.value(), 2.0) / mhz
+        spans = []
+        for r in results:
+            if r["first_order"]:
+                xs = list(r["lines_ppm"]) + list(r.get("picked_ppm") or [])
+                spans.append((min(xs) - margin, max(xs) + margin))
+        replaced_rows = set()
+        for row, shift in self._picked_lines():
+            if any(lo <= shift <= hi for lo, hi in spans):
+                replaced_rows.add(row)
         widths = []
         for row in range(self.peak_table.rowCount()):
             try:
                 widths.append(float(self.peak_table.item(row, 1).text()))
             except (AttributeError, ValueError):
                 pass
-        fwhm = float(np.median(widths)) if widths else 0.002
+        fwhm = float(np.median(widths)) if widths else 1.0 / mhz
         for row in sorted(replaced_rows, reverse=True):
             if row < self.peak_table.rowCount():
                 self.peak_table.removeRow(row)
@@ -25181,7 +25211,7 @@ class MainWindow(QMainWindow):
         # Done: the rows it described are gone, so it needs a new analysis.
         self.multiplet_to_fit_button.setEnabled(False)
         self.multiplet_to_fit_button.setToolTip(
-            "Already used: Analyse Picked Lines again to use a new analysis.")
+            "Already used: Analyse Multiplets again to use a new analysis.")
         self.statusBar().showMessage(
             f"{added} multiplet row(s) in the peak table, in place of their lines: Fit Spectrum "
             "refines the shifts, J values and widths.", 8000)

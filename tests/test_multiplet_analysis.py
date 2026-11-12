@@ -60,11 +60,30 @@ def test_not_first_order_is_m_with_its_range():
     assert any("first-order" in n for n in r["notes"])
 
 
-def test_a_triplet_without_heights_is_not_misread_as_a_coupling_of_14_hz():
+def test_a_triplet_without_heights_is_read_from_its_positions():
     shifts, _h = _lines(1.0, [2], [7.0])
-    r = ma.analyse_multiplet(shifts, MHZ)              # no heights: 1 unit each
-    assert r["pattern"] == "m"                         # never "dd, J = 14, 7"
+    r = ma.analyse_multiplet(shifts, MHZ)              # no heights
+    assert r["pattern"] == "t"                         # never "dd, J = 14, 7"
     assert any("No heights" in n for n in r["notes"])
+
+
+def test_evenly_spaced_lines_are_told_apart_by_their_heights():
+    # 1:1:1:1 is a dd with J = 2 × J'; 1:3:3:1 is a quartet.
+    s, h = _lines(2.0, [1, 1], [8.0, 4.0])
+    assert ma.analyse_multiplet(s, MHZ, h)["pattern"] == "dd"
+    s, h = _lines(2.0, [3], [4.0])
+    assert ma.analyse_multiplet(s, MHZ, h)["pattern"] == "q"
+
+
+@pytest.mark.parametrize("heights", [
+    [1, 6, 15, 20, 15, 6, 1],
+    [1.7, 5.9, 14.7, 19.4, 16.1, 7.1, 1.7],     # the user's PilotScan septet, roughly
+])
+def test_a_septet_with_uneven_heights(heights):
+    s = 3.96 + (np.arange(7) - 3) * 6.2 / 80.0
+    r = ma.analyse_multiplet(s, 80.0, heights)
+    assert r["pattern"] == "h" and r["J_hz"] == pytest.approx([6.2], abs=0.01)
+    assert ma.format_multiplet(r) == "3.96 (sept, J = 6.2 Hz)"
 
 
 def test_intensity_units_are_a_power_of_two():
@@ -93,6 +112,48 @@ def _spectrum(peaks):
             y += ww / (1 + ((hz - (centre * MHZ + o)) / 0.4) ** 2)
     return NMRSpectrum(y, [NMRAxis("frequency", ppm=ppm, hz=hz)],
                        NMRMetadata(vendor="bruker", nucleus="1H", sfo1=MHZ))
+
+
+def _isopropanol(noise=4.0, offset=80.0):
+    """An 80 MHz isopropanol/water spectrum like the user's PilotScan: water
+    at 4.74 (about 80× the septet's centre line, as there), the CH septet at
+    3.96 and the CH3 doublet at 1.11 (J 6.2 Hz), on a raised, sloping
+    baseline with noise."""
+    mhz = 80.0
+    ppm = np.linspace(10.0, -2.0, 65536)
+    hz = ppm * mhz
+    y = offset + 5.0 * ppm + np.random.default_rng(3).normal(0, noise, ppm.size)
+    for centre, counts, js, area in ((4.74, [], [], 25.0), (3.96, [6], [6.2], 1.0),
+                                     (1.11, [1], [6.2], 6.0)):
+        off, w = pm.lines(counts, js) if counts else (np.zeros(1), np.ones(1))
+        for o, ww in zip(off, w):
+            y += 4000.0 * area * ww / (1 + ((hz - (centre * mhz + o)) / 0.5) ** 2)
+    return NMRSpectrum(y, [NMRAxis("frequency", ppm=ppm, hz=hz)],
+                       NMRMetadata(vendor="spinsolve", nucleus="1H", sfo1=mhz))
+
+
+EXPECTED = "¹H NMR (80 MHz) δ 4.74 (s), 3.96 (sept, J = 6.2 Hz), 1.11 (d, J = 6.2 Hz)."
+
+
+@pytest.mark.parametrize("where", [
+    {"regions": [(4.55, 4.95), (3.65, 4.25), (0.95, 1.25)]},
+    {"around": [4.74, 3.96, 1.11]},            # one line per multiplet, as Auto-Pick gave
+    {},                                         # the whole spectrum
+])
+def test_the_lines_are_found_in_the_spectrum(where):
+    spectrum = _isopropanol()
+    results = ma.analyse_spectrum(spectrum, **where)
+    assert ma.format_report(results, "1H", 80.0) == EXPECTED
+    septet = next(r for r in results if r["pattern"] == "h")
+    assert septet["units"] == [1, 6, 15, 20, 15, 6, 1]          # above the raised baseline
+
+
+def test_a_region_with_only_noise_reports_nothing():
+    assert ma.analyse_spectrum(_isopropanol(), regions=[(7.0, 8.0)]) == []
+
+
+def test_the_noise_estimate():
+    assert ma.noise_level(_isopropanol(noise=4.0)) == pytest.approx(4.0, rel=0.15)
 
 
 def test_heights_from_the_spectrum():
@@ -150,6 +211,7 @@ def test_gui_analyses_the_peak_table_and_sends_multiplets_to_the_fit(qapp):
         window._add_peak_row(shift=float(shift), fwhm=0.002, eta=0.5)
     # The table shows 4 significant figures; the analysis uses the exact value.
     assert window._picked_line_shifts() == pytest.approx(list(np.r_[s1, s2]), abs=1e-12)
+    window.multiplet_source_combo.setCurrentIndex(window.multiplet_source_combo.findData("picked"))
     results = window._on_analyse_multiplets_clicked()
     assert [r["pattern"] for r in results] == ["dd", "t"]
     assert "dd, J = 10.0, 4.0 Hz" in window.multiplet_results_label.text()
@@ -168,18 +230,34 @@ def test_gui_analyses_the_peak_table_and_sends_multiplets_to_the_fit(qapp):
     assert not window.multiplet_to_fit_button.isEnabled()   # used: analyse again first
 
 
-def test_editing_the_table_after_an_analysis_needs_a_new_one(qapp):
+def test_gui_finds_the_lines_around_one_picked_line_each(qapp):
+    # The user's report: Auto-Pick gave one line per multiplet, and each
+    # read as a singlet. Automatic (no regions) grows each from its line.
     from opennmr.gui.main_window import MainWindow
     window = MainWindow()
-    _load_spectrum_directly(window, _spectrum([(3.0, [1], [8.0])]))
-    for shift in _lines(3.0, [1], [8.0])[0]:
-        window._add_peak_row(shift=float(shift), fwhm=0.002, eta=0.5)
-    window._on_analyse_multiplets_clicked()
-    assert window.multiplet_to_fit_button.isEnabled()
-    window._add_peak_row(shift=1.0, fwhm=0.002, eta=0.5)       # the rows have moved on
-    assert not window.multiplet_to_fit_button.isEnabled()
-    window._on_multiplets_to_fit_clicked()                     # and nothing is replaced
-    assert window.peak_table.rowCount() == 3
+    _load_spectrum_directly(window, _isopropanol())
+    for shift in (4.7387, 3.9601, 1.1151, 7.5):          # 7.5: a line elsewhere, kept
+        window._add_peak_row(shift=shift, fwhm=0.01, eta=0.5)
+    results = window._on_analyse_multiplets_clicked()
+    assert [r["pattern"] for r in results] == ["s", "h", "d"]
+    assert window._multiplet_report_text == EXPECTED
+    window._on_multiplets_to_fit_clicked()
+    table = window.peak_table
+    cells = sorted((table.item(r, 4).text(), table.item(r, 0).text()) for r in range(table.rowCount()))
+    # The singlet's row has no multiplet; the line at 7.5 is kept as it was.
+    assert [c for c, _shift in cells] == ["", "", "d", "h"]
+    assert "7.5" in [shift for _c, shift in cells]
+    assert window.multiplet_source_combo.findData("regions") >= 0
+
+
+def test_gui_uses_the_integration_regions(qapp):
+    from opennmr.gui.main_window import MainWindow
+    window = MainWindow()
+    _load_spectrum_directly(window, _isopropanol())
+    window._integration_regions = lambda: [(4.55, 4.95), (3.65, 4.25), (0.95, 1.25)]
+    results = window._on_analyse_multiplets_clicked()
+    assert [r["found_by"] for r in results] == ["integration region"] * 3
+    assert window._multiplet_report_text == EXPECTED
 
 
 def test_results_say_which_lines_they_came_from():
@@ -191,9 +269,17 @@ def test_results_say_which_lines_they_came_from():
     assert results[0]["picked_ppm"] == pytest.approx(sorted(s1, reverse=True))
 
 
-def test_gui_says_what_to_do_with_nothing_picked(qapp):
+def test_gui_with_nothing_picked(qapp):
+    # Automatic, with no regions and no lines picked, searches the whole
+    # spectrum; asking for the picked lines (or around them) says what to do.
     from opennmr.gui.main_window import MainWindow
     window = MainWindow()
     _load_spectrum_directly(window, _spectrum([(3.0, [1], [8.0])]))
-    assert window._on_analyse_multiplets_clicked() is None
-    assert "No lines picked" in window.multiplet_results_label.text()
+    results = window._on_analyse_multiplets_clicked()
+    assert [r["pattern"] for r in results] == ["d"]
+    assert results[0]["found_by"] == "whole spectrum"
+    for source in ("picked", "around"):
+        window.multiplet_source_combo.setCurrentIndex(
+            window.multiplet_source_combo.findData(source))
+        assert window._on_analyse_multiplets_clicked() is None
+        assert "No lines picked" in window.multiplet_results_label.text()
