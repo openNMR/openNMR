@@ -11,11 +11,40 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 
 from .. import io
 from ..core.registry import find_gamma
 from ..core.spectrum import NMRSpectrum
 
+
+#: The part :meth:`Session.label` appends to a name: `` · <nucleus> ·
+#: <vendor> · procno <n>`` (nucleus and procno optional).
+_LABEL_SUFFIX = re.compile(
+    r"\s+·\s+(?:[0-9]+[A-Z][a-z]?(?:/[0-9]+[A-Z][a-z]?)?\s+·\s+)?"
+    r"(?:bruker|jeol|varian|xpulse|spinsolve|opennmr|simpson|text|derived|simulated|none)"
+    r"(?:\s+·\s+procno\s+\d+)?\s*$")
+
+
+def strip_label_suffix(name: str) -> str:
+    """``name`` without the `` · 23Na · derived · procno 1`` that
+    :meth:`Session.label` adds -- however many times it was added.
+
+    A derived spectrum is named from its parent's label, and that label
+    already ends in the suffix; label() then added it again, so every
+    derivation (and every reopening of a saved state, which names each
+    spectrum by its saved label) made the name one suffix longer:
+    "VOCS sum (20 spectra) · 23Na · derived · procno 1 · 23Na · derived ·
+    procno 1" (user report, 2026-11-12; long enough to break saving a
+    state on Windows). A suffix inside brackets -- "VOCS(248 · 23Na ·
+    bruker · procno 1)", naming the parent -- is part of the name and
+    stays."""
+    text = str(name)
+    while True:
+        trimmed = _LABEL_SUFFIX.sub("", text)
+        if trimmed == text or not trimmed.strip():
+            return text
+        text = trimmed
 
 class Session:
     """Holds the spectra loaded into one GUI session, in load order."""
@@ -227,7 +256,8 @@ class Session:
         if not (origin and os.path.exists(origin)):
             origin = None
         origin_vendor = spectrum.metadata.vendor
-        metadata = dataclasses.replace(spectrum.metadata, vendor="derived", source_path=label)
+        metadata = dataclasses.replace(spectrum.metadata, vendor="derived",
+                                       source_path=strip_label_suffix(label))
         spectrum = dataclasses.replace(spectrum, metadata=metadata)
         self.spectra.append(spectrum)
         self._load_info.append({"path": None, "vendor": "derived", "kwargs": {},
@@ -339,7 +369,9 @@ class Session:
             # came out as "s)". Any derived label with a slash in it --
             # a ratio from spectrum arithmetic, a unit -- had the same
             # problem.
-            name = meta.source_path
+            # Without any suffix it already carries (see
+            # strip_label_suffix): one is added below.
+            name = strip_label_suffix(meta.source_path)
         elif meta.source_path:
             name = os.path.basename(meta.source_path.rstrip("/"))
         else:

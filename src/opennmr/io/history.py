@@ -1052,10 +1052,27 @@ def is_dataset_folder(path: str) -> bool:
 _SAFE = re.compile(r"[^A-Za-z0-9._ ()+-]+")
 
 
+#: Names Windows reserves for devices, with or without an extension.
+_WINDOWS_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$", re.IGNORECASE)
+#: Longest folder name made from a label.
+SAFE_NAME_LENGTH = 80
+
+
 def safe_folder_name(label: str) -> str:
-    """``label`` made safe as a folder name on Windows, macOS and Linux."""
-    name = _SAFE.sub("_", str(label)).strip(" ._") or "spectrum"
-    return name[:80]
+    """``label`` made safe as a folder name on Windows, macOS and Linux.
+
+    **Cut to length before the ends are trimmed, not after.** Trimmed
+    first, a long label cut at 80 characters could end in a space or a
+    dot -- "VOCS sum (20 spectra) _ 23Na _ derived _ procno 1 _ " -- which
+    Windows drops from a folder name when it creates it, so writing into
+    the name as given then failed: "No such file or directory" on saving
+    an openNMR state, whatever the state was called (user report,
+    2026-11-12). Windows' reserved device names (CON, NUL, COM1, ...)
+    get a trailing underscore for the same reason."""
+    name = _SAFE.sub("_", str(label))[:SAFE_NAME_LENGTH].strip(" ._") or "spectrum"
+    if _WINDOWS_RESERVED.match(name):
+        name += "_"
+    return name
 
 
 _METADATA_FIELDS = ("nucleus", "nucleus_indirect", "sfo1", "sfo1_indirect", "bf1", "o1", "ns",

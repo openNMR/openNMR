@@ -45,6 +45,30 @@ Jacobian are not counted). A fit that reaches the limit raises
 :class:`FitNotConverged`, whose message says what to try next and which
 carries the best parameters found (``best_params``) so a notebook can
 restart from there.
+
+**Stopping and keeping the best so far** (explicit user request,
+2026-11-12: "rather than erasing all progress midway, the current fit ...
+can be displayed"). A watcher's callback may return :data:`KEEP` instead
+of ``False``: the fit in progress then ends at once and
+:func:`limited_curve_fit` / :func:`limited_least_squares` return the
+best parameters it had reached, as its result -- with no uncertainty
+(``pcov`` all NaN; the solution's ``success`` False), since a fit stopped
+part-way has not converged and its covariance would mean nothing -- and
+the watcher's status says ``stopped_early``. Any later fit inside the
+same watch (the next start of a multi-start fit, the next slice of a
+series) raises :class:`FitStopped`, a ``RuntimeError`` like a fit that
+did not converge, so those loops skip it and keep what they have. A fitter
+that does not go through these two functions cannot keep a partial
+result: the stop then discards it, as ``False`` does.
+
+**Convergence tolerance** (same request: "control the tolerance where
+the spectrum is considered converged"). The optimiser stops when an
+iteration changes the misfit (``ftol``) or the parameters (``xtol``) by
+less than this relative amount: scipy's own defaults (about 1e-8,
+:data:`DEFAULT_TOLERANCE`) unless set with :func:`set_tolerance`
+(Settings ▸ Fitting). Looser
+is quicker and less exact; tighter is slower. A fitter that asks for its
+own tolerance (the spin-system fit's 1e-12) keeps it.
 """
 
 from __future__ import annotations
@@ -57,6 +81,11 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
+#: What a watcher's callback returns to stop the fit and keep the best
+#: parameters reached (see the module notes); ``False`` discards it.
+KEEP = "keep"
+
+
 class FitCancelled(BaseException):
     """Raised inside a fit when whoever watches it asks it to stop.
 
@@ -64,6 +93,19 @@ class FitCancelled(BaseException):
     ``RuntimeError``/``Exception`` to skip a start that does not converge,
     and a Stop must not be mistaken for one of those (it would carry on
     with the next start, and end "no starting point converged")."""
+
+
+class _StopKeepingBest(FitCancelled):
+    """Raised inside the model when the watcher asks to stop and keep the
+    best so far; caught by :func:`limited_curve_fit` /
+    :func:`limited_least_squares`. A fitter that does not use them sees a
+    :class:`FitCancelled`, and nothing is kept."""
+
+
+class FitStopped(RuntimeError):
+    """A fit that would have begun after a stop that kept the best so far:
+    it is not run. A ``RuntimeError``, as :class:`FitNotConverged` is, so a
+    multi-start or per-slice loop skips it and keeps what it has."""
 
 
 @dataclass
@@ -92,6 +134,8 @@ class FitStatus:
     #: ``evaluations`` when the current single fit began -- a multi-start
     #: or multi-pass fit counts iterations per fit, as the limit applies.
     iteration_offset: int = 0
+    #: The fit was stopped, keeping the best parameters it had reached.
+    stopped_early: bool = False
     history: list = field(default_factory=list, repr=False)
 
     @property
@@ -135,10 +179,26 @@ class _Watcher:
         self.started = time.perf_counter()
         self.last_report = -np.inf
         self.cancelled = False
+        #: Stop asked for, keeping the best so far: ``keep_pending`` until
+        #: the next evaluation ends the fit, then ``keep_requested``.
+        self.keep_pending = False
+        self.keep_requested = False
+
+    def stop_keeping_best(self) -> None:
+        self.keep_requested = True
+        self.status.stopped_early = True
+        raise _StopKeepingBest("The fit was stopped; keeping the best so far.")
 
     def record(self, cost: float) -> None:
         if self.cancelled:
             raise FitCancelled("The fit was stopped before it finished.")
+        if self.keep_requested:
+            return            # finishing up after a keep-stop: count nothing
+        if self.keep_pending:
+            # At the evaluation *after* the request, so the one that was
+            # being reported when Stop came has been noted as a candidate
+            # best by the limited_* wrappers.
+            self.stop_keeping_best()
         st = self.status
         st.evaluations += 1
         now = time.perf_counter()
@@ -158,9 +218,12 @@ class _Watcher:
                 t0, c0 = older[-1]
                 st.recent_fall = max(0.0, (c0 - st.best_cost) / c0) / max(st.elapsed - t0, 1e-9)
             del st.history[:-200]
-            if self.callback(st) is False:
+            answer = self.callback(st)
+            if answer is False:
                 self.cancelled = True
                 raise FitCancelled("The fit was stopped before it finished.")
+            if answer == KEEP:
+                self.keep_pending = True
 
 
 _ACTIVE: list[_Watcher] = []
@@ -196,6 +259,12 @@ def set_stage(text: str) -> None:
         _ACTIVE[0].status.stage = str(text)
         # Shown at the next report; a new stage is worth one straight away.
         _ACTIVE[0].last_report = -np.inf
+
+
+def stopped_early() -> bool:
+    """Whether the watched fit has been stopped keeping the best so far
+    (or asked to be)."""
+    return bool(_ACTIVE) and (_ACTIVE[0].keep_requested or _ACTIVE[0].keep_pending)
 
 
 def check_cancelled() -> None:
@@ -274,6 +343,62 @@ def print_progress(status: FitStatus, every: float = 1.0) -> bool:
 #: The starting (suggested) limit -- explicit user request.
 DEFAULT_MAX_ITERATIONS = 2000
 _MAX_ITERATIONS = [DEFAULT_MAX_ITERATIONS]
+
+
+#: The starting convergence tolerance: scipy's own default.
+DEFAULT_TOLERANCE = 1e-8
+#: Accepted range of the tolerance.
+TOLERANCE_RANGE = (1e-15, 1e-2)
+_TOLERANCE = [DEFAULT_TOLERANCE]
+
+
+def tolerance(value: float | None = None) -> float:
+    """The convergence tolerance to use: ``value`` when given, else the one
+    set with :func:`set_tolerance` (1e-8 unless changed)."""
+    if value is None:
+        return _TOLERANCE[-1]
+    value = float(value)
+    lo, hi = TOLERANCE_RANGE
+    if not lo <= value <= hi:
+        raise ValueError(f"The convergence tolerance must be between {lo:g} and {hi:g} "
+                         f"(got {value:g}).")
+    return value
+
+
+def set_tolerance(value: float | None) -> float:
+    """Set the app-wide tolerance (``None`` restores 1e-8). Returns it."""
+    _TOLERANCE[0] = DEFAULT_TOLERANCE if value is None else tolerance(value)
+    del _TOLERANCE[1:]
+    return _TOLERANCE[0]
+
+
+@contextmanager
+def convergence_tolerance(value: float):
+    """Use ``value`` as the tolerance for the fits inside this block only."""
+    _TOLERANCE.append(tolerance(value))
+    try:
+        yield _TOLERANCE[-1]
+    finally:
+        _TOLERANCE.pop()
+
+
+def _apply_tolerance(kwargs: dict) -> None:
+    """Pass the tolerance on -- only once it has been changed, so that left
+    alone every fit is exactly as before (scipy's defaults: 1e-8 for the
+    trust-region fits, about 1.5e-8 for Levenberg-Marquardt)."""
+    tol = tolerance()
+    if tol == DEFAULT_TOLERANCE:
+        return
+    kwargs.setdefault("ftol", tol)
+    kwargs.setdefault("xtol", tol)
+
+
+def _refuse_after_keep_stop(label: str) -> None:
+    if stopped_early():
+        watcher = _ACTIVE[0]
+        watcher.keep_requested = True
+        watcher.status.stopped_early = True
+        raise FitStopped(f"{label} was not run: the fit was stopped, keeping the best so far.")
 
 
 def max_iterations(value: int | None = None) -> int:
@@ -443,6 +568,8 @@ def limited_curve_fit(f, xdata, ydata, p0=None, *, bounds=None, max_iterations: 
         kwargs["max_nfev"] = limit
     if bounds is not None:
         kwargs["bounds"] = bounds
+    _apply_tolerance(kwargs)
+    _refuse_after_keep_stop(label)
     best = _Best(ydata, kwargs.get("sigma"))
     _begin_limited_fit(limit)
 
@@ -459,6 +586,12 @@ def limited_curve_fit(f, xdata, ydata, p0=None, *, bounds=None, max_iterations: 
 
     try:
         return curve_fit(remembered, xdata, ydata, p0=p0, **kwargs)
+    except _StopKeepingBest:
+        # Stopped part-way, keeping the best reached: no uncertainty.
+        if best.params is None:
+            raise FitCancelled("The fit was stopped before it had evaluated anything.")
+        n = best.params.size
+        return best.params.copy(), np.full((n, n), np.nan)
     except RuntimeError as exc:
         if isinstance(exc, FitNotConverged) or not _is_limit_error(exc):
             raise
@@ -479,20 +612,31 @@ def limited_least_squares(fun, x0, *, max_iterations: int | None = None, label: 
 
     limit = globals()["max_iterations"](max_iterations)
     kwargs.pop("max_nfev", None)
+    _apply_tolerance(kwargs)
+    _refuse_after_keep_stop(label)
     start = [float("nan")]
+    best = _Best(np.zeros(0))
     _begin_limited_fit(limit)
 
     def remembered(p, *args, **kw):
         out = fun(p, *args, **kw)
+        try:
+            r = np.asarray(out, dtype=float).ravel()
+            cost = float(np.dot(r, r))
+        except (TypeError, ValueError):
+            return out
         if not math.isfinite(start[0]):
-            try:
-                r = np.asarray(out, dtype=float).ravel()
-                start[0] = float(np.dot(r, r))
-            except (TypeError, ValueError):
-                pass
+            start[0] = cost
+        if math.isfinite(cost) and (best.params is None or cost < best.cost):
+            best.cost, best.params = cost, np.array(p, dtype=float)
         return out
 
-    solution = least_squares(remembered, x0, max_nfev=limit, **kwargs)
+    try:
+        solution = least_squares(remembered, x0, max_nfev=limit, **kwargs)
+    except _StopKeepingBest:
+        if best.params is None:
+            raise FitCancelled("The fit was stopped before it had evaluated anything.")
+        return _stopped_solution(fun, best.params, kwargs, start[0], best.cost, label)
     solution.not_converged = None
     if solution.status == 0:
         exc = FitNotConverged(limit, label=label, n_free=len(np.atleast_1d(x0)),
@@ -501,4 +645,32 @@ def limited_least_squares(fun, x0, *, max_iterations: int | None = None, label: 
         if raise_on_limit:
             raise exc
         solution.not_converged = exc
+    return solution
+
+
+def _stopped_solution(fun, x, kwargs: dict, start_cost: float, best_cost: float, label: str):
+    """What :func:`limited_least_squares` returns for a fit stopped part-way
+    keeping the best so far: an ``OptimizeResult`` at ``x`` with the
+    residuals and a finite-difference Jacobian there (fitters read them),
+    ``success`` False and a message saying what happened. The watcher
+    counts none of these evaluations."""
+    from scipy.optimize import OptimizeResult
+
+    args, kw = kwargs.get("args", ()), kwargs.get("kwargs", {}) or {}
+    x = np.asarray(x, dtype=float)
+    r0 = np.asarray(fun(x, *args, **kw), dtype=float).ravel()
+    jac = np.empty((r0.size, x.size))
+    for k in range(x.size):
+        h = 1e-7 * max(abs(x[k]), 1.0)
+        step = x.copy()
+        step[k] += h
+        jac[:, k] = (np.asarray(fun(step, *args, **kw), dtype=float).ravel() - r0) / h
+    fall = (f" (the misfit at {100 * best_cost / start_cost:.3g} % of its starting value)"
+            if math.isfinite(start_cost) and start_cost > 0 else "")
+    solution = OptimizeResult(
+        x=x, fun=r0, jac=jac, cost=0.5 * float(np.dot(r0, r0)), status=-2, success=False,
+        nfev=0, message=f"{label} was stopped before converging, keeping the best parameters "
+                        f"reached{fall}; its uncertainties do not apply.")
+    solution.not_converged = None
+    solution.stopped_early = True
     return solution

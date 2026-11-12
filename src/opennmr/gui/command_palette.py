@@ -422,8 +422,17 @@ def _escape(text: str) -> str:
 class CommandPalette(QFrame):
     """The pop-up. ``CommandPalette(window).open_palette()``."""
 
-    def __init__(self, window, entries=None) -> None:
-        super().__init__(window, Qt.WindowType.Popup)
+    def __init__(self, window, entries=None, anchored: bool = False) -> None:
+        """``anchored``: the results list for the search box in the tool
+        row (widgets/search_box.py) -- no field of its own (the box is
+        the field) and a window that never takes the keyboard focus, so
+        typing stays in the box while the results follow it."""
+        flags = (Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                 | Qt.WindowType.WindowDoesNotAcceptFocus) if anchored else Qt.WindowType.Popup
+        super().__init__(window, flags)
+        self._anchored = anchored
+        if anchored:
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self._window = window
         self._entries = list(entries) if entries is not None else build_index(window)
         self._shown: list[Entry] = []
@@ -444,6 +453,9 @@ class CommandPalette(QFrame):
         self.hint.setStyleSheet("color: palette(mid);")
         layout.addWidget(self.hint)
         QShortcut(QKeySequence(PALETTE_KEY), self, activated=self.close)
+        if anchored:
+            self.edit.setVisible(False)
+            self.results.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.refresh("")
 
     # -- content ---------------------------------------------------------
@@ -511,19 +523,35 @@ class CommandPalette(QFrame):
                 _say(self._window, f"Could not open '{entry.title}': {exc}", 10000)
         return entry
 
+    def step(self, step: int) -> None:
+        """Move the highlight ``step`` rows (wrapping)."""
+        count = self.results.count()
+        if count:
+            self.results.setCurrentRow((self.results.currentRow() + step) % count)
+
     def eventFilter(self, obj: QObject, event) -> bool:  # noqa: N802 -- Qt override
         if obj is self.edit and event.type() == QEvent.Type.KeyPress:
             key = event.key()
             if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
-                step = 1 if key == Qt.Key.Key_Down else -1
-                count = self.results.count()
-                if count:
-                    self.results.setCurrentRow((self.results.currentRow() + step) % count)
+                self.step(1 if key == Qt.Key.Key_Down else -1)
                 return True
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self.activate()
                 return True
         return super().eventFilter(obj, event)
+
+    def open_under(self, anchor) -> "CommandPalette":
+        """Show the results just below ``anchor`` (the search box),
+        right-aligned with it, without taking the focus from it."""
+        host = self._window
+        width = max(360, min(560, host.width() - 40))
+        self.resize(width, min(420, max(220, host.height() // 2)))
+        corner = anchor.mapToGlobal(anchor.rect().bottomRight())
+        left = max(host.mapToGlobal(host.rect().topLeft()).x() + 8, corner.x() - width)
+        self.move(left, corner.y() + 2)
+        self.show()
+        self.raise_()
+        return self
 
     def open_palette(self) -> "CommandPalette":
         host = self._window

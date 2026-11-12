@@ -189,23 +189,33 @@ def test_popup_text(qapp):  # noqa: F811
     assert "No longer improving" in text
 
 
+def _press(monkeypatch, answer):
+    """The pop-up appears at once and the given button is pressed in it
+    (``None``: none is); returns the texts it showed."""
+    from opennmr.gui import fit_progress_dialog as fpd
+    monkeypatch.setattr(fpd.FitProgress, "DELAY", 0.0)
+    labels = []
+    original = fpd.status_text
+    monkeypatch.setattr(fpd, "status_text",
+                        lambda title, st: (labels.append(original(title, st)), labels[-1])[1])
+
+    def show(self):
+        self.answer = answer
+    monkeypatch.setattr(fpd.FitProgressDialog, "show", show)
+    return labels
+
+
 def test_quadrupolar_fit_shows_the_popup_and_stops_cleanly(qapp, _dialogs, monkeypatch):  # noqa: F811
-    from opennmr.gui.fit_progress_dialog import FitProgress
     from opennmr.gui.main_window import MainWindow
     from test_gui_quadrupolar_fit import _load
-    monkeypatch.setattr(FitProgress, "DELAY", 0.0)
-    labels = []
-    original = QProgressDialog.setLabelText
-    monkeypatch.setattr(QProgressDialog, "setLabelText",
-                        lambda self, text: (labels.append(text), original(self, text))[1])
     window = MainWindow()
     panel = window.quad_fit_panel
     _load(window)
     panel.estimate()
     assert panel.result is None
 
-    # Stop pressed: nothing changes, nothing is reported as a failure.
-    monkeypatch.setattr(QProgressDialog, "wasCanceled", lambda self: True)
+    # Discard pressed: nothing changes, nothing is reported as a failure.
+    labels = _press(monkeypatch, "discard")
     panel.fit()
     assert panel.result is None
     assert not _dialogs, _dialogs
@@ -214,8 +224,7 @@ def test_quadrupolar_fit_shows_the_popup_and_stops_cleanly(qapp, _dialogs, monke
     assert labels and "model evaluations" in labels[0]
 
     # Run to the end: the pop-up updated as it went and the fit is kept.
-    monkeypatch.setattr(QProgressDialog, "wasCanceled", lambda self: False)
-    labels.clear()
+    labels = _press(monkeypatch, None)
     panel.fit()
     assert panel.result is not None and not _dialogs, _dialogs
     assert any("Misfit" in text for text in labels)

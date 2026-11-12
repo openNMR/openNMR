@@ -17,6 +17,7 @@ import dataclasses
 import json
 import os
 import re
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
@@ -58,6 +59,7 @@ from .drift_panel import DriftCorrectionPanel
 from ..notebook import periodic_table as nb_periodic_table
 from ..notebook import series_fitting as nb_series_fitting
 from ..notebook import fit_advice as nb_fit_advice
+from ..notebook import multiplet_analysis as nb_multiplets
 from ..notebook import relaxometry as nb_relaxometry
 from ..notebook import fit_correlation as nb_fit_correlation
 from ..notebook import intensity_scaling
@@ -102,6 +104,7 @@ from ..io import persistence as io_persistence
 from ..io import history as io_history
 from ..io import serialize as io_serialize
 from ..io import state as io_state
+from ..io import recovery as io_recovery
 from . import panel_state
 from . import data_directory
 from .. import _version
@@ -124,7 +127,7 @@ from ..processing import vocs as processing_vocs
 from ..processing.slicing import get_trace
 from ..simulate import bloch as simulate_bloch
 from ..simulate import diffusion as simulate_diffusion
-from .session import Session
+from .session import Session, strip_label_suffix
 from . import style as style_module
 from .style import apply_theme, remember_system_theme
 from .widgets.canvas import MplCanvas
@@ -1157,7 +1160,19 @@ class MainWindow(QMainWindow):
         shell_layout = QVBoxLayout(shell)
         shell_layout.setContentsMargins(6, 4, 6, 0)
         shell_layout.setSpacing(4)
-        shell_layout.addWidget(self.tile_bar)
+        # The search box at the right-hand end of the tool row (explicit
+        # user request, 2026-11-12): the Ctrl+H search, visible. View ▸
+        # Show Search Box shows or hides it; remembered.
+        from .widgets.search_box import SearchBox
+        tile_row = QHBoxLayout()
+        tile_row.setContentsMargins(0, 0, 0, 0)
+        tile_row.setSpacing(8)
+        tile_row.addWidget(self.tile_bar, 1)
+        self.search_box = SearchBox(self)
+        tile_row.addWidget(self.search_box, 0, Qt.AlignmentFlag.AlignVCenter)
+        settings = getattr(self, "_ui_settings", None) or {}
+        self.search_box.setVisible(bool(settings.get("search_box_visible", True)))
+        shell_layout.addLayout(tile_row)
         shell_layout.addWidget(splitter, 1)
 
         self.setCentralWidget(shell)
@@ -1180,6 +1195,8 @@ class MainWindow(QMainWindow):
         # over (explicit user request -- see widgets/wheel_guard.py).
         # Nothing can receive a wheel event before the window is shown.
         wheel_guard.install()
+        # Autosave, and the offer to restore a session that crashed.
+        self._start_recovery()
 
     def _apply_startup_ui(self) -> None:
         """Install the saved (or system) theme and interface font size.
@@ -1267,6 +1284,29 @@ class MainWindow(QMainWindow):
         from .command_palette import CommandPalette
         palette = self._command_palette = CommandPalette(self)
         return palette.open_palette()
+
+    def _on_search_shortcut(self) -> None:
+        """Ctrl+H / Help ▸ Search Commands…: into the search box when it is
+        shown (and not folded to a button), else the pop-up palette."""
+        box = getattr(self, "search_box", None)
+        if box is not None and not box.isHidden() and not box.is_compact():
+            box.start()
+            return
+        self.show_command_palette()
+
+    def _set_search_box_visible(self, visible: bool, save: bool = True) -> None:
+        """View ▸ Show Search Box; remembered as ``search_box_visible``."""
+        visible = bool(visible)
+        if not visible:
+            self.search_box.close_results()
+        self.search_box.setVisible(visible)
+        if self.search_box_action.isChecked() != visible:
+            blocked = self.search_box_action.blockSignals(True)
+            self.search_box_action.setChecked(visible)
+            self.search_box_action.blockSignals(blocked)
+        if save and hasattr(self, "_ui_settings"):
+            self._ui_settings["search_box_visible"] = visible
+            self._save_ui_settings()
 
     def show_shortcut_sheet(self):
         """Help ▸ Keyboard Shortcuts… (F1): see gui/shortcut_sheet.py."""
@@ -1479,6 +1519,13 @@ class MainWindow(QMainWindow):
         self.open_state_action.setToolTip("Reopen every spectrum of a saved openNMR state.")
         self.open_state_action.triggered.connect(self._on_open_state_clicked)
         file_menu.addAction(self.open_state_action)
+        self.recover_session_action = QAction("Recover Autosaved Session…", self)
+        self.recover_session_action.setToolTip(
+            "Reopen the autosave of a session that did not close normally (a crash, a power "
+            "cut). The last few are kept. Autosave: Settings ▸ Saving.")
+        self.recover_session_action.triggered.connect(
+            lambda _checked=False: self._on_recover_session_clicked())
+        file_menu.addAction(self.recover_session_action)
         self.show_log_action = QAction("Processing &Log…", self)
         self.show_log_action.setToolTip(
             "What has been done to the selected spectrum, when, and every save "
@@ -1579,6 +1626,14 @@ class MainWindow(QMainWindow):
             "Show the list of open experiments, or minimise it to a strip.")
         self.open_experiments_action.triggered.connect(self._set_open_experiments_open)
         view_menu.addAction(self.open_experiments_action)
+        self.search_box_action = QAction("Show &Search Box", self)
+        self.search_box_action.setCheckable(True)
+        self.search_box_action.setChecked(not self.search_box.isHidden())
+        self.search_box_action.setToolTip(
+            "Show or hide the search box at the right of the tool buttons. Ctrl+H searches "
+            "either way (in the box when it is shown).")
+        self.search_box_action.toggled.connect(self._set_search_box_visible)
+        view_menu.addAction(self.search_box_action)
         view_menu.addSeparator()
         pan_action = QAction("&Pan Mode", self)
         # Ctrl+Shift+P (Cmd+Shift+P on macOS) now opens the pulse sequence, as
@@ -1885,7 +1940,7 @@ class MainWindow(QMainWindow):
             "\"Where is…?\": search every menu action, panel, section and control, and go "
             "straight to it. Ctrl+H (Control+H on a Mac, where Cmd+H is the system's Hide).")
         palette_action.setProperty("palette_exclude", True)
-        palette_action.triggered.connect(lambda _checked=False: self.show_command_palette())
+        palette_action.triggered.connect(lambda _checked=False: self._on_search_shortcut())
         help_menu.addAction(palette_action)
         shortcuts_action = QAction("&Keyboard Shortcuts…", self)
         shortcuts_action.setShortcut(QKeySequence(SHEET_KEY))
@@ -3505,6 +3560,14 @@ class MainWindow(QMainWindow):
         if self._sidecar_save_timer.isActive():
             self._sidecar_save_timer.stop()
             self._run_debounced_sidecar_save()
+        # A normal close: no recovery is needed (io/recovery.py).
+        timer = getattr(self, "_autosave_timer", None)
+        if timer is not None:
+            timer.stop()
+        try:
+            io_recovery.clean_exit()
+        except OSError:
+            pass
         super().closeEvent(event)
 
     def _open_one(self, path: str, vendor: str) -> None:
@@ -7420,6 +7483,44 @@ class MainWindow(QMainWindow):
                 MplCanvas.DEFAULT_CROSSHAIR_COLOR, MplCanvas.DEFAULT_CROSSHAIR_WIDTH))
         crosshair_row_layout.addWidget(self.crosshair_style_reset_button)
         interface_form.addRow("Crosshair:", crosshair_row)
+        # Measure's arrows and labels (explicit user request, 2026-11-12:
+        # "change the size and colour of the Measure markers to make it
+        # easier to see"): colour, line width and text size, here and in
+        # the right-click menu of every plot's Measure button. Remembered.
+        measure_row = QWidget()
+        measure_row_layout = QHBoxLayout(measure_row)
+        measure_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.measure_colour_button = QPushButton()
+        self.measure_colour_button.setToolTip("Colour of Measure's arrows and labels on every plot.")
+        self.measure_colour_button.clicked.connect(self._on_measure_colour_clicked)
+        measure_row_layout.addWidget(self.measure_colour_button)
+        self.measure_width_spin = TypedDoubleSpinBox()
+        self.measure_width_spin.setRange(*MplCanvas.MEASUREMENT_WIDTH_RANGE)
+        self.measure_width_spin.setDecimals(1)
+        self.measure_width_spin.setSingleStep(0.2)
+        self.measure_width_spin.setSuffix(" pt")
+        self.measure_width_spin.setToolTip("Line width of Measure's arrows (and the size of the "
+                                           "first-click marker) on every plot.")
+        self.measure_width_spin.valueChanged.connect(
+            lambda value: self._set_measure_style(width=value))
+        measure_row_layout.addWidget(self.measure_width_spin)
+        self.measure_fontsize_spin = TypedDoubleSpinBox()
+        self.measure_fontsize_spin.setRange(*MplCanvas.MEASUREMENT_FONTSIZE_RANGE)
+        self.measure_fontsize_spin.setDecimals(1)
+        self.measure_fontsize_spin.setSingleStep(1.0)
+        self.measure_fontsize_spin.setSuffix(" pt text")
+        self.measure_fontsize_spin.setToolTip("Text size of Measure's labels on every plot.")
+        self.measure_fontsize_spin.valueChanged.connect(
+            lambda value: self._set_measure_style(fontsize=value))
+        measure_row_layout.addWidget(self.measure_fontsize_spin)
+        measure_reset_button = QPushButton("Reset")
+        measure_reset_button.setToolTip("Back to the default Measure style.")
+        measure_reset_button.clicked.connect(
+            lambda _checked=False: self._set_measure_style(
+                MplCanvas.DEFAULT_MEASUREMENT_COLOR, MplCanvas.DEFAULT_MEASUREMENT_WIDTH,
+                MplCanvas.DEFAULT_MEASUREMENT_FONTSIZE))
+        measure_row_layout.addWidget(measure_reset_button)
+        interface_form.addRow("Measure:", measure_row)
         # Zoom box (the dashed rectangle drawn while click-dragging to zoom):
         # line width, applied to every plot and remembered (explicit user
         # request: the default hairline is too thin).
@@ -7448,6 +7549,13 @@ class MainWindow(QMainWindow):
         for _canvas in self._all_canvases():
             _canvas.crosshairStyleChanged.connect(
                 lambda color, width: self._set_crosshair_style(color, width))
+            _canvas.measurementStyleChanged.connect(
+                lambda color, width, size: self._set_measure_style(color, width, size))
+        self._set_measure_style(
+            self._ui_settings.get("measure_color", MplCanvas.DEFAULT_MEASUREMENT_COLOR),
+            self._ui_settings.get("measure_width", MplCanvas.DEFAULT_MEASUREMENT_WIDTH),
+            self._ui_settings.get("measure_fontsize", MplCanvas.DEFAULT_MEASUREMENT_FONTSIZE),
+            save=False)
         self._set_crosshair_style(
             self._ui_settings.get("crosshair_color", MplCanvas.DEFAULT_CROSSHAIR_COLOR),
             self._ui_settings.get("crosshair_width", MplCanvas.DEFAULT_CROSSHAIR_WIDTH),
@@ -7505,6 +7613,34 @@ class MainWindow(QMainWindow):
             lambda: self.max_iterations_spin.setValue(core_fit_progress.DEFAULT_MAX_ITERATIONS))
         iterations_layout.addWidget(self.max_iterations_reset_button)
         fitting_form.addRow("Maximum iterations:", iterations_row)
+        # Convergence tolerance (explicit user request, 2026-11-12: "control
+        # the tolerance where the spectrum is considered converged").
+        self.fit_tolerance_combo = QComboBox()
+        for value in (1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12):
+            label = f"{value:.0e}".replace("e-0", "e-")
+            if value == core_fit_progress.DEFAULT_TOLERANCE:
+                label += " (default)"
+            self.fit_tolerance_combo.addItem(label, value)
+        self.fit_tolerance_combo.setEditable(False)
+        self.fit_tolerance_combo.setToolTip(
+            "A fit is taken as converged when one iteration changes the misfit, or the "
+            "parameters, by less than this fraction. Looser (1e-5) is quicker and stops "
+            "sooner; tighter (1e-10) is slower and more exact. 1e-8 is scipy's own default. "
+            "A fit that sets its own (the strongly coupled spin-system fit) keeps it.")
+        saved_tolerance = self._ui_settings.get("fit_tolerance")
+        try:
+            saved_tolerance = core_fit_progress.tolerance(saved_tolerance)
+        except (TypeError, ValueError):
+            saved_tolerance = core_fit_progress.DEFAULT_TOLERANCE
+        core_fit_progress.set_tolerance(saved_tolerance)
+        position = self.fit_tolerance_combo.findData(saved_tolerance)
+        if position < 0:
+            self.fit_tolerance_combo.addItem(f"{saved_tolerance:.1e}", saved_tolerance)
+            position = self.fit_tolerance_combo.count() - 1
+        self.fit_tolerance_combo.setCurrentIndex(position)
+        self.fit_tolerance_combo.currentIndexChanged.connect(
+            lambda _i: self._on_fit_tolerance_changed(self.fit_tolerance_combo.currentData()))
+        fitting_form.addRow("Convergence tolerance:", self.fit_tolerance_combo)
         layout.addWidget(CollapsibleSection("Fitting", content=fitting))
 
         # --- Sections shown ------------------------------------------
@@ -7622,6 +7758,19 @@ class MainWindow(QMainWindow):
         self.state_folder_open_button.setToolTip("Open the folder in your file browser.")
         self.state_folder_open_button.clicked.connect(self._on_show_state_folder)
         saving_form.addRow("", self.state_folder_open_button)
+        self.autosave_spin = TypedSpinBox()
+        self.autosave_spin.setRange(0, 120)
+        self.autosave_spin.setSuffix(" min")
+        self.autosave_spin.setSpecialValueText("Off")
+        self.autosave_spin.setValue(int(self._ui_settings.get(
+            "autosave_minutes", io_recovery.DEFAULT_INTERVAL_MIN)))
+        self.autosave_spin.setToolTip(
+            "How often the open session is saved for recovery after a crash (only when "
+            "something has changed). It is removed when openNMR closes normally; after a crash, "
+            "openNMR offers to restore it, or use File ▸ Recover Autosaved Session…. "
+            f"Kept in {io_recovery.recovery_root()}. 0 turns it off.")
+        self.autosave_spin.valueChanged.connect(lambda v: self._set_autosave_interval(v))
+        saving_form.addRow("Autosave every:", self.autosave_spin)
         layout.addWidget(CollapsibleSection("Saving", content=saving))
 
         # --- Default plot styles --------------------------------------
@@ -8167,6 +8316,12 @@ class MainWindow(QMainWindow):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
+    def _on_fit_tolerance_changed(self, value) -> None:
+        """Every fit from now on uses this convergence tolerance; saved."""
+        value = core_fit_progress.set_tolerance(float(value))
+        self._ui_settings["fit_tolerance"] = value
+        self._save_ui_settings()
+
     def _on_max_iterations_changed(self, value: int) -> None:
         """Every fit from now on stops at ``value`` iterations; saved."""
         core_fit_progress.set_max_iterations(int(value))
@@ -8224,6 +8379,37 @@ class MainWindow(QMainWindow):
             self._ui_settings["crosshair_color"] = color
             self._ui_settings["crosshair_width"] = width
             self._save_ui_settings()
+
+    def _set_measure_style(self, color=None, width=None, fontsize=None, save: bool = True) -> None:
+        """Settings ▸ Interface ▸ Measure, or a plot's Measure-button menu:
+        colour, line width and text size on every plot; remembered as
+        ``measure_color`` / ``measure_width`` / ``measure_fontsize``. A
+        value the canvas rejects leaves that part as it was."""
+        for canvas in self._all_canvases():
+            canvas.set_measurement_style(color, width, fontsize)
+        color, width, fontsize = self._all_canvases()[0].measurement_style()
+        swatch = QColor(matplotlib.colors.to_hex(color))
+        self.measure_colour_button.setText(swatch.name())
+        text_colour = "#000000" if swatch.lightness() > 128 else "#ffffff"
+        self.measure_colour_button.setStyleSheet(
+            f"background-color: {swatch.name()}; color: {text_colour};")
+        for spin, value in ((self.measure_width_spin, width),
+                            (self.measure_fontsize_spin, fontsize)):
+            blocked = spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(blocked)
+        if save:
+            self._ui_settings["measure_color"] = color
+            self._ui_settings["measure_width"] = width
+            self._ui_settings["measure_fontsize"] = fontsize
+            self._save_ui_settings()
+
+    def _on_measure_colour_clicked(self) -> None:
+        color, _width, _size = self._all_canvases()[0].measurement_style()
+        picked = QColorDialog.getColor(
+            QColor(matplotlib.colors.to_hex(color)), self, "Measure colour")
+        if picked.isValid():
+            self._set_measure_style(color=picked.name())
 
     def _set_zoom_box_width(self, width, save: bool = True) -> None:
         """Settings ▸ Interface ▸ Zoom box: the dashed zoom rectangle's line
@@ -8799,6 +8985,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Fit failed", str(exc))
                 return
         if fit_progress_box.stopped:
+            return
+        if fit_progress_box.stopped_early and len(slice_results) < len(stack):
+            self._partial_series_stopped(slice_results, len(stack))
             return
         self._warn_if_fit_near_region_edge(slice_results)
         # No single spectrum "owns" a Compare-stack fit the way a
@@ -12264,7 +12453,7 @@ class MainWindow(QMainWindow):
         if isinstance(override, str) and override.strip():
             return override.strip()
         if spectrum.metadata.vendor == "derived" and spectrum.metadata.source_path:
-            return str(spectrum.metadata.source_path)
+            return strip_label_suffix(str(spectrum.metadata.source_path))
         return self.session.label(index)
 
     def _save_as_dataset(self, index: int, folder: str) -> None:
@@ -12359,6 +12548,32 @@ class MainWindow(QMainWindow):
         (1-based), those slices of each 2D as spectra of their own, as an
         openNMR state. Nothing open is changed; each saved spectrum's log
         records where it went. Returns the folder."""
+        entries = self._state_entries(indices, slices, copy_2d)
+        folder = io_state.save_state(folder, name, entries, notes=notes,
+                                     app_version=_version.__version__, overwrite=overwrite)
+        if fit_values:
+            spectra = {}
+            for index in indices:
+                values = self._spectrum_fit_values(index)
+                if values["fits"] or values["kept fits"]:
+                    spectra[self.session.label(index)] = values
+            if spectra:
+                nb_fit_values.save_fitted_values(
+                    {nb_fit_values.FORMAT_KEY: nb_fit_values.FORMAT_VERSION, "state": name,
+                     "saved": io_history._stamp(None), "spectra": spectra},
+                    os.path.join(folder, FIT_VALUES_FILE))
+        for index in indices:
+            history = self._ensure_history(index)
+            if history is not None:
+                io_history.add_event(history, f"Saved in openNMR state “{name}”: {folder}",
+                                     kind="saved")
+                self._write_history(index)
+        return folder
+
+    def _state_entries(self, indices, slices=None, copy_2d: bool = False) -> list[dict]:
+        """What :func:`io.state.save_state` writes for spectra ``indices``
+        (and ``slices`` of 2Ds) -- shared by Save openNMR State and the
+        autosave."""
         entries = []
         for index in indices:
             self._flush_pending_state(index)
@@ -12392,25 +12607,123 @@ class MainWindow(QMainWindow):
                                 "kind": "slice", "spectrum": trace, "state": state,
                                 "source": None, "copy": True,
                                 "origin": parent.metadata.source_path})
-        folder = io_state.save_state(folder, name, entries, notes=notes,
-                                     app_version=_version.__version__, overwrite=overwrite)
-        if fit_values:
-            spectra = {}
-            for index in indices:
-                values = self._spectrum_fit_values(index)
-                if values["fits"] or values["kept fits"]:
-                    spectra[self.session.label(index)] = values
-            if spectra:
-                nb_fit_values.save_fitted_values(
-                    {nb_fit_values.FORMAT_KEY: nb_fit_values.FORMAT_VERSION, "state": name,
-                     "saved": io_history._stamp(None), "spectra": spectra},
-                    os.path.join(folder, FIT_VALUES_FILE))
-        for index in indices:
-            history = self._ensure_history(index)
-            if history is not None:
-                io_history.add_event(history, f"Saved in openNMR state “{name}”: {folder}",
-                                     kind="saved")
-                self._write_history(index)
+        return entries
+
+    # ---- Autosave and crash recovery (explicit user request, 2026-11-12) ----
+    # See io/recovery.py for how a crash is recognised and why the
+    # autosave is an ordinary openNMR state.
+
+    def _start_recovery(self) -> None:
+        """At start-up: set the autosave going, and offer to restore the
+        last session if it did not close normally."""
+        self._autosave_fingerprint = None
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.timeout.connect(lambda: self._autosave_now())
+        self._set_autosave_interval(
+            (getattr(self, "_ui_settings", None) or {}).get(
+                "autosave_minutes", io_recovery.DEFAULT_INTERVAL_MIN), save=False)
+        try:
+            crashed = io_recovery.take_crashed_session()
+        except OSError as exc:
+            self.statusBar().showMessage(f"Autosave folder unavailable: {exc}", 8000)
+            return
+        if crashed:
+            QTimer.singleShot(0, self, lambda: self._offer_recovery(crashed))
+
+    def _set_autosave_interval(self, minutes, save: bool = True) -> None:
+        """Settings ▸ Saving ▸ Autosave every (minutes; 0 = off); remembered
+        as ``autosave_minutes``."""
+        try:
+            minutes = max(0, int(minutes))
+        except (TypeError, ValueError):
+            minutes = io_recovery.DEFAULT_INTERVAL_MIN
+        timer = getattr(self, "_autosave_timer", None)
+        if timer is not None:
+            timer.stop()
+            if minutes:
+                timer.start(minutes * 60_000)
+        spin = getattr(self, "autosave_spin", None)
+        if spin is not None and spin.value() != minutes:
+            blocked = spin.blockSignals(True)
+            spin.setValue(minutes)
+            spin.blockSignals(blocked)
+        if save and hasattr(self, "_ui_settings"):
+            self._ui_settings["autosave_minutes"] = minutes
+            self._save_ui_settings()
+
+    def _session_fingerprint(self) -> str:
+        """Changes when anything an autosave would write changes."""
+        import hashlib
+        parts = []
+        for index in range(len(self.session)):
+            try:
+                state = self._history_state(index)
+            except Exception:  # noqa: BLE001 -- a fingerprint must never fail
+                state = {}
+            parts.append([id(self.session.spectra[index]), self.session.label(index), state])
+        text = json.dumps(parts, sort_keys=True, default=str)
+        return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+    def _autosave_now(self, force: bool = False) -> str | None:
+        """Write the open session to the recovery folder, if anything has
+        changed since the last autosave (or ``force``). Returns the folder
+        written, or None. Never raises: an autosave that cannot be written
+        says so in the status bar and the session carries on. Nothing is
+        added to any spectrum's log."""
+        try:
+            if not len(self.session):
+                if self._autosave_fingerprint is not None:
+                    shutil.rmtree(io_recovery.autosave_folder(), ignore_errors=True)
+                    self._autosave_fingerprint = None
+                return None
+            fingerprint = self._session_fingerprint()
+            if not force and fingerprint == self._autosave_fingerprint:
+                return None
+            for index in range(len(self.session)):
+                self._flush_pending_state(index)
+            entries = self._state_entries(range(len(self.session)))
+            folder = io_recovery.write_autosave(
+                lambda f: io_state.save_state(
+                    f, "Autosave", entries, notes="Written automatically while openNMR ran.",
+                    app_version=_version.__version__, overwrite=True))
+            self._autosave_fingerprint = fingerprint
+            return folder
+        except Exception as exc:  # noqa: BLE001 -- an autosave must never take the window down
+            self.statusBar().showMessage(f"Autosave failed: {exc}", 10000)
+            return None
+
+    def _offer_recovery(self, folder: str) -> bool:
+        """The last session did not close normally: offer its autosave."""
+        answer = QMessageBox.question(
+            self, "Restore the last session?",
+            "openNMR did not close normally last time. Its session was autosaved "
+            f"({io_recovery.describe(folder)}).\n\nRestore it now? If not, it stays available "
+            "from File ▸ Recover Autosaved Session….")
+        if answer == QMessageBox.StandardButton.Yes:
+            self._on_open_state_clicked(folder)
+            return True
+        self.statusBar().showMessage(
+            "The last session is kept: File ▸ Recover Autosaved Session… restores it.", 10000)
+        return False
+
+    def _on_recover_session_clicked(self) -> str | None:
+        """File ▸ Recover Autosaved Session…: one of the kept autosaves of
+        sessions that did not close normally (newest first)."""
+        folders = io_recovery.previous_sessions()
+        if not folders:
+            QMessageBox.information(
+                self, "Recover Autosaved Session",
+                "There is no autosaved session to recover: the recent sessions closed normally.")
+            return None
+        folder = folders[0]
+        if len(folders) > 1:
+            names = [io_recovery.describe(f) for f in folders]
+            choice, ok = QInputDialog.getItem(self, "Recover Autosaved Session",
+                                              "Session:", names, 0, False)
+            if not ok:
+                return None
+            folder = folders[names.index(choice)]
+        self._on_open_state_clicked(folder)
         return folder
 
     def _on_save_state_clicked(self) -> None:
@@ -21417,6 +21730,7 @@ class MainWindow(QMainWindow):
         peak_layout.addWidget(advanced_section)
 
         layout.addWidget(peak_box)
+        layout.addWidget(self._build_multiplet_section())
 
         fit_button = QPushButton("Fit Spectrum")
         fit_button.setToolTip(
@@ -24609,12 +24923,272 @@ class MainWindow(QMainWindow):
         self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
         self.peak_table.setItem(row, 4, QTableWidgetItem(multiplet))
         self.peak_table.setItem(row, 5, QTableWidgetItem(couplings))
+        self.peak_table.item(row, 0).setData(self._PEAK_EXACT_SHIFT_ROLE, float(shift))
         self.peak_table.blockSignals(False)
         if bounds:
             self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, bounds)
         if per_param_fixed:
             self.peak_table.item(row, 0).setData(self._PEAK_FIXED_ITEM_ROLE, per_param_fixed)
         self._refresh_peak_markers()
+
+    # ---- Multiplets and J couplings from picked lines (2026-11-12) ----------
+
+    def _build_multiplet_section(self) -> QWidget:
+        """Fit ▸ Solution NMR ▸ Multiplets and J couplings (explicit user
+        request, 2026-11-12): the lines in the peak table, grouped into
+        multiplets and read as first-order patterns -- name, centre and J
+        values, the coupling tree on the plot, and the line a paper quotes.
+        See notebook/multiplet_analysis.py for the method and its limits."""
+        content = QWidget()
+        v = QVBoxLayout(content)
+        blurb = QLabel(
+            "Pick every line of the multiplets (Pick Peak, or Auto-Pick Peaks), then Analyse. "
+            "Lines closer than the gap below are one multiplet; each is read as a first-order "
+            "pattern from the lines' positions and heights (phase and baseline first). One that "
+            "is not first order is reported as m, with its range.")
+        blurb.setWordWrap(True)
+        v.addWidget(blurb)
+        form = QFormLayout()
+        self.multiplet_gap_spin = TypedDoubleSpinBox()
+        self.multiplet_gap_spin.setRange(0.5, 5000.0)
+        self.multiplet_gap_spin.setDecimals(1)
+        self.multiplet_gap_spin.setSuffix(" Hz")
+        self.multiplet_gap_spin.setValue(nb_multiplets.DEFAULT_MAX_GAP_HZ)
+        self.multiplet_gap_spin.setToolTip(
+            "Lines no further apart than this belong to one multiplet. A little more than the "
+            "largest coupling you expect: about 20 Hz for ¹H; much more for ¹⁹F or ³¹P.")
+        form.addRow("Lines within:", self.multiplet_gap_spin)
+        self.multiplet_tolerance_spin = TypedDoubleSpinBox()
+        self.multiplet_tolerance_spin.setRange(0.01, 50.0)
+        self.multiplet_tolerance_spin.setDecimals(2)
+        self.multiplet_tolerance_spin.setSuffix(" Hz")
+        self.multiplet_tolerance_spin.setValue(nb_multiplets.DEFAULT_TOLERANCE_HZ)
+        self.multiplet_tolerance_spin.setToolTip(
+            "How far a line may sit from where the couplings put it, and how close two J "
+            "values must be to count as one (equivalent neighbours). About twice the digital "
+            "resolution (Hz per point) is a good start.")
+        form.addRow("Tolerance:", self.multiplet_tolerance_spin)
+        v.addLayout(form)
+        self.multiplet_tree_check = QCheckBox("Draw the coupling trees on the plot")
+        self.multiplet_tree_check.setChecked(True)
+        self.multiplet_tree_check.toggled.connect(lambda _on: self._draw_coupling_trees())
+        v.addWidget(self.multiplet_tree_check)
+        row = QHBoxLayout()
+        self.multiplet_analyse_button = QPushButton("Analyse Picked Lines")
+        self.multiplet_analyse_button.setToolTip(
+            "Group the peak table's lines into multiplets and give each one's pattern, centre "
+            "and J values.")
+        self.multiplet_analyse_button.clicked.connect(self._on_analyse_multiplets_clicked)
+        row.addWidget(self.multiplet_analyse_button)
+        self.multiplet_to_fit_button = QPushButton("Use in the Fit")
+        self.multiplet_to_fit_button.setToolTip(
+            "Replace each multiplet's lines in the peak table with one row at its centre, "
+            "with its pattern and J values, so Fit Spectrum refines them (and the shared "
+            "width) against the whole multiplet.")
+        self.multiplet_to_fit_button.setEnabled(False)
+        self.multiplet_to_fit_button.clicked.connect(self._on_multiplets_to_fit_clicked)
+        row.addWidget(self.multiplet_to_fit_button)
+        self.multiplet_copy_button = QPushButton("Copy Report")
+        self.multiplet_copy_button.setToolTip(
+            "Copy the line a paper quotes, e.g. ¹H NMR (400 MHz) δ 7.26 (d, J = 8.1 Hz), …")
+        self.multiplet_copy_button.setEnabled(False)
+        self.multiplet_copy_button.clicked.connect(self._on_copy_multiplet_report)
+        row.addWidget(self.multiplet_copy_button)
+        row.addStretch(1)
+        v.addLayout(row)
+        self.multiplet_results_label = ReportLabel("")
+        v.addWidget(self.multiplet_results_label)
+        self._multiplet_results = []
+        self._multiplet_report_text = ""
+        self._multiplet_rows = []
+        self._coupling_tree_artists = []
+        # An edit to the peak table after an analysis: its rows no longer
+        # match the lines analysed, so Use in the Fit waits for a new one.
+        model = self.peak_table.model()
+        for signal in (model.rowsInserted, model.rowsRemoved, model.dataChanged):
+            signal.connect(lambda *_a: self._invalidate_multiplet_rows())
+        self.multiplet_section = CollapsibleSection("Multiplets and J couplings", content=content)
+        return self.multiplet_section
+
+    def _invalidate_multiplet_rows(self) -> None:
+        if getattr(self, "_multiplet_rows", None):
+            self._multiplet_rows = []
+            self.multiplet_to_fit_button.setEnabled(False)
+            self.multiplet_to_fit_button.setToolTip(
+                "The peak table has changed since the analysis: Analyse Picked Lines again first.")
+
+    def _picked_line_shifts(self) -> list[float]:
+        return [shift for _row, shift in self._picked_lines()]
+
+    def _picked_lines(self) -> list[tuple[int, float]]:
+        """``(table row, shift)`` of every line in the peak table."""
+        shifts = []
+        for row in range(self.peak_table.rowCount()):
+            item = self.peak_table.item(row, 0)
+            try:
+                shown = float(item.text())
+            except (AttributeError, ValueError):
+                continue
+            exact = item.data(self._PEAK_EXACT_SHIFT_ROLE)
+            # The exact value while the cell still shows it; a typed edit wins.
+            if isinstance(exact, float) and f"{exact:.4g}" == item.text().strip():
+                shifts.append((row, exact))
+            else:
+                shifts.append((row, shown))
+        return shifts
+
+    def _on_analyse_multiplets_clicked(self) -> list[dict] | None:
+        index = self._selected_index()
+        if index is None:
+            self.statusBar().showMessage("Select a spectrum first.", 5000)
+            return None
+        lines = self._picked_lines()
+        shifts = [shift for _row, shift in lines]
+        self._multiplet_rows = [row for row, _shift in lines]
+        if not shifts:
+            self.multiplet_results_label.setText(
+                "No lines picked: use Pick Peak (click each line) or Auto-Pick Peaks first.")
+            return None
+        spectrum = self.session.spectra[index]
+        try:
+            target = self._peak_pick_target(spectrum)
+            results = nb_multiplets.analyse_multiplets(
+                shifts, spectrum=target, max_gap_hz=self.multiplet_gap_spin.value(),
+                tolerance_hz=self.multiplet_tolerance_spin.value())
+        except (ValueError, IndexError) as exc:
+            self.multiplet_results_label.setText(f"Cannot analyse: {exc}")
+            return None
+        mhz = nb_multiplets.spectrum_mhz(target)
+        nucleus = target.metadata.nucleus or spectrum.metadata.nucleus
+        self._multiplet_results = results
+        self._multiplet_report_text = nb_multiplets.format_report(results, nucleus, mhz)
+        plain = self._multiplet_plain(results)
+        muted, warn = self.multiplet_results_label.colours()
+        self.multiplet_results_label.setReport(plain, self._multiplet_html(results, muted, warn))
+        self.multiplet_to_fit_button.setEnabled(any(r["first_order"] for r in results))
+        self.multiplet_to_fit_button.setToolTip(
+            "Replace each multiplet's lines in the peak table with one row at its centre, "
+            "with its pattern and J values, so Fit Spectrum refines them (and the shared "
+            "width) against the whole multiplet.")
+        self.multiplet_copy_button.setEnabled(True)
+        self._draw_coupling_trees()
+        history = self._ensure_history(index)
+        if history is not None:
+            io_history.add_event(
+                history, f"Multiplet analysis of {len(shifts)} picked lines (lines within "
+                f"{self.multiplet_gap_spin.value():g} Hz, tolerance "
+                f"{self.multiplet_tolerance_spin.value():g} Hz): {self._multiplet_report_text}",
+                kind="analysis")
+        return results
+
+    def _multiplet_plain(self, results) -> str:
+        lines = [self._multiplet_report_text, ""]
+        for r in sorted(results, key=lambda r: -r["centre_ppm"]):
+            text = nb_multiplets.format_multiplet(r, decimals=4, j_decimals=2)
+            if r.get("first_order") and np.isfinite(r.get("rms_hz", np.nan)) and r["J_hz"]:
+                text += f" – {len(r['lines_ppm'])} lines, RMS {r['rms_hz']:.2f} Hz"
+            lines.append(text)
+            lines += [f"  ⚠ {n}" for n in r["notes"]]
+        return "\n".join(lines)
+
+    def _multiplet_html(self, results, muted, warn) -> str:
+        from html import escape
+        rows = []
+        for r in sorted(results, key=lambda r: -r["centre_ppm"]):
+            centre = (f"{r['range_ppm'][0]:.4f}–{r['range_ppm'][1]:.4f}" if r["pattern"] == "m"
+                      else f"{r['centre_ppm']:.4f}")
+            js = ", ".join(f"{j:.2f}" for j in r["J_hz"]) or "—"
+            rms = (f"{r['rms_hz']:.2f}" if r.get("first_order") and r["J_hz"]
+                   and np.isfinite(r.get("rms_hz", np.nan)) else "—")
+            rows.append(f'<tr><td align="right" style="padding-right:12px;">{centre}</td>'
+                        f'<td style="padding-right:12px; font-weight:600;">{escape(r["pattern"])}</td>'
+                        f'<td style="padding-right:12px;">{js}</td>'
+                        f'<td align="right" style="padding-right:12px;">{len(r["lines_ppm"])}</td>'
+                        f'<td align="right">{rms}</td></tr>')
+        head = "".join(f'<th align="left" style="color:{muted}; font-weight:600; '
+                       f'padding-right:12px;">{h}</th>'
+                       for h in ("<i>δ</i> (ppm)", "", "<i>J</i> (Hz)", "lines", "RMS (Hz)"))
+        out = [f'<p style="margin-top:0px; margin-bottom:6px;"><span style="font-size:large; '
+               f'font-weight:600;">{len(results)} multiplet{"s" if len(results) != 1 else ""}'
+               f'</span></p>',
+               f'<table cellspacing="0" cellpadding="1"><tr>{head}</tr>{"".join(rows)}</table>',
+               f'<p style="margin-top:6px; margin-bottom:6px;">{escape(self._multiplet_report_text)}</p>']
+        for r in results:
+            for note in r["notes"]:
+                out.append(f'<p style="margin-top:0px; margin-bottom:4px;"><span style="color:{warn};'
+                           f' font-weight:600;">⚠&nbsp;</span>{escape(format(r["centre_ppm"], ".3f"))}: '
+                           f'{escape(note)}</p>')
+        out.append(f'<p style="margin-top:4px; margin-bottom:0px;"><span style="color:{muted};">'
+                   "First order: exact when the shift difference is much larger than J. "
+                   "Strongly coupled spins need the strongly coupled spin-system fit.</span></p>")
+        return "".join(out)
+
+    def _clear_coupling_trees(self) -> None:
+        for artist in getattr(self, "_coupling_tree_artists", []):
+            try:
+                artist.remove()
+            except (ValueError, NotImplementedError, AttributeError):
+                pass
+        self._coupling_tree_artists = []
+
+    def _draw_coupling_trees(self) -> None:
+        """The trees above the multiplets on the Spectrum plot (a 1D view)."""
+        self._clear_coupling_trees()
+        results = getattr(self, "_multiplet_results", None)
+        canvas = self.canvas
+        if (results and self.multiplet_tree_check.isChecked() and canvas.ax is not None
+                and canvas._contour_spectrum is None and canvas._axis_unit == "ppm"):
+            colour = canvas.measurement_style()[0] if hasattr(canvas, "measurement_style") else "tab:blue"
+            self._coupling_tree_artists = nb_multiplets.plot_coupling_trees(
+                canvas.ax, results, color=colour)
+        canvas.canvas.draw_idle()
+
+    def _on_multiplets_to_fit_clicked(self) -> None:
+        """Each first-order multiplet's lines -> one peak-table row at its
+        centre with its pattern and J values; lines of an ``m`` stay."""
+        results = getattr(self, "_multiplet_results", None) or []
+        if not results:
+            return
+        # The table rows the analysed lines came from (the analysis moves
+        # each line to its peak top, so positions no longer match the cells).
+        rows = list(getattr(self, "_multiplet_rows", []))
+        if not rows:
+            return
+        self._multiplet_rows = []
+        replaced_rows = {rows[i] for r in results if r["first_order"]
+                         for i in r.get("indices", []) if i < len(rows)}
+        widths = []
+        for row in range(self.peak_table.rowCount()):
+            try:
+                widths.append(float(self.peak_table.item(row, 1).text()))
+            except (AttributeError, ValueError):
+                pass
+        fwhm = float(np.median(widths)) if widths else 0.002
+        for row in sorted(replaced_rows, reverse=True):
+            if row < self.peak_table.rowCount():
+                self.peak_table.removeRow(row)
+        added = 0
+        for r in results:
+            if not r["first_order"]:
+                continue
+            counts = r["counts"]
+            js = [j for j, n in zip(r["J_hz"], counts)]
+            self._add_peak_row(shift=r["centre_ppm"], fwhm=fwhm, eta=0.5,
+                               multiplet=nb_multiplets._mult.multiplet_name(counts) if counts else "",
+                               couplings=", ".join(f"{j:.2f}" for j in js))
+            added += 1
+        self._refresh_peak_markers()
+        # Done: the rows it described are gone, so it needs a new analysis.
+        self.multiplet_to_fit_button.setEnabled(False)
+        self.multiplet_to_fit_button.setToolTip(
+            "Already used: Analyse Picked Lines again to use a new analysis.")
+        self.statusBar().showMessage(
+            f"{added} multiplet row(s) in the peak table, in place of their lines: Fit Spectrum "
+            "refines the shifts, J values and widths.", 8000)
+
+    def _on_copy_multiplet_report(self) -> None:
+        QApplication.clipboard().setText(getattr(self, "_multiplet_report_text", ""))
+        self.statusBar().showMessage("Copied the multiplet report.", 4000)
 
     def _on_peak_table_item_changed(self, item) -> None:
         """Typing a multiplet (dt, q ...) fills in a starting J for each
@@ -24682,6 +25256,10 @@ class MainWindow(QMainWindow):
     #: existing bounds-only code (persistence, _update_peak_table_from_fit)
     #: didn't need to change shape to gain this.
     _PEAK_FIXED_ITEM_ROLE = Qt.ItemDataRole.UserRole + 1
+    #: The shift exactly as picked (the cell shows 4 significant figures,
+    #: up to 0.005 ppm -- 2 Hz at 400 MHz -- off), for the multiplet
+    #: analysis; used while the cell still shows that value.
+    _PEAK_EXACT_SHIFT_ROLE = Qt.ItemDataRole.UserRole + 40
 
     def _on_set_peak_bounds(self, row: int) -> None:
         """A peak row's own "Fixed" checkbox (column 3) fixes *every*
@@ -27223,9 +27801,28 @@ class MainWindow(QMainWindow):
                 return
         if fit_progress_box.stopped:
             return
+        if fit_progress_box.stopped_early and len(results) < len(entries):
+            self._partial_series_stopped(results, len(entries))
+            return
         self._warn_if_fit_near_region_edge(results)
 
         self._show_spectral_fit_results(spectrum, results)
+
+    def _partial_series_stopped(self, results: list[dict], n_slices: int) -> None:
+        """Stop and Keep Best part-way through a series. Fit Curve pairs
+        every slice with its delay, so a part-fitted series is not kept as
+        the spectrum's fit (it could be paired with the wrong delays); what
+        the stop kept is the slice reached, as the peak table's starting
+        values, so fitting again carries on from there."""
+        if results:
+            self._update_peak_table_from_fit(results[-1])
+        QMessageBox.information(
+            self, "Series fit stopped",
+            f"The fit was stopped at slice {len(results)} of {n_slices}.\n\n"
+            "Fit Curve uses the whole series, so these partial results are not kept as this "
+            "spectrum's fit. The peak table now starts from the slice reached"
+            + (f" (slice {len(results)})" if results else "")
+            + ": Fit Spectrum again carries on from there.")
 
     def _run_curve_fit(self, slice_results: list[dict], n_slices: int, reference_spectrum,
                         persist_to=None) -> None:

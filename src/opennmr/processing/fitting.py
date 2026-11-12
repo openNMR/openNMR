@@ -1998,6 +1998,10 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
     first_converged = None
 
     for k_slice, (slice_type, trace) in enumerate(selected):
+        # Stopped keeping the best so far (core.fit_progress): the slice
+        # in progress has its result; the rest are not fitted.
+        if _fit_progress.stopped_early():
+            break
         if len(selected) > 1:
             _fit_progress.set_stage(f"{slice_type} {k_slice + 1} of {len(selected)}")
 

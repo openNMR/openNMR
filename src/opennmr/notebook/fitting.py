@@ -1450,6 +1450,8 @@ def NMR2D_fit_slices(slices, peak_defs, mode="rows", fit_regions=None,
     fitted = {"rows": [], "columns": []}
 
     for slice_type, s in selected:
+        if _fit_progress.stopped_early():
+            break               # stopped keeping the best so far: see core.fit_progress
 
         results = prepare_trace_for_fit(s, normalise=normalise)
         x = results["x_ppm"]

@@ -300,6 +300,10 @@ from .simpson_fit import fit_simpson_templates, SIMPSONfit_spectrum, SIMPSONplot
 from ..io.export import export_spectrum, read_jcamp_spectrum
 from ..io.load_cache import read as load_cached
 
+from .multiplet_analysis import (
+    analyse_multiplets, analyse_multiplet, format_report as format_multiplet_report,
+    plot_coupling_trees, report_rows as multiplet_rows,
+)
 from .jcoupling_fitting import (
     jcoupling_site_lineshape, build_jcoupling_model, initialise_jcoupling_params, build_jcoupling_bounds,
     fit_jcoupling_spectrum, evaluate_jcoupling_fit, print_jcoupling_fit_report, NMR1dplot_with_jcoupling_fit,
@@ -514,6 +518,9 @@ __all__ = [
     "fit_simpson_templates", "SIMPSONfit_spectrum", "SIMPSONplot_fit",
     # export (any vendor -> .csv, .xy, JCAMP-DX)
     "export_spectrum", "read_jcamp_spectrum", "load_cached",
+    # multiplet_analysis (multiplets and J couplings from picked lines)
+    "analyse_multiplets", "analyse_multiplet", "format_multiplet_report", "plot_coupling_trees",
+    "multiplet_rows",
     # jcoupling_fitting
     "jcoupling_site_lineshape", "build_jcoupling_model", "initialise_jcoupling_params", "build_jcoupling_bounds",
     "fit_jcoupling_spectrum", "evaluate_jcoupling_fit", "print_jcoupling_fit_report", "NMR1dplot_with_jcoupling_fit",

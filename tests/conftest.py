@@ -78,6 +78,10 @@ def _isolate_interface_settings(tmp_path, monkeypatch):
     # Saved copies of slow reads (io.load_cache): never the user's own
     # cache folder, and never one test's copy served to another.
     monkeypatch.setenv("OPENNMR_CACHE_DIR", str(tmp_path / "load_cache"))
+    # Autosave and crash recovery (io.recovery): never the user's own
+    # recovery folder -- a test window would otherwise take a running
+    # app's lock for a crashed session and move its autosave aside.
+    monkeypatch.setenv("OPENNMR_RECOVERY_DIR", str(tmp_path / "recovery"))
     main_window = sys.modules.get("opennmr.gui.main_window")
     if main_window is not None:
         monkeypatch.setattr(main_window.MainWindow, "_UI_SETTINGS_PATH",

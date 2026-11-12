@@ -23,6 +23,7 @@ import matplotlib.colors
 import matplotlib.container
 import matplotlib.lines
 import matplotlib.patches
+import matplotlib.text
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
@@ -1007,11 +1008,23 @@ class MplCanvas(QWidget):
     #: button's right-click menu -- MainWindow applies it to every canvas
     #: and saves it (Settings ▸ Interface holds the same two controls).
     crosshairStyleChanged = Signal(str, float)
+    #: Measure's colour, line width and text size were changed from its
+    #: toolbar button's menu: ``(colour, line width, text size)``, so the
+    #: window can apply them to every plot and remember them.
+    measurementStyleChanged = Signal(str, float, float)
 
     #: What the crosshair looks like unless the user has chosen otherwise.
     DEFAULT_CROSSHAIR_COLOR = "0.35"
     DEFAULT_CROSSHAIR_WIDTH = 0.8
     CROSSHAIR_WIDTH_RANGE = (0.1, 6.0)
+    #: What Measure's arrows and labels look like unless the user has
+    #: chosen otherwise (explicit user request, 2026-11-12: "change the
+    #: size and colour of the Measure markers to make it easier to see").
+    DEFAULT_MEASUREMENT_COLOR = "tab:red"
+    DEFAULT_MEASUREMENT_WIDTH = 1.4
+    DEFAULT_MEASUREMENT_FONTSIZE = 10.0
+    MEASUREMENT_WIDTH_RANGE = (0.3, 8.0)
+    MEASUREMENT_FONTSIZE_RANGE = (5.0, 40.0)
     #: The dashed zoom box drawn while click-dragging a region to zoom
     #: to: line width in screen pixels (matplotlib's own is a hairline of
     #: 1 px -- explicit user request: "too thin", adjustable in Settings).
@@ -1123,6 +1136,10 @@ class MplCanvas(QWidget):
             self.set_measurement_mode,
             checked=False,
         )
+        self._measure_button.setToolTip(self._measure_button.toolTip()
+                                         + " Right-click for its colour, line width and text size.")
+        self._measure_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._measure_button.customContextMenuRequested.connect(self._on_measure_button_menu)
         # Click a peak for its full width at half maximum (explicit user
         # request, 2026-10-16), 1D and 2D; an estimate, said so, where
         # peaks overlap -- notebook.peak_width.
@@ -1533,6 +1550,10 @@ class MplCanvas(QWidget):
         # Crosshair appearance (see set_crosshair_style).
         self._crosshair_color = self.DEFAULT_CROSSHAIR_COLOR
         self._crosshair_width = self.DEFAULT_CROSSHAIR_WIDTH
+        # Measure's appearance (see set_measurement_style).
+        self._measurement_color = self.DEFAULT_MEASUREMENT_COLOR
+        self._measurement_width = self.DEFAULT_MEASUREMENT_WIDTH
+        self._measurement_fontsize = self.DEFAULT_MEASUREMENT_FONTSIZE
         self._zoom_box_width = self.DEFAULT_ZOOM_BOX_WIDTH
         self._region_select_start: float | None = None  # x-data value of the drag's own start
         self._region_select_ax = None  # axes the current region-select drag started on
@@ -1983,6 +2004,128 @@ class MplCanvas(QWidget):
             return
         self.set_crosshair_style(color, width)
         self.crosshairStyleChanged.emit(*self.crosshair_style())
+
+    def measurement_style(self) -> tuple[str, float, float]:
+        """``(colour, line width in points, text size in points)`` of
+        Measure's arrows, markers and labels."""
+        return self._measurement_color, self._measurement_width, self._measurement_fontsize
+
+    def set_measurement_style(self, color=None, linewidth=None, fontsize=None) -> None:
+        """Change Measure's colour, line width and/or text size; ``None``
+        leaves that one as it is. As :meth:`set_crosshair_style`: a colour
+        matplotlib cannot read, or a value outside its range, is ignored,
+        so a stale saved setting never stops a plot drawing. Measurements
+        already on the plot are restyled at once."""
+        if color is not None:
+            color = str(color)
+            if matplotlib.colors.is_color_like(color):
+                self._measurement_color = color
+        for value, attr, (lo, hi) in ((linewidth, "_measurement_width", self.MEASUREMENT_WIDTH_RANGE),
+                                      (fontsize, "_measurement_fontsize",
+                                       self.MEASUREMENT_FONTSIZE_RANGE)):
+            if value is None:
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if lo <= number <= hi:
+                setattr(self, attr, number)
+        self._restyle_measurements()
+
+    def _measure_marker_size(self) -> float:
+        """The first click's "+" grows with the line width."""
+        return 11.0 * max(1.0, self._measurement_width / self.DEFAULT_MEASUREMENT_WIDTH)
+
+    def _restyle_measurements(self) -> None:
+        """Measure's own artists (not Width's, which share the list) in
+        the current style."""
+        colour, width, size = self.measurement_style()
+        changed = False
+        for artist in self._measurement_artists:
+            if not getattr(artist, "_opennmr_measure", False):
+                continue
+            changed = True
+            if isinstance(artist, matplotlib.text.Annotation) and artist.arrow_patch is not None:
+                artist.arrow_patch.set_color(colour)
+                artist.arrow_patch.set_linewidth(width)
+                artist.arrow_patch.set_mutation_scale(self._measure_head_scale())
+            elif isinstance(artist, matplotlib.text.Text):
+                artist.set_color(colour)
+                artist.set_fontsize(size)
+                patch = artist.get_bbox_patch()
+                if patch is not None:
+                    patch.set_edgecolor(colour)
+            elif isinstance(artist, matplotlib.lines.Line2D):
+                artist.set_color(colour)
+                artist.set_markeredgewidth(width + 0.2)
+                artist.set_markersize(self._measure_marker_size())
+            elif isinstance(artist, matplotlib.patches.FancyArrowPatch):
+                artist.set_color(colour)
+                artist.set_linewidth(width)
+                artist.set_mutation_scale(self._measure_head_scale())
+        if changed:
+            self.canvas.draw_idle()
+
+    def _measure_head_scale(self) -> float:
+        """Arrow-head size, in proportion to the line (matplotlib's own
+        default, 10, at the default width)."""
+        return 10.0 * max(1.0, self._measurement_width / self.DEFAULT_MEASUREMENT_WIDTH)
+
+    def _on_measure_button_menu(self, pos) -> None:
+        """Right-click on the Measure button: colour, line width, text
+        size, reset. Emitted (not applied here) so every plot changes
+        together and the choice is remembered -- as for the Crosshair."""
+        menu = QMenu(self._measure_button)
+        colour_action = menu.addAction("Colour…")
+        width_action = menu.addAction("Line width…")
+        size_action = menu.addAction("Text size…")
+        menu.addSeparator()
+        reset_action = menu.addAction("Reset to default")
+        chosen = menu.exec(self._measure_button.mapToGlobal(pos))
+        style = self._measure_style_from_menu(chosen, colour_action, width_action, size_action,
+                                              reset_action)
+        if style is not None:
+            self._apply_measure_menu_style(style)
+
+    def _apply_measure_menu_style(self, style) -> None:
+        """Apply a style chosen from the button menu here, and announce it
+        so the window applies it to every plot and remembers it."""
+        self.set_measurement_style(*style)
+        self.measurementStyleChanged.emit(*self.measurement_style())
+
+    def _measure_style_from_menu(self, chosen, colour_action, width_action, size_action,
+                                 reset_action):
+        """The style a menu choice asks for, or None (a seam for tests:
+        the dialogs it opens are modal)."""
+        colour, width, size = self.measurement_style()
+        if chosen is colour_action:
+            from PySide6.QtGui import QColor
+            picked = QColorDialog.getColor(
+                QColor(matplotlib.colors.to_hex(colour)), self, "Measure colour")
+            if not picked.isValid():
+                return None
+            colour = picked.name()
+        elif chosen is width_action:
+            lo, hi = self.MEASUREMENT_WIDTH_RANGE
+            value, ok = QInputDialog.getDouble(
+                self, "Measure line width", "Line width (points):", width, lo, hi, 2)
+            if not ok:
+                return None
+            width = value
+        elif chosen is size_action:
+            lo, hi = self.MEASUREMENT_FONTSIZE_RANGE
+            value, ok = QInputDialog.getDouble(
+                self, "Measure text size", "Text size (points):", size, lo, hi, 1)
+            if not ok:
+                return None
+            size = value
+        elif chosen is reset_action:
+            colour, width, size = (self.DEFAULT_MEASUREMENT_COLOR, self.DEFAULT_MEASUREMENT_WIDTH,
+                                   self.DEFAULT_MEASUREMENT_FONTSIZE)
+        else:
+            return None
+        return colour, width, size
 
     def set_measurement_mode(self, enabled: bool) -> None:
         """Toggle measurement mode: while on, clicking two points on
@@ -9937,7 +10080,7 @@ class MplCanvas(QWidget):
 
     #: Colour of every measurement annotation, and the gid marking the
     #: first-click marker so it can be cleared once the pair completes.
-    _MEASUREMENT_COLOR = "tab:red"
+    _MEASUREMENT_COLOR = "tab:red"     # the default; the live one is _measurement_color
     _MEASUREMENT_PENDING_GID = "measurement_pending"
 
     #: Imaginary-part colour for the FID's "Real + Imaginary" display
@@ -10531,9 +10674,11 @@ class MplCanvas(QWidget):
         click of the pair does nothing observable at all, which reads
         as measurement mode being broken."""
         marker = ax.plot(
-            [x], [y], marker="+", markersize=11, markeredgewidth=1.6,
-            color=self._MEASUREMENT_COLOR, zorder=60, gid=self._MEASUREMENT_PENDING_GID,
+            [x], [y], marker="+", markersize=self._measure_marker_size(),
+            markeredgewidth=self._measurement_width + 0.2,
+            color=self._measurement_color, zorder=60, gid=self._MEASUREMENT_PENDING_GID,
         )[0]
+        marker._opennmr_measure = True
         self._measurement_artists.append(marker)
         self.canvas.draw_idle()
 
@@ -10658,16 +10803,18 @@ class MplCanvas(QWidget):
         from matplotlib.patches import ConnectionPatch
         arrow = ConnectionPatch(
             xyA=(x1, y1), coordsA=ax1.transData, xyB=(x2, y2), coordsB=ax2.transData,
-            arrowstyle="<|-|>", color=self._MEASUREMENT_COLOR, linewidth=1.4,
-            shrinkA=0, shrinkB=0, zorder=60)
+            arrowstyle="<|-|>", color=self._measurement_color, linewidth=self._measurement_width,
+            mutation_scale=self._measure_head_scale(), shrinkA=0, shrinkB=0, zorder=60)
         self.figure.add_artist(arrow)
         p1 = self.figure.transFigure.inverted().transform(ax1.transData.transform((x1, y1)))
         p2 = self.figure.transFigure.inverted().transform(ax2.transData.transform((x2, y2)))
         label = self.figure.text(
             (p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0, summary,
-            color=self._MEASUREMENT_COLOR, fontsize=10, ha="center", va="center", zorder=61,
+            color=self._measurement_color, fontsize=self._measurement_fontsize, ha="center",
+            va="center", zorder=61,
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
-                      edgecolor=self._MEASUREMENT_COLOR, alpha=0.9))
+                      edgecolor=self._measurement_color, alpha=0.9))
+        arrow._opennmr_measure = label._opennmr_measure = True
         self._measurement_artists.extend((arrow, label))
         self.canvas.draw_idle()
 
@@ -10679,17 +10826,19 @@ class MplCanvas(QWidget):
         rarely a single measurement."""
         arrow = ax.annotate(
             "", xy=(x2, y2), xytext=(x1, y1), xycoords="data", textcoords="data",
-            arrowprops=dict(arrowstyle="<|-|>", color=self._MEASUREMENT_COLOR,
-                            linewidth=1.4, shrinkA=0, shrinkB=0),
+            arrowprops=dict(arrowstyle="<|-|>", color=self._measurement_color,
+                            linewidth=self._measurement_width,
+                            mutation_scale=self._measure_head_scale(), shrinkA=0, shrinkB=0),
             annotation_clip=False, zorder=60,
         )
         label = ax.text(
             (x1 + x2) / 2.0, max(y1, y2), summary,
-            color=self._MEASUREMENT_COLOR, fontsize=10, ha="center", va="bottom",
-            zorder=61, clip_on=False,
+            color=self._measurement_color, fontsize=self._measurement_fontsize, ha="center",
+            va="bottom", zorder=61, clip_on=False,
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
-                      edgecolor=self._MEASUREMENT_COLOR, alpha=0.9),
+                      edgecolor=self._measurement_color, alpha=0.9),
         )
+        arrow._opennmr_measure = label._opennmr_measure = True
         self._measurement_artists.extend((arrow, label))
         self.canvas.draw_idle()
 
@@ -10725,8 +10874,10 @@ def _spectrum_label(spectrum: NMRSpectrum) -> str:
         # A derived spectrum's source_path is a *label*, not a path --
         # basename()ing it truncates at any "/" it contains (a unit
         # like "m^2/s", a ratio from spectrum arithmetic). Same fix as
-        # Session.label; both read this field the same way.
-        name = meta.source_path
+        # Session.label; both read this field the same way -- including
+        # dropping a suffix it already carries (strip_label_suffix).
+        from ..session import strip_label_suffix
+        name = strip_label_suffix(meta.source_path)
     else:
         name = os.path.basename(meta.source_path.rstrip("/")) if meta.source_path else None
     if name and meta.nucleus:
