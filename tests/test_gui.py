@@ -11292,7 +11292,9 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     # (test_gui_combined_consolidation.py).
     # 2026-10-16: Integration to its own Integrate tile, and the Fit plot
     # options to the fit's right-click menu.
-    assert titles == ["Solution NMR", "Solid-state NMR",
+    # 2026-11-12: Multiplets and J couplings, inside Solution NMR (under its
+    # peak table), so listed right after it (test_multiplet_analysis.py).
+    assert titles == ["Solution NMR", "Multiplets and J couplings", "Solid-state NMR",
                       "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)",
                       "SIMPSON spectrum", "Multi-spectrum", "Kept fit models"]
 

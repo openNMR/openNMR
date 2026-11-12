@@ -42,7 +42,10 @@ def test_sections_are_where_asked(qapp):  # noqa: F811
     assert "J-coupling" not in fit and "CSA/Dipolar" not in fit
     # Integration moved to its own Integrate tile (2026-10-16).
     assert "Integration" not in fit
-    assert fit.index("Solution NMR") + 1 == fit.index("Solid-state NMR")
+    # Multiplets and J couplings sits inside Solution NMR (2026-11-12), so it
+    # is listed between the two.
+    assert fit.index("Solution NMR") + 1 == fit.index("Multiplets and J couplings")
+    assert fit.index("Multiplets and J couplings") + 1 == fit.index("Solid-state NMR")
     assert _titles(window, "Simulate")[:2] == ["Solution NMR", "Solid-state NMR"]
     for model, panel in ((window.combined_fit_model, window.jcoupling_fit_panel),
                          (window.combined_sim_model, window.jcoupling_sim_panel)):
