@@ -206,8 +206,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
             "orca_pnmr files only: the .xyz or ORCA .out of the same molecule")
         self.dft_structure_edit.setToolTip(
             "An orca_pnmr input (.pnmr.inp) or output has no atomic positions. Give the "
-            "geometry it was calculated for -- an .xyz (the job's own, orca_plot's, or a "
-            "g-orientation .gori.xyz) or the ORCA output -- to draw the molecule and number its "
+            "geometry it was calculated for: an .xyz (the job's own, orca_plot's, or a "
+            "g-orientation .gori.xyz) or the ORCA output, to draw the molecule and number its "
             "atoms as ORCA does. Left empty, a file with the same job name next to it is used "
             "when its elements match.")
         structure_row.addWidget(self.dft_structure_edit, 1)
