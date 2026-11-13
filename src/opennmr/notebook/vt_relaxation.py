@@ -75,6 +75,10 @@ import math
 import numpy as np
 from scipy.optimize import least_squares
 
+# The fits themselves use the fitting algorithm chosen in Settings ▸ Fitting
+# (fit_progress.method); the bootstrap's refits stay on scipy's default.
+from ..core import fit_progress as _fit_progress
+
 __all__ = [
     "K_B_EV", "vt_dataset", "load_vt_csv", "spectral_density", "relaxation_rate",
     "quadrupolar_prefactor", "VTModel", "fit_vt_relaxation", "evaluate_vt_fit",
@@ -632,7 +636,8 @@ def fit_vt_relaxation(datasets, mechanism="dipolar", n_processes=1, asymmetric=F
                     s.setdefault(n, s.get(n.split("@")[0]))
         x0 = np.clip(_pack(model, free, s, len(datasets)), lo + 1e-9, hi - 1e-9)
         try:
-            sol = least_squares(residuals, x0, bounds=(lo, hi), x_scale="jac", max_nfev=4000)
+            sol = _fit_progress.least_squares(residuals, x0, bounds=(lo, hi), x_scale="jac",
+                                              max_nfev=4000)
         except (ValueError, FloatingPointError):
             continue
         if np.all(np.isfinite(sol.fun)):
@@ -1163,8 +1168,8 @@ def fit_hendrickson_bray(T_K, width_Hz, error=None, fixed=None, p0=None, n_start
     for s in starts:
         x0 = np.clip(np.array([to_int(n, s[n]) for n in free]), lo_v + 1e-9, hi_v - 1e-9)
         try:
-            sols.append(least_squares(resid, x0, bounds=(lo_v, hi_v), x_scale="jac",
-                                      max_nfev=4000))
+            sols.append(_fit_progress.least_squares(resid, x0, bounds=(lo_v, hi_v),
+                                                    x_scale="jac", max_nfev=4000))
         except (ValueError, FloatingPointError):
             pass
     if not sols:

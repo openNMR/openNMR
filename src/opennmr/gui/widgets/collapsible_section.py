@@ -28,7 +28,7 @@ working state on every switch would undo what they had just set up.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QSizePolicy, QStyle, QStyleOptionToolButton, QToolButton, QVBoxLayout, QWidget,
@@ -53,6 +53,41 @@ _COLLAPSED_GLYPH = "▸"   # ▸
 HEADER_FONT_SCALE = 1.25
 
 
+class _DoubleClickTogglesOnce(QObject):
+    """Event filter: a double-click on a checkable toggle button flips it
+    exactly once.
+
+    Qt turns a double-click into press, release, *double-click*, release,
+    and a ``QAbstractButton`` treats the double-click event as a second
+    press -- so the second release clicks it again and a section opened
+    by a double-click closed at once (net: nothing happened). Explicit
+    user request, 2026-11-13: "enable any collapsible section to be
+    opened or closed by double-clicking on it". The first click of the
+    pair already toggled; swallowing the double-click event leaves the
+    second release with no press to complete, so one double-click =
+    one toggle, and a single click still toggles as before."""
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 -- Qt override
+        if event.type() == QEvent.Type.MouseButtonDblClick:
+            event.accept()
+            return True
+        return False
+
+
+#: One filter serves every button (it holds no state).
+_DOUBLE_CLICK_FILTER: _DoubleClickTogglesOnce | None = None
+
+
+def toggle_once_on_double_click(button: QToolButton) -> QToolButton:
+    """Make a double-click on ``button`` (a checkable disclosure toggle)
+    open or close its section once, instead of twice. Returns ``button``."""
+    global _DOUBLE_CLICK_FILTER
+    if _DOUBLE_CLICK_FILTER is None:
+        _DOUBLE_CLICK_FILTER = _DoubleClickTogglesOnce()
+    button.installEventFilter(_DOUBLE_CLICK_FILTER)
+    return button
+
+
 class _HeaderButton(QToolButton):
     """The section's title button, whose height depends only on its font
     and number of lines -- never on which characters the title holds.
@@ -74,6 +109,11 @@ class _HeaderButton(QToolButton):
         contents = self.fontMetrics().size(Qt.TextFlag.TextShowMnemonic, text)
         return self.style().sizeFromContents(
             QStyle.ContentsType.CT_ToolButton, option, contents, self).height()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        # See _DoubleClickTogglesOnce: the pair's first click has already
+        # opened/closed the section; do not let the second undo it.
+        event.accept()
 
     def sizeHint(self) -> QSize:  # noqa: N802 -- Qt override
         hint = super().sizeHint()

@@ -137,7 +137,7 @@ from .widgets.relative_spinbox import RelativeDoubleSpinBox
 from .widgets.data_browser import DataBrowser
 from .widgets.message_dialog import show_message
 from .widgets.wrapping_tabs import WrappingTabWidget
-from .widgets.collapsible_section import CollapsibleSection
+from .widgets.collapsible_section import CollapsibleSection, toggle_once_on_double_click
 from .widgets.sim_sites import SimSiteList
 from .widgets.reflow import make_reflowable
 from .pnmr_panel import PnmrSimulationPanel
@@ -846,6 +846,7 @@ class MainWindow(QMainWindow):
         # refines. Comparing spectra is about their fine detail.
         self.compare_canvas = MplCanvas(full_resolution=True)
         self.compare_canvas.measurementCompleted.connect(self._on_measurement_completed)
+        self.compare_canvas.axisUnitChanged.connect(self._on_compare_canvas_unit_changed)
         # A legend by default: saying which trace is which is the point
         # of a comparison (explicit user request, 2026-09-28). Still
         # right-click > Show Legend to turn it off.
@@ -1082,6 +1083,7 @@ class MainWindow(QMainWindow):
         panel_layout.setSpacing(0)
         self.open_experiments_toggle = QToolButton()
         self.open_experiments_toggle.setCheckable(True)
+        toggle_once_on_double_click(self.open_experiments_toggle)
         self.open_experiments_toggle.setAutoRaise(True)
         self.open_experiments_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.open_experiments_toggle.setSizePolicy(QSizePolicy.Policy.Expanding,
@@ -1192,6 +1194,10 @@ class MainWindow(QMainWindow):
         # request, 2026-09-30) -- see widgets/reflow.py. Last, once every
         # panel is built.
         self._make_side_panels_reflow()
+        # Every fit panel's inputs as built, before any spectrum has seeded
+        # them: what a spectrum that has never been fitted starts from (see
+        # _restore_fit_panels).
+        self._blank_fit_inputs = self._capture_blank_fit_inputs()
         # The wheel scrolls panels; it never changes a value box it passes
         # over (explicit user request -- see widgets/wheel_guard.py).
         # Nothing can receive a wheel event before the window is shown.
@@ -1558,6 +1564,19 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.simulation_history_action)
 
         file_menu.addSeparator()
+        # Settings is also reachable from File (explicit user request,
+        # 2026-11-13) -- the same QAction as the Window menu entry, so the
+        # Ctrl+, shortcut stays unique (two actions sharing it would make
+        # Qt fire neither). The Settings panel itself stays where it is.
+        self.settings_menu_action = QAction("Settings…", self)
+        self.settings_menu_action.setShortcut(QKeySequence("Ctrl+,"))
+        self.settings_menu_action.setToolTip(
+            "Interface font size, the default plot style for each kind of plot, "
+            "fitting algorithms and more.")
+        self.settings_menu_action.triggered.connect(lambda: self._show_side_tab("Settings"))
+        file_menu.addAction(self.settings_menu_action)
+
+        file_menu.addSeparator()
         quit_action = QAction("&Quit", self)
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
@@ -1756,11 +1775,7 @@ class MainWindow(QMainWindow):
         # Settings sits outside the numbered Panel shortcuts (Ctrl+1..8;
         # the views are Ctrl+Shift+1..6) so adding it renumbers nothing;
         # Ctrl+, is the usual preferences shortcut.
-        self.settings_menu_action = QAction("Settings…", self)
-        self.settings_menu_action.setShortcut(QKeySequence("Ctrl+,"))
-        self.settings_menu_action.setToolTip(
-            "Interface font size, and the default plot style for each kind of plot.")
-        self.settings_menu_action.triggered.connect(lambda: self._show_side_tab("Settings"))
+        # The same action is also in File (built above).
         window_menu.addAction(self.settings_menu_action)
 
         # " View" suffix: the canvas tab's own name would otherwise
@@ -2600,6 +2615,7 @@ class MainWindow(QMainWindow):
         toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
         toggle.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
+        toggle_once_on_double_click(toggle)
         content.setVisible(expanded)
 
         def _on_toggled(checked: bool) -> None:
@@ -2924,6 +2940,23 @@ class MainWindow(QMainWindow):
             "colour scale means.")
         self.layout_mode_combo.currentIndexChanged.connect(lambda _i: self._on_compare_controls_changed())
         compare_form.addRow("Layout:", self.layout_mode_combo)
+
+        # The x-axis unit (explicit user request, 2026-11-13: "in compare,
+        # there is no way to change units"). Each spectrum is converted
+        # with its own spectrometer frequency; the right-click Axis Units
+        # menu does the same and this box follows it.
+        self.compare_unit_combo = QComboBox()
+        for label, key in (("ppm", "ppm"), ("Hz", "hz"), ("kHz", "khz")):
+            self.compare_unit_combo.addItem(label, key)
+        self.compare_unit_combo.setToolTip(
+            "The unit of the shift axis. Each spectrum is converted with its own "
+            "spectrometer frequency and reference, so in Hz or kHz spectra recorded at "
+            "different fields (or of different nuclei) are each on their own frequency "
+            "scale – compare chemical shifts in ppm. Not used by the Heatmap, which is "
+            "always in ppm. Also on the plot's right-click menu (Axis Units).")
+        self.compare_unit_combo.currentIndexChanged.connect(
+            lambda _i: self._on_compare_unit_changed())
+        compare_form.addRow("Units:", self.compare_unit_combo)
 
         self.compare_normalize_combo = QComboBox()
         # Same order as before ("None" was always per scan), so saved
@@ -7642,6 +7675,38 @@ class MainWindow(QMainWindow):
         self.fit_tolerance_combo.currentIndexChanged.connect(
             lambda _i: self._on_fit_tolerance_changed(self.fit_tolerance_combo.currentData()))
         fitting_form.addRow("Convergence tolerance:", self.fit_tolerance_combo)
+        # The fitting algorithm (explicit user request, 2026-11-13: "allow
+        # users to switch the fitting algorithm being used (for Fit or in
+        # Dynamics) ... chosen in the Settings menu"). One choice for every
+        # fit; see core.fit_progress's module notes.
+        self.fit_method_combo = QComboBox()
+        for key, label in core_fit_progress.METHODS.items():
+            self.fit_method_combo.addItem(
+                label + (" (default)" if key == core_fit_progress.DEFAULT_METHOD else ""), key)
+        self.fit_method_combo.setToolTip(
+            "The algorithm every fit in Fit and Dynamics uses to find its best parameters.\n\n"
+            "Automatic: as before – Trust Region Reflective when a parameter has bounds, "
+            "Levenberg-Marquardt otherwise.\n"
+            "Trust Region Reflective: respects bounds; robust.\n"
+            "Dogbox: respects bounds; can do better when many parameters sit on a bound.\n"
+            "Levenberg-Marquardt: fast, but cannot apply bounds – a fit that has bounds uses "
+            "TRF instead.\n"
+            "Differential evolution / Dual annealing: search the whole bounded range for the "
+            "best minimum, for a poor starting point or a misfit with several minima; much "
+            "slower, need a lower and upper bound on every free parameter (otherwise the "
+            "automatic method is used), and are finished with a TRF fit so the uncertainties "
+            "are reported as usual. Seeded: the same fit gives the same answer.\n\n"
+            "A fit that sets its own algorithm keeps it.")
+        saved_method = self._ui_settings.get("fit_method")
+        try:
+            saved_method = core_fit_progress.method(saved_method)
+        except (TypeError, ValueError):
+            saved_method = core_fit_progress.DEFAULT_METHOD
+        core_fit_progress.set_method(saved_method)
+        self.fit_method_combo.setCurrentIndex(max(0, self.fit_method_combo.findData(saved_method)))
+        self.fit_method_combo.currentIndexChanged.connect(
+            lambda _i: self._on_fit_method_changed(self.fit_method_combo.currentData()))
+        fitting_form.addRow("Fitting algorithm:", self.fit_method_combo)
         layout.addWidget(CollapsibleSection("Fitting", content=fitting))
 
         # --- Sections shown ------------------------------------------
@@ -8322,6 +8387,14 @@ class MainWindow(QMainWindow):
         value = core_fit_progress.set_tolerance(float(value))
         self._ui_settings["fit_tolerance"] = value
         self._save_ui_settings()
+
+    def _on_fit_method_changed(self, value) -> None:
+        """Every fit from now on uses this algorithm; saved."""
+        value = core_fit_progress.set_method(value)
+        self._ui_settings["fit_method"] = value
+        self._save_ui_settings()
+        self.statusBar().showMessage(
+            f"Fitting algorithm: {core_fit_progress.METHODS[value]}.", 6000)
 
     def _on_max_iterations_changed(self, value: int) -> None:
         """Every fit from now on stops at ``value`` iterations; saved."""
@@ -9025,6 +9098,29 @@ class MainWindow(QMainWindow):
 
     def _on_compare_controls_changed(self) -> None:
         self._refresh_compare_view_if_active()
+
+    def _on_compare_unit_changed(self) -> None:
+        """Compare ▸ Units: convert the Compare on show (or the next one
+        drawn), and say so when the unit puts superimposed spectra on
+        frequency scales that do not line up."""
+        unit = self.compare_unit_combo.currentData()
+        self.compare_canvas.set_compare_unit(unit)
+        note = self.compare_canvas.compare_unit_note(unit)
+        if note:
+            self.statusBar().showMessage(note, 15000)
+
+    def _on_compare_canvas_unit_changed(self, unit: str) -> None:
+        """Keep Compare ▸ Units showing the unit the plot is in, when it
+        was changed from the plot's own Axis Units menu."""
+        combo = getattr(self, "compare_unit_combo", None)
+        if combo is None:
+            return
+        index = combo.findData(unit)
+        if index < 0 or index == combo.currentIndex():
+            return
+        blocked = combo.blockSignals(True)
+        combo.setCurrentIndex(index)
+        combo.blockSignals(blocked)
 
     def _on_compare_plot_clicked(self) -> None:
         """Compare ▸ Plot: draw the comparison and show the Compare view."""
@@ -12006,14 +12102,74 @@ class MainWindow(QMainWindow):
         spectrum.metadata.raw["fits"] = fits
         self._schedule_sidecar_save(index)
 
-    def _restore_fit_panels(self, index: int) -> None:
-        """Show spectrum ``index``'s own saved fits in the fit panels. A
-        panel with no fit of this spectrum keeps its inputs (so they can
-        be reused) but drops the other spectrum's result, which would
-        otherwise read as this one's."""
+    def _capture_blank_fit_inputs(self) -> dict:
+        """``{key: inputs}`` of every single-spectrum fit panel as it is
+        now -- called once the window is built, before any spectrum."""
+        blank = {}
+        for key, panel in self._fit_panels().items():
+            if key == "multi":
+                continue
+            try:
+                blank[key] = copy.deepcopy(panel.get_state())
+            except Exception:  # noqa: BLE001 -- that panel then keeps its inputs
+                continue
+        return blank
+
+    def _stash_fit_drafts(self, owner_info) -> None:
+        """Keep the fit panels' current inputs with the spectrum they were
+        being set up for (``owner_info``: its session bookkeeping dict,
+        which moves with it and dies with it), so selecting it again
+        brings them back even though it has not been fitted yet."""
+        if owner_info is None or self.session.index_of_info(owner_info) is None:
+            return
+        drafts = {}
+        for key, panel in self._fit_panels().items():
+            if key == "multi":
+                continue
+            try:
+                drafts[key] = copy.deepcopy(panel.get_state())
+            except Exception:  # noqa: BLE001 -- that panel's draft is not kept
+                continue
+        owner_info["fit_drafts"] = drafts
+
+    def _reseed_fit_panel(self, panel, spectrum) -> None:
+        """Seed ``panel`` from ``spectrum`` again (nucleus, field, MAS
+        rate) after its inputs were reset -- its own seeding skips a
+        spectrum it has already seen."""
+        seed = getattr(panel, "seed_from_spectrum", None)
+        if not callable(seed):
+            return
+        if hasattr(panel, "_seeded_for"):
+            panel._seeded_for = None
+        try:
+            seed(spectrum)
+        except Exception:  # noqa: BLE001 -- unseeded inputs are still usable
+            pass
+
+    def _restore_fit_panels(self, index: int, previous_info=None) -> None:
+        """Show spectrum ``index``'s own fits in the fit panels.
+
+        A panel with a saved fit of this spectrum shows it, with the inputs
+        it was fitted with. Otherwise (explicit user request, 2026-11-13:
+        "if a new spectrum/dataset is loaded, a new, blank fit is the
+        default") it shows inputs set up for this spectrum earlier in the
+        session but not yet fitted, if any, or else a blank fit -- the
+        panel as built, seeded from this spectrum. It used to keep the
+        previous spectrum's inputs, so a different dataset opened later
+        came up with the last one's sites, model and values.
+
+        ``previous_info`` is the bookkeeping dict of the spectrum selected
+        before. With none (nothing has been selected since the window
+        opened), inputs typed before the first spectrum was loaded are
+        kept: they were set up for it. The same spectrum again changes
+        nothing."""
         if not (0 <= index < len(self.session)):
             return
         spectrum = self.session.spectra[index]
+        info = self._history_info(index)
+        drafts = (info.get("fit_drafts") or {}) if isinstance(info, dict) else {}
+        fresh = previous_info is not None and previous_info is not info
+        blank_inputs = getattr(self, "_blank_fit_inputs", None) or {}
         fits = spectrum.metadata.raw.get("fits") or {}
         for key, panel in self._fit_panels().items():
             saved = fits.get(key)
@@ -12024,8 +12180,15 @@ class MainWindow(QMainWindow):
                 if isinstance(saved, dict) and saved.get("result") is not None:
                     panel.set_state(saved.get("inputs") or {})
                     panel.restore_result(saved["result"], spectrum)
-                else:
-                    panel.clear_result()
+                    continue
+                panel.clear_result()
+                if not fresh:
+                    continue
+                if key in drafts:
+                    panel.set_state(copy.deepcopy(drafts[key]))
+                elif key in blank_inputs:
+                    panel.set_state(copy.deepcopy(blank_inputs[key]))
+                    self._reseed_fit_panel(panel, spectrum)
             except Exception as exc:  # noqa: BLE001 -- a saved fit that no longer fits the panel
                 panel.clear_result()
                 self.statusBar().showMessage(
@@ -17529,6 +17692,15 @@ class MainWindow(QMainWindow):
             "Diffusion (PFG)", content=self._build_diffusion_sim_subtab()))
         layout.addWidget(CollapsibleSection(
             "Shaped pulse (Bloch)", content=self._build_bloch_sim_subtab()))
+        # Pulse lengths, powers (W, dB, scaled), nutation frequencies and
+        # bandwidths (explicit user request, 2026-11-13);
+        # notebook.pulse_calculator.
+        from .pulse_calculator_panel import PulseCalculatorPanel
+        self.pulse_calculator_panel = PulseCalculatorPanel(
+            draw_plot=self._show_on_simulation_plot)
+        self._pulse_calculator_section = CollapsibleSection(
+            "Pulse calculator", content=self.pulse_calculator_panel)
+        layout.addWidget(self._pulse_calculator_section)
         # CIF -> paramagnetic shift "bond pathway" simulation: the
         # notebook's section 5, step by step (explicit user request). Its
         # own module; the physics is notebook.pnmr_simulator.
@@ -24847,12 +25019,9 @@ class MainWindow(QMainWindow):
         the previous marker `Line2D` references."""
         shifts = []
         for row in range(self.peak_table.rowCount()):
-            item = self.peak_table.item(row, 0)
-            if item is None:
-                continue
             try:
-                shifts.append(float(item.text()))
-            except ValueError:
+                shifts.append(self._peak_cell_value(row, 0))
+            except (AttributeError, ValueError):
                 continue
         self.canvas.set_peak_markers(
             (shifts or None) if self._fitting_tab_active() else None)
@@ -24937,11 +25106,10 @@ class MainWindow(QMainWindow):
         self.peak_table.blockSignals(True)
         self.peak_table.insertRow(row)
         for col, value in enumerate((shift, fwhm, eta)):
-            self.peak_table.setItem(row, col, QTableWidgetItem(f"{value:.4g}"))
+            self.peak_table.setItem(row, col, self._make_peak_value_item(value))
         self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
         self.peak_table.setItem(row, 4, QTableWidgetItem(multiplet))
         self.peak_table.setItem(row, 5, QTableWidgetItem(couplings))
-        self.peak_table.item(row, 0).setData(self._PEAK_EXACT_SHIFT_ROLE, float(shift))
         self.peak_table.blockSignals(False)
         if bounds:
             self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, bounds)
@@ -25049,17 +25217,11 @@ class MainWindow(QMainWindow):
         """``(table row, shift)`` of every line in the peak table."""
         shifts = []
         for row in range(self.peak_table.rowCount()):
-            item = self.peak_table.item(row, 0)
             try:
-                shown = float(item.text())
+                # The exact value while the cell still shows it; a typed edit wins.
+                shifts.append((row, self._peak_cell_value(row, 0)))
             except (AttributeError, ValueError):
                 continue
-            exact = item.data(self._PEAK_EXACT_SHIFT_ROLE)
-            # The exact value while the cell still shows it; a typed edit wins.
-            if isinstance(exact, float) and f"{exact:.4g}" == item.text().strip():
-                shifts.append((row, exact))
-            else:
-                shifts.append((row, shown))
         return shifts
 
     def _on_analyse_multiplets_clicked(self) -> list[dict] | None:
@@ -25208,7 +25370,7 @@ class MainWindow(QMainWindow):
         widths = []
         for row in range(self.peak_table.rowCount()):
             try:
-                widths.append(float(self.peak_table.item(row, 1).text()))
+                widths.append(self._peak_cell_value(row, 1))
             except (AttributeError, ValueError):
                 pass
         fwhm = float(np.median(widths)) if widths else 1.0 / mhz
@@ -25304,10 +25466,45 @@ class MainWindow(QMainWindow):
     #: existing bounds-only code (persistence, _update_peak_table_from_fit)
     #: didn't need to change shape to gain this.
     _PEAK_FIXED_ITEM_ROLE = Qt.ItemDataRole.UserRole + 1
-    #: The shift exactly as picked (the cell shows 4 significant figures,
-    #: up to 0.005 ppm -- 2 Hz at 400 MHz -- off), for the multiplet
-    #: analysis; used while the cell still shows that value.
-    _PEAK_EXACT_SHIFT_ROLE = Qt.ItemDataRole.UserRole + 40
+    #: A Shift/FWHM/Eta cell's value exactly as picked, typed or fitted.
+    #: The cell shows it rounded (:meth:`_format_peak_value`); the fit,
+    #: the markers and the multiplet analysis use this exact value for as
+    #: long as the cell still shows it, and a typed edit wins over it.
+    #: Before 2026-11-13 the fit read the rounded *text*: 4 significant
+    #: figures is one decimal place at 100+ ppm, so a narrow peak was
+    #: moved off its line before the fit even started, and every re-fit
+    #: (which wrote the result back rounded) moved it again (explicit
+    #: user report: "everything is slightly shifted off").
+    _PEAK_EXACT_VALUE_ROLE = Qt.ItemDataRole.UserRole + 40
+    #: Former name (shift column only); kept for code that still uses it.
+    _PEAK_EXACT_SHIFT_ROLE = _PEAK_EXACT_VALUE_ROLE
+
+    @staticmethod
+    def _format_peak_value(value: float) -> str:
+        """How a Shift/FWHM/Eta cell shows ``value``: 7 significant
+        figures (123.4567 ppm, 0.001234 ppm). Display only -- the exact
+        value is kept alongside (:data:`_PEAK_EXACT_VALUE_ROLE`)."""
+        return f"{float(value):.7g}"
+
+    def _make_peak_value_item(self, value: float) -> QTableWidgetItem:
+        """A Shift/FWHM/Eta cell showing ``value`` and keeping it exactly."""
+        item = QTableWidgetItem(self._format_peak_value(value))
+        item.setData(self._PEAK_EXACT_VALUE_ROLE, float(value))
+        return item
+
+    def _peak_cell_value(self, row: int, col: int) -> float:
+        """The value of a Shift/FWHM/Eta cell: its exact stored value
+        while the cell still shows it, otherwise what was typed in.
+        Raises ``ValueError`` (or ``AttributeError`` for a missing cell)
+        when the cell is not a number."""
+        item = self.peak_table.item(row, col)
+        text = item.text().strip()
+        shown = float(text)
+        exact = item.data(self._PEAK_EXACT_VALUE_ROLE)
+        if isinstance(exact, (int, float)) and np.isfinite(exact):
+            if text == self._format_peak_value(exact):
+                return float(exact)
+        return shown
 
     def _on_set_peak_bounds(self, row: int) -> None:
         """A peak row's own "Fixed" checkbox (column 3) fixes *every*
@@ -26061,9 +26258,9 @@ class MainWindow(QMainWindow):
         peak_defs = []
         for row in range(self.peak_table.rowCount()):
             try:
-                shift = float(self.peak_table.item(row, 0).text())
-                fwhm = float(self.peak_table.item(row, 1).text())
-                eta = float(self.peak_table.item(row, 2).text())
+                shift = self._peak_cell_value(row, 0)
+                fwhm = self._peak_cell_value(row, 1)
+                eta = self._peak_cell_value(row, 2)
             except (AttributeError, ValueError) as exc:
                 raise ValueError(f"Peak row {row + 1}: shift/FWHM/eta must all be numbers.") from exc
             peak_def = {"type": "pseudo_voigt", "shift": shift, "fwhm": fwhm, "eta": eta}
@@ -31093,15 +31290,15 @@ class MainWindow(QMainWindow):
             old_item = self.peak_table.item(row, 0)
             custom_bounds = old_item.data(Qt.ItemDataRole.UserRole) if old_item else None
             per_param_fixed = old_item.data(self._PEAK_FIXED_ITEM_ROLE) if old_item else None
-            shift_item = QTableWidgetItem(f"{params['shift']:.4g}")
+            shift_item = self._make_peak_value_item(params['shift'])
             if custom_bounds:
                 shift_item.setData(Qt.ItemDataRole.UserRole, custom_bounds)
             if per_param_fixed:
                 shift_item.setData(self._PEAK_FIXED_ITEM_ROLE, per_param_fixed)
             self.peak_table.setItem(row, 0, shift_item)
-            self.peak_table.setItem(row, 1, QTableWidgetItem(f"{params['fwhm']:.4g}"))
+            self.peak_table.setItem(row, 1, self._make_peak_value_item(params['fwhm']))
             if "eta" in params:
-                self.peak_table.setItem(row, 2, QTableWidgetItem(f"{params['eta']:.4g}"))
+                self.peak_table.setItem(row, 2, self._make_peak_value_item(params['eta']))
             fitted_js = [params[name] for name in peak["names"] if name.startswith("J")]
             if fitted_js:
                 self.peak_table.blockSignals(True)
@@ -31167,7 +31364,17 @@ class MainWindow(QMainWindow):
         peaks = []
         peak_bounds = []
         peak_fixed_params = []
+        # Shift/FWHM/Eta at full precision (None where a cell is not a
+        # number): "peaks" holds what the cells show, which is rounded.
+        peak_exact = []
         for row in range(self.peak_table.rowCount()):
+            exact_row = []
+            for col in range(3):
+                try:
+                    exact_row.append(self._peak_cell_value(row, col))
+                except (AttributeError, ValueError):
+                    exact_row.append(None)
+            peak_exact.append(exact_row)
             row_values = [self.peak_table.item(row, col).text() if self.peak_table.item(row, col) else ""
                           for col in range(3)]  # Shift, FWHM, Eta -- plain text columns
             fixed_item = self.peak_table.item(row, 3)
@@ -31185,6 +31392,7 @@ class MainWindow(QMainWindow):
         ]
         return {
             "peaks": peaks,
+            "peak_exact": peak_exact,
             "peak_bounds": peak_bounds,
             "peak_fixed_params": peak_fixed_params,
             "regions": regions,
@@ -31298,7 +31506,22 @@ class MainWindow(QMainWindow):
 
     def _save_current_analysis_state(self) -> None:
         index = self._current_analysis_index
-        if index is None or not (0 <= index < len(self.session)):
+        if index is None:
+            return
+        # The row is found again from the spectrum's own bookkeeping: a
+        # row number goes stale when an earlier spectrum is removed, and
+        # the panel's state (peaks, fits, results) was then saved onto
+        # whichever spectrum had moved into -- or was later loaded into --
+        # that row: a different dataset came up showing the last one's
+        # fit (user report, 2026-11-13). If that spectrum is gone, there
+        # is nothing to save it to.
+        owner = getattr(self, "_current_analysis_info", None)
+        if owner is not None:
+            found = self.session.index_of_info(owner)
+            if found is None:
+                return
+            index = found
+        if not (0 <= index < len(self.session)):
             return
         self.session.spectra[index].metadata.raw["analysis_state"] = self._capture_analysis_state()
         self._schedule_sidecar_save(index)
@@ -31369,13 +31592,19 @@ class MainWindow(QMainWindow):
         else:
             peak_bounds = state.get("peak_bounds", [])
             peak_fixed_params = state.get("peak_fixed_params", [])
+            peak_exact = state.get("peak_exact") or []
             for i, peak_row in enumerate(state["peaks"]):
                 shift, fwhm, eta = peak_row[0], peak_row[1], peak_row[2]
                 fixed = len(peak_row) > 3 and peak_row[3] == "1"
                 row = self.peak_table.rowCount()
                 self.peak_table.insertRow(row)
+                exact_row = peak_exact[i] if i < len(peak_exact) and peak_exact[i] else ()
                 for col, value in enumerate((shift, fwhm, eta)):
-                    self.peak_table.setItem(row, col, QTableWidgetItem(value))
+                    exact = exact_row[col] if col < len(exact_row) else None
+                    if isinstance(exact, (int, float)) and np.isfinite(exact):
+                        self.peak_table.setItem(row, col, self._make_peak_value_item(exact))
+                    else:
+                        self.peak_table.setItem(row, col, QTableWidgetItem(value))
                 self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
                 self.peak_table.setItem(row, 4, QTableWidgetItem(peak_row[4] if len(peak_row) > 4 else ""))
                 self.peak_table.setItem(row, 5, QTableWidgetItem(peak_row[5] if len(peak_row) > 5 else ""))
@@ -31523,6 +31752,12 @@ class MainWindow(QMainWindow):
         self._reset_transient_interaction_modes()
         self._baseline_view_follow = None   # captured on the outgoing spectrum
         self._save_current_analysis_state()
+        # The fit panels' unfitted inputs go with the outgoing spectrum
+        # (see _restore_fit_panels).
+        previous_fit_owner = getattr(self, "_fit_owner_info", None)
+        incoming_info = self._history_info(row)
+        if previous_fit_owner is not incoming_info:
+            self._stash_fit_drafts(previous_fit_owner)
         # Flush any still-pending sidecar save for the *outgoing*
         # spectrum synchronously, rather than leaving it in the
         # debounce timer -- _schedule_sidecar_save only ever tracks
@@ -31543,10 +31778,14 @@ class MainWindow(QMainWindow):
         self._refresh_selection_display(row)
         self._draw_selected_spectrum(spectrum, row=row)
         self._current_analysis_index = row
+        # Which spectrum the analysis panel now belongs to, by its session
+        # bookkeeping (see _save_current_analysis_state).
+        self._current_analysis_info = incoming_info
         # First time this spectrum is shown: the controls now hold its
         # starting state, which is the log's reference point.
-        # The fit panels show this spectrum's own fits (or none).
-        self._restore_fit_panels(row)
+        # The fit panels show this spectrum's own fits (or a blank fit).
+        self._restore_fit_panels(row, previous_info=previous_fit_owner)
+        self._fit_owner_info = incoming_info
         if not self._history_suspended:
             self._ensure_history(row)
 

@@ -630,6 +630,9 @@ def plot_compare_panels(panels, *, layout: str = "row", ncols: int | None = None
             xmins.append(lo)
             xmaxs.append(hi)
             lines.append(ax.lines[-1])
+            # Which spectrum the line shows, for a unit change: spectra on
+            # one panel can share a ppm grid but not a ppm-to-Hz conversion.
+            ax.lines[-1]._opennmr_source_spectrum = s
         ranges[k] = (min(xmins), max(xmaxs))
         for line, name in zip(lines, names):
             line.set_label(name)

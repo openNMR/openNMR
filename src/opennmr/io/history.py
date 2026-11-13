@@ -223,6 +223,9 @@ _HIDDEN_KEYS = frozenset({
     "fit_view", "analysis_state.option_names", "analysis_state.peak_bounds",
     "analysis_state.model_key", "analysis_state.auto_regions_note",
     "analysis_state.peak_fixed_params", "relaxation_fit_context",
+    # The peak table's full-precision values (2026-11-13): the Peaks line
+    # already logs them as shown.
+    "analysis_state.peak_exact",
     # Facts the readers record about the file itself (re-read on every
     # load, never a user choice) -- listing them would read as if
     # something had been done.

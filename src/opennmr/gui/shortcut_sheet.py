@@ -52,17 +52,26 @@ def clean_text(text: str) -> str:
     return re.sub(r"&(?!&)", "", text or "").replace("&&", "&").strip()
 
 
-def iter_menu_actions(actions, path=()):
+def iter_menu_actions(actions, path=(), _seen=None):
     """``(menu_path, QAction)`` for every leaf action under ``actions``
-    (a menu bar's or a menu's), separators and empty labels skipped."""
+    (a menu bar's or a menu's), separators and empty labels skipped.
+
+    An action placed in more than one menu (Settings… is in both File and
+    Window) is yielded once, at its first place: it is one command with
+    one shortcut, not two that conflict."""
+    if _seen is None:
+        _seen = set()
     for action in actions:
         if action.isSeparator():
             continue
         text = clean_text(action.text())
         menu = action.menu()
         if menu is not None:
-            yield from iter_menu_actions(menu.actions(), path + (text,))
+            yield from iter_menu_actions(menu.actions(), path + (text,), _seen)
         elif text:
+            if id(action) in _seen:
+                continue
+            _seen.add(id(action))
             yield path, action
 
 

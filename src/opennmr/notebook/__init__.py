@@ -345,6 +345,17 @@ from .bms import run_bms, particles_to_array, build_box, fast_bms_spectrum
 from ..core.fit_progress import (
     DEFAULT_MAX_ITERATIONS, FitNotConverged, iteration_limit, max_iterations, set_max_iterations,
 )
+# The fitting algorithm (2026-11-13): the same choice as Settings ▸ Fitting.
+from ..core.fit_progress import (
+    FIT_METHODS, fitting_method, set_fit_method, fit_method, last_fit_method,
+)
+# Pulse calculator (2026-11-13): pulse lengths, powers (W, dB, scaled),
+# nutation frequencies and bandwidths; Simulate ▸ Pulse calculator.
+from . import pulse_calculator
+from .pulse_calculator import (
+    excitation_profile, nutation_frequency, pulse_bandwidth, pulse_length,
+)
+from .pulse_calculator import pulse_calculator as calculate_pulse
 # Fitted values as readable JSON (2026-10-08, round 3).
 from . import fit_values
 from .fit_values import load_fitted_values, save_fitted_values
@@ -582,7 +593,9 @@ __all__ = [
     "accessibility", "acc", "bloch", "bms",
     # fitting limits and sideband guidance
     "DEFAULT_MAX_ITERATIONS", "FitNotConverged", "iteration_limit", "max_iterations",
-    "set_max_iterations", "GOOD_SIDEBANDS", "MIN_SIDEBANDS", "SIDEBAND_GUIDANCE",
+    "set_max_iterations", "FIT_METHODS", "fitting_method", "set_fit_method", "fit_method",
+    "last_fit_method", "pulse_calculator", "calculate_pulse", "excitation_profile",
+    "nutation_frequency", "pulse_bandwidth", "pulse_length", "GOOD_SIDEBANDS", "MIN_SIDEBANDS", "SIDEBAND_GUIDANCE",
     "csa_span_ppm", "sideband_count", "sideband_note",
     # fitted values as readable JSON
     "fit_values", "save_fitted_values", "load_fitted_values",

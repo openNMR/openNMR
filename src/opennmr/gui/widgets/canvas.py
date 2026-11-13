@@ -5109,6 +5109,10 @@ class MplCanvas(QWidget):
     #: to a fresh draw, or stopped applying (the axis unit changed): the
     #: panel re-reads :meth:`view_limits` and :meth:`view_limits_note`.
     viewLimitsChanged = Signal()
+    #: The display unit of the x-axis changed ("ppm", "hz", "khz", "mm"),
+    #: by the Axis Units menu or :meth:`set_axis_unit` -- so a Units box
+    #: elsewhere (Compare's) can follow it.
+    axisUnitChanged = Signal(str)
 
     #: Who drew the figure on show, for its right-click plot options
     #: (``register_plot_options``): set by the drawer after drawing,
@@ -7199,7 +7203,10 @@ class MplCanvas(QWidget):
             self._axis_unit = unit
             self._redraw_contour(preserve_view=False)
             return
-        if self._compare_axes and self._compare_spectra:
+        if self._compare_spectra and self._compare_unit_groups():
+            # Every Compare layout -- stack, overlay and separate panels
+            # (the overlay and the panels could not change unit at all
+            # before 2026-11-13, explicit user request).
             self._set_axis_unit_for_stack(unit)
             return
         if self._current_1d_spectrum is None or not self.ax.lines:
@@ -7252,6 +7259,7 @@ class MplCanvas(QWidget):
         again in the unit they were typed in, and the panel re-reads them."""
         if self._axis_unit == previous_unit:
             return
+        self.axisUnitChanged.emit(self._axis_unit)
         self._home_limits = None
         self._natural_limits = None
         if self._view_x is None and self._view_y is None:
@@ -7263,51 +7271,215 @@ class MplCanvas(QWidget):
             return
         self.viewLimitsChanged.emit()
 
+    def _compare_unit_groups(self) -> list:
+        """``[(axes, [spectrum indices drawn on it])]`` for the Compare on
+        show: one row each in a stack, the one shared axes of an overlay,
+        each 1D panel of a panel Compare (2D and pulse-sequence panels
+        have no frequency axis to convert)."""
+        spectra = self._compare_spectra
+        if not spectra:
+            return []
+        if self._compare_axes:
+            return [(ax, [i]) for i, ax in enumerate(self._compare_axes) if i < len(spectra)]
+        if self._spectrum_panels:
+            groups = []
+            for ax, group in zip(self._spectrum_panels, self._spectrum_panel_groups):
+                if getattr(ax, "_opennmr_panel_kind", "1d") != "1d":
+                    continue
+                indices = [i for i in group if 0 <= i < len(spectra)]
+                if indices:
+                    groups.append((ax, indices))
+            return groups
+        if self._compare_kwargs is not None and self.ax is not None:
+            return [(self.ax, list(range(len(spectra))))]
+        return []
+
+    @staticmethod
+    def _x_in_data(line, ax) -> bool:
+        """Whether ``line``'s x values are data coordinates of ``ax`` (an
+        offset or a y-only blend on top is fine; an axvline/axhline's
+        axes-fraction x is not)."""
+        transform = line.get_transform()
+        if transform is ax.transData:
+            return True
+        try:
+            return bool(transform.contains_branch_seperately(ax.transData)[0])
+        except (AttributeError, ValueError):
+            return False
+
+    @staticmethod
+    def _affine_between(from_values, to_values):
+        """``(slope, intercept)`` with ``to = slope * from + intercept``
+        for two samplings of one linear axis, or None."""
+        if from_values is None or to_values is None:
+            return None
+        a = np.asarray(from_values, dtype=float)
+        b = np.asarray(to_values, dtype=float)
+        if a.size < 2 or a.size != b.size or a[-1] == a[0]:
+            return None
+        slope = (b[-1] - b[0]) / (a[-1] - a[0])
+        return float(slope), float(b[0] - slope * a[0])
+
+    @staticmethod
+    def _line_owner(x, candidates, axes_values) -> int | None:
+        """Which of ``candidates`` (spectrum indices) a line with x data
+        ``x`` (in the current unit) was drawn from: the one whose axis
+        holds its points -- a line drawn decimated keeps a subset of the
+        axis's own points, and a kept fit's curve its own x. Unique match
+        or None."""
+        x = np.asarray(x, dtype=float)
+        x = x[np.isfinite(x)]
+        if x.size == 0:
+            return None
+        probe = x[np.linspace(0, x.size - 1, min(x.size, 25)).astype(int)]
+        owners = []
+        for i in candidates:
+            values = axes_values.get(i)
+            if values is None or values.size < 2:
+                continue
+            ordered = np.sort(values)
+            step = float(np.median(np.abs(np.diff(ordered)))) or 1.0
+            where = np.clip(np.searchsorted(ordered, probe), 1, ordered.size - 1)
+            nearest = np.minimum(np.abs(ordered[where] - probe), np.abs(ordered[where - 1] - probe))
+            if np.all(nearest <= 1e-6 * step):
+                owners.append(i)
+        return owners[0] if len(owners) == 1 else None
+
     def _set_axis_unit_for_stack(self, unit: str) -> None:
-        """:meth:`set_axis_unit` for a Compare/component stack: rewrite
-        **every** row, not just ``self.ax`` (which is only the last
-        one).
+        """:meth:`set_axis_unit` for a Compare -- a stack, an overlay or a
+        panel Compare -- and for resolved components drawn the same way:
+        rewrite **every** axes, not just ``self.ax``.
 
-        Each row is converted from its *own* spectrum's axis rather
-        than from a shared one -- a Compare stack can hold spectra of
-        different nuclei or point counts, and reusing one row's axis
-        for all of them would silently mislabel the rest. Resolved
-        SCORE components happen to share an axis, but this is the same
-        code path.
+        Each spectrum is converted with its *own* axis, never a shared
+        one: a Compare can hold spectra of different nuclei, fields or
+        point counts, and its ppm-to-Hz conversion differs with each.
+        Every line drawn from a spectrum (its data, a kept fit's curve,
+        components and residual) goes with it, as does the view (zoom
+        kept, in the new unit). On one shared axes (overlay, a panel
+        of several) the lines of spectra whose conversions agree are
+        converted together; where they disagree each line goes with the
+        spectrum it is drawn from -- found by which axis holds its
+        points -- and a line that cannot be told apart is left as it
+        was. :meth:`compare_unit_note` says when a shared axes holds
+        spectra whose Hz do not line up.
 
-        A row whose axis cannot express the requested unit (an index
-        axis, or mm with no gradient set) is left alone rather than the
-        whole switch being refused -- one unconvertible row in a stack
+        An axes whose spectra cannot express the requested unit (an
+        index axis, or mm with no gradient set) is left alone rather
+        than the whole switch being refused -- one unconvertible row
         should not veto the others."""
+        groups = self._compare_unit_groups()
+        if not groups:
+            return
+        current = self._axis_unit
+        spectra = self._compare_spectra
+        now_values, maps = {}, {}
+        for i, spectrum in enumerate(spectra):
+            axis = spectrum.axes[0] if getattr(spectrum, "axes", None) else None
+            if axis is None or getattr(spectrum, "ndim", 1) != 1:
+                continue
+            here = self._axis_values_in_unit(axis, current)
+            there = self._axis_values_in_unit(axis, unit)
+            mapping = self._affine_between(here, there)
+            if mapping is not None:
+                now_values[i] = np.asarray(here, dtype=float)
+                maps[i] = mapping
         converted_any = False
-        label = self._unit_axis_label(unit)
         last_spectrum = None
-        for row_ax, spectrum in zip(self._compare_axes, self._compare_spectra):
-            if not row_ax.lines:
+        # New view limits are worked out for every axes first and set
+        # afterwards: a stack's rows share their x-axis (and linked panels
+        # follow each other), so setting one row's limits as we go would
+        # have the next row's "current" limits already converted.
+        new_limits = []
+        for ax, indices in groups:
+            usable = [i for i in indices if i in maps]
+            if not usable:
                 continue
-            values = self._axis_values_in_unit(spectrum.axes[0], unit)
-            if values is None:
-                continue
-            for line in row_ax.lines:
-                if len(line.get_xdata()) == len(values):
-                    line.set_xdata(values)
-            row_ax.set_xlim(float(np.min(values)), float(np.max(values)))
+            first = maps[usable[0]]
+            agree = all(np.allclose(maps[i], first, rtol=1e-12, atol=1e-12) for i in usable)
+            for target in (ax, *getattr(ax, "child_axes", ())):
+                for line in target.lines:
+                    if not self._x_in_data(line, target):
+                        continue          # e.g. an axhline: x in axes coordinates
+                    x = np.asarray(line.get_xdata(), dtype=float)
+                    if x.size == 0:
+                        continue
+                    if agree:
+                        mapping = first
+                    else:
+                        source = getattr(line, "_opennmr_source_spectrum", None)
+                        owner = next((i for i in usable if spectra[i] is source), None) \
+                            if source is not None else None
+                        if owner is None:
+                            owner = self._line_owner(x, usable, now_values)
+                        if owner is None:
+                            continue
+                        mapping = maps[owner]
+                    line.set_xdata(mapping[0] * x + mapping[1])
+                lo, hi = target.get_xlim()
+                slope, intercept = first
+                new_limits.append((target, (slope * lo + intercept, slope * hi + intercept)))
+            if ax.get_xlabel():
+                if unit == "ppm":
+                    label = self._chemical_shift_label(spectra[usable[-1]], x_unit="ppm")
+                else:
+                    label = self._unit_axis_label(unit)
+                ax.set_xlabel(label, fontsize=self._AXIS_LABELSIZE)
             converted_any = True
-            last_spectrum = spectrum
+            last_spectrum = spectra[usable[-1]]
         if not converted_any:
             return
-        self._compare_axes[0].invert_xaxis()
+        for target, limits in new_limits:
+            target.set_xlim(*limits)
         if unit == "ppm" and last_spectrum is not None:
-            label = self._chemical_shift_label(last_spectrum, x_unit="ppm")
-            self._ppm_label = label
-        self._compare_axes[-1].set_xlabel(label, fontsize=self._AXIS_LABELSIZE)
+            self._ppm_label = self._chemical_shift_label(last_spectrum, x_unit="ppm")
         self._axis_unit = unit
-        # The crosshair's lines live on these Axes too, and would be
-        # rewritten by the loop above if they matched a row's length --
-        # removed for the same reason set_axis_unit's 1D path removes
-        # them, so it rebuilds against the new coordinates.
+        # Pinned to data coordinates in the old unit -- see set_axis_unit.
+        self.clear_measurements(redraw=False)
+        # The crosshair's lines live on these Axes too and would be
+        # rewritten by the loop above -- removed, as on a 1D, so it
+        # rebuilds against the new coordinates.
         self._remove_crosshair()
         self.canvas.draw_idle()
+
+    def set_compare_unit(self, unit: str) -> None:
+        """The Compare tile's Units box: convert the Compare on show, or
+        -- with nothing drawn in a shift unit yet -- draw the next one in
+        ``unit`` (show_compare and show_compare_panels convert to the unit
+        in use)."""
+        if unit not in ("ppm", "hz", "khz", "mm"):
+            return
+        if (self._compare_spectra and self._compare_unit_groups()) \
+                or self._current_1d_spectrum is not None or self._contour_spectrum is not None:
+            self.set_axis_unit(unit)
+            return
+        if unit != self._axis_unit:
+            previous = self._axis_unit
+            self._axis_unit = unit
+            QTimer.singleShot(0, lambda: self._after_axis_unit_change(previous))
+
+    def compare_unit_note(self, unit: str | None = None) -> str:
+        """A warning for the Compare on show in ``unit`` (default: the one
+        displayed), or "": in Hz, kHz or mm, spectra superimposed on one
+        axes but recorded at different spectrometer frequencies (or
+        referenced differently) each sit on their own frequency scale, so
+        the same position on the axis is not the same chemical shift."""
+        unit = unit or self._axis_unit
+        if unit == "ppm":
+            return ""
+        spectra = self._compare_spectra
+        for _ax, indices in self._compare_unit_groups():
+            maps = []
+            for i in indices:
+                axis = spectra[i].axes[0] if getattr(spectra[i], "axes", None) else None
+                mapping = self._affine_between(self._axis_values_in_unit(axis, "ppm"),
+                                               self._axis_values_in_unit(axis, unit))
+                if mapping is not None:
+                    maps.append(mapping)
+            if len(maps) > 1 and not all(np.allclose(m, maps[0], rtol=1e-9, atol=1e-9) for m in maps):
+                return ("Spectra superimposed here have different spectrometer frequencies or "
+                        "references: in this unit each is on its own frequency scale, so the "
+                        "same position is not the same chemical shift. Use ppm to compare shifts.")
+        return ""
 
     def _apply_view_options(self) -> None:
         # Every show_* rebuild routes through here after its own
@@ -8138,9 +8310,11 @@ class MplCanvas(QWidget):
             # colours directly, so a colour set in Plot Style did not
             # reach it, and its lines had no names for a legend at all.
             data_lines = list(self.ax.lines[:len(spectra)])
-            for line, entry in zip(data_lines, entries):
+            for line, entry, spectrum in zip(data_lines, entries, spectra):
                 line.set_label(entry.label)
                 line.set_color(entry.colour)
+                # Which spectrum it shows -- see _set_axis_unit_for_stack.
+                line._opennmr_source_spectrum = spectrum
             self._draw_compare_fit_overlays(spectra, [self.ax] * len(spectra), data_lines,
                                             colors, [e.label for e in entries], normalize)
             self._compare_shared_range = None
@@ -8152,7 +8326,7 @@ class MplCanvas(QWidget):
                                        labelsize=self._AXIS_LABELSIZE)
             self.ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
 
-        if previous_unit != "ppm" and self._compare_axes and self._compare_spectra:
+        if previous_unit != "ppm" and self._compare_spectra:
             self._set_axis_unit_for_stack(previous_unit)
         self._apply_view_limits()
         self._apply_view_options()
@@ -8209,6 +8383,11 @@ class MplCanvas(QWidget):
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
         was_panels = bool(self._spectrum_panels)
+        # Drawn in ppm, then converted back to the unit in use (as
+        # show_compare does) -- left as it was, a panel Compare drawn
+        # after switching to Hz was read as if its ppm were Hz.
+        previous_unit = self._axis_unit
+        self._axis_unit = "ppm"
         self._clear_figure()
         if not was_panels:
             self._legend_visible = True         # panels hold different spectra: name them
@@ -8261,6 +8440,8 @@ class MplCanvas(QWidget):
         self._spectrum_panel_link = result.link
         self._compare_shared_range = None
         self.ax = result.axes[0]
+        if previous_unit != "ppm" and self._compare_spectra:
+            self._set_axis_unit_for_stack(previous_unit)
         self._apply_view_options()
         self._crosshair_ready = True
         self._apply_layout()

@@ -69,6 +69,37 @@ less than this relative amount: scipy's own defaults (about 1e-8,
 (Settings ▸ Fitting). Looser
 is quicker and less exact; tighter is slower. A fitter that asks for its
 own tolerance (the spin-system fit's 1e-12) keeps it.
+
+**Fitting algorithm** (explicit user request, 2026-11-13: "allow users
+to switch the fitting algorithm ... chosen in the Settings menu"). One
+app-wide choice, :data:`DEFAULT_METHOD` ("auto") to start with, read by
+every fitter through :func:`limited_curve_fit` /
+:func:`limited_least_squares` (and :func:`least_squares` for the few that
+need no iteration limit)::
+
+    fit_progress.set_method("dogbox")              # from now on
+    with fit_progress.fitting_method("differential_evolution"):
+        ...                                        # just these fits
+
+* ``"auto"`` -- what every fit did before the choice existed: scipy's
+  Trust Region Reflective when a parameter has a bound, Levenberg-
+  Marquardt (``curve_fit``) otherwise; ``least_squares`` fits use TRF.
+* ``"trf"`` -- Trust Region Reflective: bounds respected; robust.
+* ``"dogbox"`` -- dogleg in a box: bounds respected; can do better than
+  TRF when many parameters sit on their bounds.
+* ``"lm"`` -- Levenberg-Marquardt: fast, but cannot apply bounds -- a
+  fit that has bounds uses TRF instead, and :func:`last_method` says so.
+* ``"differential_evolution"`` / ``"dual_annealing"`` -- global searches
+  for the best minimum within the bounds, for a starting point that is
+  far off or a misfit with several minima. Each needs a finite lower and
+  upper bound on every free parameter (a fit without them uses the local
+  default instead, and says so), is much slower, and is always finished
+  by a TRF fit from its best point, so the result carries the usual
+  uncertainties. Seeded, so the same fit gives the same answer.
+
+A fitter that asks for its own method keeps it. What the last fit
+actually used, and why when that differs from the choice, is
+:func:`last_method`.
 """
 
 from __future__ import annotations
@@ -136,6 +167,8 @@ class FitStatus:
     iteration_offset: int = 0
     #: The fit was stopped, keeping the best parameters it had reached.
     stopped_early: bool = False
+    #: The fitting algorithm in use (see :func:`last_method`).
+    method: str = ""
     history: list = field(default_factory=list, repr=False)
 
     @property
@@ -393,6 +426,169 @@ def _apply_tolerance(kwargs: dict) -> None:
     kwargs.setdefault("xtol", tol)
 
 
+# ---------------------------------------------------------------------------
+# Fitting algorithm
+# ---------------------------------------------------------------------------
+
+#: Every choice, with its name as Settings ▸ Fitting shows it.
+METHODS = {
+    "auto": "Automatic (TRF with bounds, Levenberg-Marquardt without)",
+    "trf": "Trust Region Reflective (TRF)",
+    "dogbox": "Dogbox (dogleg in a box)",
+    "lm": "Levenberg-Marquardt (no bounds)",
+    "differential_evolution": "Differential evolution (global), then TRF",
+    "dual_annealing": "Dual annealing (global), then TRF",
+}
+#: The starting choice: what every fit did before there was one.
+DEFAULT_METHOD = "auto"
+GLOBAL_METHODS = ("differential_evolution", "dual_annealing")
+#: A global search's own iteration cap (generations for differential
+#: evolution); the TRF fit that finishes it is held to max_iterations.
+GLOBAL_MAX_ITERATIONS = 1000
+_METHOD = [DEFAULT_METHOD]
+_LAST_METHOD: dict = {"method": None, "note": ""}
+
+
+def method(value: str | None = None) -> str:
+    """The fitting algorithm to use: ``value`` when given (checked), else
+    the one set with :func:`set_method` ("auto" unless changed)."""
+    if value is None:
+        return _METHOD[-1]
+    value = str(value)
+    if value not in METHODS:
+        raise ValueError(f"Unknown fitting method {value!r}; use one of {list(METHODS)}.")
+    return value
+
+
+def set_method(value: str | None) -> str:
+    """Set the app-wide fitting algorithm (``None`` restores "auto")."""
+    _METHOD[0] = DEFAULT_METHOD if value is None else method(value)
+    del _METHOD[1:]
+    return _METHOD[0]
+
+
+@contextmanager
+def fitting_method(value: str):
+    """Use ``value`` as the fitting algorithm for the fits inside this block."""
+    _METHOD.append(method(value))
+    try:
+        yield _METHOD[-1]
+    finally:
+        _METHOD.pop()
+
+
+def last_method() -> dict:
+    """``{"method": ..., "note": ...}`` for the most recent fit: the
+    algorithm it actually used (a key of :data:`METHODS`, "auto" for
+    scipy's own choice, or the one the fitter asked for), and why, when
+    that is not the one chosen."""
+    return dict(_LAST_METHOD)
+
+
+def _bounds_arrays(bounds, n: int):
+    """``(lo, hi)`` as float arrays of length ``n`` (or None)."""
+    if bounds is None:
+        return None
+    lo, hi = (bounds.lb, bounds.ub) if hasattr(bounds, "lb") else bounds
+    try:
+        lo = np.broadcast_to(np.asarray(lo, dtype=float), (n,)).copy()
+        hi = np.broadcast_to(np.asarray(hi, dtype=float), (n,)).copy()
+    except ValueError:
+        return None
+    return lo, hi
+
+
+def _choose_method(kwargs: dict, bounds, n: int | None) -> str | None:
+    """Put the chosen local method into ``kwargs`` and return the global
+    search to run first (or None). Records :func:`last_method`."""
+    if "method" in kwargs:
+        _LAST_METHOD.update(method=kwargs["method"], note="")
+        return None
+    chosen = method()
+    bounded = _bounded(bounds)
+    note = ""
+    search = None
+    lm_blocker = ""
+    if chosen == "lm":
+        if bounded:
+            lm_blocker = "cannot apply bounds, and this fit has them"
+        elif kwargs.get("loss", "linear") != "linear":
+            lm_blocker = "cannot use a robust loss, and this fit does"
+        elif kwargs.get("jac_sparsity") is not None or kwargs.get("tr_solver") not in (None, "exact"):
+            lm_blocker = "cannot use this fit's sparse solver"
+    if lm_blocker:
+        kwargs["method"] = "trf"
+        note = (f"Levenberg-Marquardt {lm_blocker}: it used Trust Region Reflective (TRF).")
+        used = "trf"
+    elif chosen in GLOBAL_METHODS:
+        limits = _bounds_arrays(bounds, n) if n else None
+        if limits is None or not (np.all(np.isfinite(limits[0])) and np.all(np.isfinite(limits[1]))):
+            note = (f"{METHODS[chosen]} needs a finite lower and upper bound on every free "
+                    f"parameter, and this fit does not have them: it used the automatic "
+                    f"local method.")
+            used = "auto"
+        else:
+            kwargs["method"] = "trf"
+            search = chosen
+            used = chosen
+    elif chosen == "auto":
+        used = "auto"
+    else:
+        kwargs["method"] = chosen
+        used = chosen
+    _LAST_METHOD.update(method=used, note=note)
+    if _ACTIVE:
+        _ACTIVE[0].status.method = used
+    return search
+
+
+def _global_search(cost, x0, bounds, search: str) -> np.ndarray:
+    """The best point a global ``search`` finds for ``cost`` within the
+    (finite) ``bounds``, starting from ``x0`` (clipped into them)."""
+    from scipy.optimize import differential_evolution, dual_annealing
+
+    lo, hi = _bounds_arrays(bounds, len(x0))
+    x0 = np.clip(np.asarray(x0, dtype=float), lo, hi)
+    pairs = list(zip(lo, hi))
+    limit = min(max_iterations(), GLOBAL_MAX_ITERATIONS)
+    if search == "differential_evolution":
+        result = differential_evolution(cost, pairs, x0=x0, maxiter=limit, seed=0,
+                                        polish=False, updating="immediate")
+    else:
+        result = dual_annealing(cost, pairs, x0=x0, maxiter=limit, seed=0)
+    return np.asarray(result.x, dtype=float)
+
+
+#: Notebook-friendly names (``nmr.set_fit_method("dogbox")``): the bare
+#: ``method`` / ``set_method`` are too generic for ``from ... import *``.
+FIT_METHODS = METHODS
+fit_method = method
+set_fit_method = set_method
+last_fit_method = last_method
+
+
+def least_squares(fun, x0, **kwargs):
+    """``scipy.optimize.least_squares`` with the chosen fitting algorithm
+    (:func:`method`) -- for fitters with their own ``max_nfev`` that do
+    not go through :func:`limited_least_squares`."""
+    from scipy.optimize import least_squares as _least_squares
+
+    search = _choose_method(kwargs, kwargs.get("bounds"), len(np.atleast_1d(x0)))
+    if search is not None:
+        args, kw = kwargs.get("args", ()), kwargs.get("kwargs", {}) or {}
+
+        def cost(p):
+            try:
+                r = np.asarray(fun(p, *args, **kw), dtype=float).ravel()
+                value = float(np.dot(r, r))
+            except (ArithmeticError, ValueError, TypeError):
+                return 1e300              # a trial point the model cannot evaluate
+            return value if math.isfinite(value) else 1e300
+
+        x0 = _global_search(cost, x0, kwargs["bounds"], search)
+    return _least_squares(fun, x0, **kwargs)
+
+
 def _refuse_after_keep_stop(label: str) -> None:
     if stopped_early():
         watcher = _ACTIVE[0]
@@ -559,8 +755,9 @@ def limited_curve_fit(f, xdata, ydata, p0=None, *, bounds=None, max_iterations: 
     limit = globals()["max_iterations"](max_iterations)
     kwargs.pop("maxfev", None)
     kwargs.pop("max_nfev", None)
-    method = kwargs.get("method")
     n_free = len(np.atleast_1d(p0)) if p0 is not None else None
+    search = _choose_method(kwargs, bounds, n_free)
+    method = kwargs.get("method")
     if method == "lm" or (method is None and not _bounded(bounds)):
         # Levenberg-Marquardt counts every call, Jacobian ones included.
         kwargs["maxfev"] = limit * ((n_free or 1) + 1)
@@ -585,6 +782,22 @@ def limited_curve_fit(f, xdata, ydata, p0=None, *, bounds=None, max_iterations: 
         return out
 
     try:
+        if search is not None:
+            sigma = kwargs.get("sigma")
+            weight = None if sigma is None else 1.0 / np.asarray(sigma, dtype=float)
+            y = np.asarray(ydata, dtype=float)
+
+            def cost(params):
+                try:
+                    r = np.asarray(remembered(xdata, *params), dtype=float) - y
+                    if weight is not None:
+                        r = r * weight
+                    value = float(np.dot(r.ravel(), r.ravel()))
+                except (ArithmeticError, ValueError, TypeError):
+                    return 1e300          # a trial point the model cannot evaluate
+                return value if math.isfinite(value) else 1e300
+
+            p0 = _global_search(cost, p0, bounds, search)
         return curve_fit(remembered, xdata, ydata, p0=p0, **kwargs)
     except _StopKeepingBest:
         # Stopped part-way, keeping the best reached: no uncertainty.
@@ -612,6 +825,7 @@ def limited_least_squares(fun, x0, *, max_iterations: int | None = None, label: 
 
     limit = globals()["max_iterations"](max_iterations)
     kwargs.pop("max_nfev", None)
+    search = _choose_method(kwargs, kwargs.get("bounds"), len(np.atleast_1d(x0)))
     _apply_tolerance(kwargs)
     _refuse_after_keep_stop(label)
     start = [float("nan")]
@@ -632,6 +846,18 @@ def limited_least_squares(fun, x0, *, max_iterations: int | None = None, label: 
         return out
 
     try:
+        if search is not None:
+            args, kw = kwargs.get("args", ()), kwargs.get("kwargs", {}) or {}
+
+            def cost(p):
+                try:
+                    r = np.asarray(remembered(p, *args, **kw), dtype=float).ravel()
+                    value = float(np.dot(r, r))
+                except (ArithmeticError, ValueError, TypeError):
+                    return 1e300          # a trial point the model cannot evaluate
+                return value if math.isfinite(value) else 1e300
+
+            x0 = _global_search(cost, x0, kwargs["bounds"], search)
         solution = least_squares(remembered, x0, max_nfev=limit, **kwargs)
     except _StopKeepingBest:
         if best.params is None:

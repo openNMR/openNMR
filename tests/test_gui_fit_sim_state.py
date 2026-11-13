@@ -111,15 +111,25 @@ def test_reselecting_a_spectrum_shows_its_own_fit_and_not_another(qapp, _dialogs
     table, label = _table(panel.results_table), panel.results_label.text()
     sites = _table(panel.sites_table)
 
-    _quad_spectrum(window, "second")  # selected; never fitted
+    blank = MainWindow().quad_fit_panel
+    second = _quad_spectrum(window, "second")  # selected; never fitted
     assert panel.result is None and panel.results_label.text() == ""
-    assert _table(panel.sites_table) == sites  # the inputs stay, to reuse
+    # A new dataset starts from a blank fit, not the last one's inputs
+    # (user request, 2026-11-13).
+    assert _table(panel.sites_table) != sites
+    assert _table(panel.sites_table) == _table(blank.sites_table)
+    panel.add_site()
     panel.sites_table.item(0, 2).setText("9.9")
+    draft = _table(panel.sites_table)
 
     window._select_single_row(first)
     assert _table(panel.results_table) == table and panel.results_label.text() == label
     assert _table(panel.sites_table) == sites  # the inputs it was fitted with
     assert panel.send_button.isEnabled()
+
+    # The unfitted inputs set up for the second come back with it.
+    window._select_single_row(second)
+    assert panel.result is None and _table(panel.sites_table) == draft
 
 
 def test_a_fit_is_logged_with_its_result_and_settings(qapp, _dialogs):
