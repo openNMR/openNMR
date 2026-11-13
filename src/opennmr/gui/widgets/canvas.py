@@ -7259,7 +7259,10 @@ class MplCanvas(QWidget):
         again in the unit they were typed in, and the panel re-reads them."""
         if self._axis_unit == previous_unit:
             return
-        self.axisUnitChanged.emit(self._axis_unit)
+        try:
+            self.axisUnitChanged.emit(self._axis_unit)
+        except RuntimeError:    # the canvas was deleted before this queued call ran
+            return
         self._home_limits = None
         self._natural_limits = None
         if self._view_x is None and self._view_y is None:

@@ -78,15 +78,15 @@ def test_compare_superimposed_in_hz_still_gives_both(qapp):
 @pytest.mark.parametrize("mode", ["overlay", "stack"])
 def test_compare_after_a_1d_in_hz_still_measures_right(qapp, mode):
     # Compare is drawn in ppm; the display unit left over from a 1D in Hz
-    # made Measure read those ppm as Hz. A stack is converted back to Hz.
+    # made Measure read those ppm as Hz. Both layouts are converted back to
+    # Hz (the overlay too since 2026-11-13, when Compare gained units).
     canvas = _canvas()
     canvas.show_spectrum(_make_1d())
     canvas.set_axis_unit("hz")
     canvas.show_compare([_make_1d_at(4.0), _make_1d_at(6.0)], mode=mode)
     ax = canvas.ax if mode == "overlay" else canvas._compare_axes[0]
-    assert canvas._axis_unit == ("ppm" if mode == "overlay" else "hz")
-    if mode == "stack":
-        assert max(ax.get_xlim()) > 1000                # really in Hz now
+    assert canvas._axis_unit == "hz"
+    assert max(ax.get_xlim()) > 1000                    # really in Hz now
     result = _measure(canvas, ax)
     _assert_ppm_hz(result["dx"], 400.0, ppm=4.0)
 
