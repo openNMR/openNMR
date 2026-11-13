@@ -545,6 +545,124 @@ def read_orca(path) -> dict:
     return calc
 
 
+_XYZ_ROW = re.compile(r"^\s*([A-Za-z]{1,3})\d*\s+(" + _FLOAT + r")\s+(" + _FLOAT + r")\s+("
+                      + _FLOAT + r")\s*$")
+
+#: The dummy atoms ORCA appends to a g-tensor orientation .xyz (``*.gori.xyz``):
+#: He at the chosen origin, Ne/Ar/Kr along g1/g2/g3.
+_GORI_MARKERS = ("He", "Ne", "Ar", "Kr")
+
+
+def looks_like_xyz(text) -> bool:
+    """True when ``text`` starts as an .xyz file: an atom count, a comment
+    line, then that many "symbol x y z" rows (at least the first one)."""
+    lines = text.splitlines()
+    if len(lines) < 3 or not re.fullmatch(r"\s*\d+\s*", lines[0]):
+        return False
+    return bool(_XYZ_ROW.match(lines[2]))
+
+
+def read_xyz(path) -> dict:
+    """An .xyz geometry (Å) -- as ORCA writes it (``<job>.xyz``,
+    ``orca_plot``'s, a ``_trj.xyz`` trajectory: the last frame is used), or
+    any program's. It holds atoms only, no tensors: use it as the
+    ``structure`` of an ``orca_pnmr`` file (:func:`read_calculation`) or to
+    look at the molecule.
+
+    A ``.gori.xyz`` (ORCA's g-tensor orientation) ends with dummy He, Ne,
+    Ar, Kr atoms (origin, g1, g2, g3): they are removed, and the three
+    directions are kept as ``calc["g_axes"]`` (rows, unit vectors). A file
+    whose atoms are all at the origin (ORCA's ``*_DTensor_HEFF_rotated.xyz``
+    carries the element list only) is refused: it has no structure."""
+    with open(path, "r", errors="replace") as f:
+        lines = f.read().splitlines()
+    frames = []
+    i = 0
+    while i < len(lines):
+        if not lines[i].strip():
+            i += 1
+            continue
+        if not re.fullmatch(r"\s*\d+\s*", lines[i]):
+            break
+        n = int(lines[i])
+        comment = lines[i + 1] if i + 1 < len(lines) else ""
+        rows = []
+        for line in lines[i + 2:i + 2 + n]:
+            m = _XYZ_ROW.match(line)
+            if not m:
+                break
+            sym = m.group(1)
+            rows.append((sym[:1].upper() + sym[1:].lower(),
+                         [float(m.group(k)) for k in (2, 3, 4)]))
+        if len(rows) != n:
+            raise ValueError(f"{os.path.basename(str(path))}: frame {len(frames) + 1} says {n} "
+                             f"atoms but has {len(rows)} readable 'symbol x y z' rows.")
+        frames.append((comment, rows))
+        i += 2 + n
+    if not frames:
+        raise ValueError(f"{os.path.basename(str(path))}: not an .xyz file (an atom count, a "
+                         "comment line, then 'symbol x y z' rows).")
+    comment, rows = frames[-1]
+    calc = {"code": "XYZ", "path": str(path), "lattice": None, "atoms": [], "notes": [],
+            "info": {"comment": comment.strip()}, "g0": "none",
+            "method": {"code": "XYZ", "functional": "", "cutoff": "", "pseudopotentials": {},
+                       "periodic": False}}
+    if len(frames) > 1:
+        calc["notes"].append(f"{len(frames)} frames (a trajectory): the last one is used.")
+    if "g-tensor orientation" in comment.lower() and len(rows) >= 4 \
+            and tuple(r[0] for r in rows[-4:]) == _GORI_MARKERS:
+        origin = np.asarray(rows[-4][1])
+        axes = np.array([np.asarray(r[1]) - origin for r in rows[-3:]])
+        norms = np.linalg.norm(axes, axis=1)
+        if np.all(norms > 0):
+            calc["g_axes"] = axes / norms[:, None]
+        rows = rows[:-4]
+        calc["notes"].append("ORCA g-tensor orientation file: its dummy He/Ne/Ar/Kr atoms "
+                             "(origin, g1, g2, g3) were removed; the g axes are kept.")
+    if rows and all(not any(p) for _s, p in rows):
+        raise ValueError(f"{os.path.basename(str(path))}: every atom is at the origin, so this "
+                         ".xyz holds no structure (ORCA's *_DTensor_HEFF_rotated.xyz lists the "
+                         "elements only). Use the job's own .xyz or its output (.out).")
+    seen = {}
+    for sym, pos in rows:
+        seen[sym] = seen.get(sym, 0) + 1
+        calc["atoms"].append(_atom(sym, seen[sym], sym, pos))
+    calc["notes"].append("Molecular (non-periodic) structure: positions in the file's x, y, z "
+                         "frame (Å); no tensors.")
+    return calc
+
+
+def read_structure(path) -> dict:
+    """The geometry of a calculation (atoms, Å) from an .xyz or an ORCA
+    output: what an ``orca_pnmr`` file, which has no coordinates, is drawn
+    on. Tensors in the file are not used."""
+    with open(path, "r", errors="replace") as f:
+        head = f.read(4000)
+        more = head + f.read(60000)
+    if looks_like_xyz(head):
+        return read_xyz(path)
+    if "O   R   C   A" in more:
+        with open(path, "r", errors="replace") as f:
+            lines = f.read().splitlines()
+        idx = _blocks_after(lines, "CARTESIAN COORDINATES (ANGSTROEM)")
+        if not idx:
+            raise ValueError(f"{os.path.basename(str(path))}: no 'CARTESIAN COORDINATES "
+                             "(ANGSTROEM)' block.")
+        calc = {"code": "ORCA", "path": str(path), "lattice": None, "atoms": [], "notes": []}
+        seen = {}
+        for line in lines[idx[-1] + 2:]:
+            parts = line.split()
+            if len(parts) != 4:
+                break
+            sym = re.sub(r"[^A-Za-z]", "", parts[0])
+            sym = sym[:1].upper() + sym[1:].lower()
+            seen[sym] = seen.get(sym, 0) + 1
+            calc["atoms"].append(_atom(sym, seen[sym], sym, [float(v) for v in parts[1:4]]))
+        return calc
+    raise ValueError(f"{os.path.basename(str(path))}: give the structure as an .xyz file or an "
+                     "ORCA output (.out).")
+
+
 _GAUSSIAN_SHIELD = re.compile(r"^\s*(\S+)\s+(GIAO|CSGT|IGAIM|Single-origin|SingleOrigin)\s+"
                               r"Magnetic shielding tensor \(ppm\)")
 
@@ -638,17 +756,25 @@ def read_gaussian(path) -> dict:
 
 #: The codes :func:`read_calculation` recognises.
 SUPPORTED_CODES = ("CASTEP (.magres)", "VASP (OUTCAR)", "ORCA (.out, incl. EPR g/hyperfine)",
-                   "Gaussian (.log)",
-                   "CRYSTAL (properties output: paramagnetic shifts and EFG)")
+                   "orca_pnmr (input .pnmr.inp or its output)", "Gaussian (.log)",
+                   "CRYSTAL (properties output: paramagnetic shifts and EFG)",
+                   "a structure (.xyz)")
 
 
-def read_calculation(path, include_g0: bool = True) -> dict:
-    """A CASTEP ``.magres``, VASP ``OUTCAR``, ORCA output, Gaussian log or
-    CRYSTAL properties output (any extension), recognised by content.
+def read_calculation(path, include_g0: bool = True, structure=None) -> dict:
+    """A CASTEP ``.magres``, VASP ``OUTCAR``, ORCA output, ``orca_pnmr``
+    input or output, Gaussian log, CRYSTAL properties output or .xyz
+    structure (any extension), recognised by content.
     A CRYSTAL calculation carries hyperfine and EFG data rather than a
     shielding: give ``paramagnetic=`` to :func:`dft_sites` (see
-    :mod:`opennmr.notebook.crystal_nmr`). ``include_g0`` applies to VASP only (the other
-    codes give a total σ that cannot be split, or have no G=0 term)."""
+    :mod:`opennmr.notebook.crystal_nmr`); so does an ``orca_pnmr`` file.
+    ``include_g0`` applies to VASP only (the other codes give a total σ that
+    cannot be split, or have no G=0 term).
+
+    ``structure`` : for an ``orca_pnmr`` file, which has no coordinates, the
+    geometry it belongs to -- an .xyz or the ORCA output (.out) of the same
+    molecule (see :func:`opennmr.notebook.paramagnetic_nmr.read_orca_pnmr`).
+    Without it, a file with the same job name next to it is looked for."""
     with open(path, "r", errors="replace") as f:
         head = f.read(4000)
         more = head + f.read(60000)
@@ -657,6 +783,9 @@ def read_calculation(path, include_g0: bool = True) -> dict:
         return read_magres(path)
     if "vasp." in head:
         return read_outcar(path, include_g0=include_g0)
+    from . import paramagnetic_nmr
+    if paramagnetic_nmr.is_orca_pnmr(path, more):
+        return paramagnetic_nmr.read_orca_pnmr(path, structure=structure)
     if "O   R   C   A" in more:
         return read_orca(path)
     if "Gaussian, Inc." in more or "Entering Gaussian System" in more:
@@ -664,6 +793,8 @@ def read_calculation(path, include_g0: bool = True) -> dict:
     from . import crystal_nmr
     if crystal_nmr.is_crystal(more):
         return crystal_nmr.read_crystal(path)
+    if looks_like_xyz(head):
+        return read_xyz(path)
     raise ValueError(f"{os.path.basename(str(path))}: not a calculation openNMR reads ("
                      + ", ".join(SUPPORTED_CODES) + ").")
 

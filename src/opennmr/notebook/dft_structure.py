@@ -110,7 +110,11 @@ _NONMETALS = {"H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "A
 
 TENSOR_KINDS = {"shift": "shift tensor δ (ellipsoid, semi-axes |δii|)",
                 "shift_aniso": "anisotropic shift δ − δiso (ovaloid)",
-                "efg": "EFG tensor V (ovaloid)"}
+                "efg": "EFG tensor V (ovaloid)",
+                # Paramagnetic records (ORCA EPR / orca_pnmr, explicit user
+                # request 2026-11-13): the two parts of δ_para = −σ_para.
+                "para_contact": "Fermi contact shift tensor (ovaloid)",
+                "para_dipolar": "spin-dipolar shift tensor, pseudocontact part (ovaloid)"}
 
 _TOL = 1e-4          # fractional-coordinate tolerance for "on a cell face"
 
@@ -296,6 +300,14 @@ def tensor_of(record, kind):
         if t is not None:
             t = np.asarray(t, dtype=float)
             t = t - np.trace(t) / 3.0 * np.eye(3)
+    elif kind in ("para_contact", "para_dipolar"):
+        # δ = −σ. Neither part is traceless in general: the contact part
+        # is −(μ_B/g_Nμ_N) A_iso g·Z, anisotropic when g or Z is (a
+        # lanthanide), and the dipolar part has the pseudocontact shift
+        # as its trace -- so both are drawn as ovaloids with their sign.
+        para = record.get("para") or {}
+        key = "sigma_contact" if kind == "para_contact" else "sigma_dipolar"
+        t = None if para.get(key) is None else -np.asarray(para[key], dtype=float)
     else:
         raise ValueError(f"tensor must be one of {tuple(TENSOR_KINDS)}.")
     if t is None:
@@ -396,6 +408,10 @@ def plot_dft_structure(calc, records, frame="cell", tensor="shift_aniso", region
     look = _merge_style(tensor_style)
     if atom_scale is not None:
         look["atom_scale"] = float(atom_scale)
+    if any(not np.all(np.isfinite(np.asarray(a["position"], dtype=float)))
+           for a in calc.get("atoms") or []):
+        raise ValueError("This file has no atomic positions (an orca_pnmr file read without "
+                         "its structure): give the .xyz or ORCA output of the same molecule.")
     lattice = _lattice(calc)
     if frame == "cell":
         if lattice is None:

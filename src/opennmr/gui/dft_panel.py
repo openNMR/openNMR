@@ -40,7 +40,11 @@ from .combined_panels import CombinedHamiltonianPanel, _spin_box
 from .widgets.collapsible_section import CollapsibleSection
 from .widgets.typed_spinbox import TypedSpinBox
 
-_FILE_FILTER = ("DFT output (*.magres OUTCAR* *.out *.outp *.log *.LOG);;All files (*)")
+_FILE_FILTER = ("DFT output (*.magres OUTCAR* *.out *.outp *.log *.LOG *.txt *.inp *.xyz);;"
+                "All files (*)")
+
+#: The structure an orca_pnmr file is drawn on (it has no coordinates).
+_STRUCTURE_FILTER = "Structure (*.xyz *.out *.log);;All files (*)"
 
 #: The help under the G=0 option (wording agreed with the user, 2026-10-07).
 G0_HELP = (
@@ -179,8 +183,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
     def _file_row(self, attr, title):
         row = QHBoxLayout()
         edit = QLineEdit()
-        edit.setPlaceholderText("CASTEP .magres, VASP OUTCAR, ORCA .out, Gaussian .log or CRYSTAL "
-                                "properties output")
+        edit.setPlaceholderText("CASTEP .magres, VASP OUTCAR, ORCA .out or orca_pnmr file, "
+                                "Gaussian .log or CRYSTAL properties output")
         setattr(self, attr, edit)
         row.addWidget(edit, 1)
         button = QPushButton("Browse…")
@@ -194,6 +198,25 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         v.setContentsMargins(0, 0, 0, 0)
         form = QFormLayout()
         form.addRow("Sample:", self._file_row("dft_sample_edit", "Sample calculation"))
+        # An orca_pnmr input/output has no coordinates (explicit user request,
+        # 2026-11-13): the geometry comes from the job's .xyz or ORCA output.
+        structure_row = QHBoxLayout()
+        self.dft_structure_edit = QLineEdit()
+        self.dft_structure_edit.setPlaceholderText(
+            "orca_pnmr files only: the .xyz or ORCA .out of the same molecule")
+        self.dft_structure_edit.setToolTip(
+            "An orca_pnmr input (.pnmr.inp) or output has no atomic positions. Give the "
+            "geometry it was calculated for -- an .xyz (the job's own, orca_plot's, or a "
+            "g-orientation .gori.xyz) or the ORCA output -- to draw the molecule and number its "
+            "atoms as ORCA does. Left empty, a file with the same job name next to it is used "
+            "when its elements match.")
+        structure_row.addWidget(self.dft_structure_edit, 1)
+        self.dft_structure_browse_button = QPushButton("Browse…")
+        self.dft_structure_browse_button.clicked.connect(self._browse_structure)
+        structure_row.addWidget(self.dft_structure_browse_button)
+        self._structure_file_row = structure_row
+        form.addRow("Structure:", structure_row)
+        self._import_form = form
         self.dft_g0_check = QCheckBox("VASP: include the G=0 term")
         self.dft_g0_check.setChecked(True)
         self.dft_g0_check.setToolTip(G0_HELP)
@@ -473,6 +496,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         except (ValueError, AttributeError):
             labels = []
         common = {"calc": self.calcs["sample"], "path": self.dft_sample_edit.text().strip(),
+                  "structure": self.calcs["sample"].get("structure_path"),
                   "element": self.dft_element_combo.currentText(), "labels": labels}
         if self._is_crystal():
             return {**common, "kind": "crystal", "args": self.paramagnetic_arguments(),
@@ -576,7 +600,11 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         """Compare with an orca_pnmr output; the result goes in the notes."""
         if not self._is_orca_epr():
             return None
-        if path is None:
+        printed = self.calcs["sample"].get("orca_pnmr")
+        if path is None and printed:
+            # An orca_pnmr output as the sample: compare with what it printed.
+            path = self.dft_sample_edit.text().strip()
+        elif path is None:
             path, _ = QFileDialog.getOpenFileName(self, "orca_pnmr output", "",
                                                   "Text (*.txt *.out *.log);;All files (*)")
             if not path:
@@ -588,14 +616,18 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
                 raise ValueError("orca_pnmr uses the calculated spin Hamiltonian: choose that "
                                  "model to compare.")
             calc = pmr.apply_paramagnetic(self.calcs["sample"], **args)
-            res = pmr.compare_with_orca(calc, path)
+            res = pmr.compare_with_orca(
+                calc, printed if printed and path == self.dft_sample_edit.text().strip()
+                else path)
         except (OSError, ValueError, KeyError) as exc:
             QMessageBox.warning(self, "Check against orca_pnmr", str(exc))
             return None
+        limit = ("orca_pnmr prints its input's A to 6 decimals" if printed else
+                 "ORCA's .out prints A to 4 decimals")
         text = (f"Against orca_pnmr ({os.path.basename(path)}, {res['T']:g} K, {res['n']} "
                 f"nuclei): isotropic shielding within {res['max_iso_ppm']:.3g} ppm, every "
-                f"tensor element within {res['max_element_ppm']:.3g} ppm (ORCA's .out prints A "
-                "to 4 decimals, which limits the agreement).")
+                f"tensor element within {res['max_element_ppm']:.3g} ppm ({limit}, which "
+                "limits the agreement).")
         self.dft_opm_label.setText(self.dft_opm_label.text() + "\n" + text)
         return text
 
@@ -967,12 +999,18 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self.dft_structure_tensor_combo = QComboBox()
         for key, text in (("shift_aniso", "Shift anisotropy δ − δiso (ovaloid)"),
                           ("shift", "Shift tensor δ (ellipsoid, |δii|)"),
-                          ("efg", "EFG (ovaloid)")):
+                          ("efg", "EFG (ovaloid)"),
+                          ("para_contact", "Paramagnetic: Fermi contact part (ovaloid)"),
+                          ("para_dipolar", "Paramagnetic: spin-dipolar (pseudocontact) part "
+                                           "(ovaloid)")):
             self.dft_structure_tensor_combo.addItem(text, key)
         self.dft_structure_tensor_combo.setToolTip(
             "Ovaloid: in each direction n the distance |nᵀTn|, red where positive and blue "
             "where negative – the only faithful glyph of a traceless tensor (the anisotropy, "
-            "the EFG). Ellipsoid: semi-axes |δ11|, |δ22|, |δ33|.")
+            "the EFG). Ellipsoid: semi-axes |δ11|, |δ22|, |δ33|. The paramagnetic parts (ORCA "
+            "hyperfine or orca_pnmr files) split δ_para into its Fermi contact part (anisotropic "
+            "when g or the susceptibility is) and its spin-dipolar part, whose trace is the "
+            "pseudocontact shift.")
         form.addRow("Tensor:", self.dft_structure_tensor_combo)
         self.dft_structure_region_combo = QComboBox()
         self.dft_structure_region_combo.addItem("Unit cell (or whole molecule)", "cell")
@@ -1076,6 +1114,38 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
     def _read(self, path):
         return dft_nmr.read_calculation(path, include_g0=self.dft_g0_check.isChecked())
 
+    def _browse_structure(self) -> None:
+        start = self.dft_structure_edit.text() or self.dft_sample_edit.text() or ""
+        path, _ = QFileDialog.getOpenFileName(self, "Structure of the orca_pnmr file",
+                                              os.path.dirname(start), _STRUCTURE_FILTER)
+        if path:
+            self.dft_structure_edit.setText(path)
+            if self.dft_sample_edit.text().strip():
+                self.read_files(quiet=False)
+
+    def _is_orca_pnmr(self) -> bool:
+        sample = self.calcs.get("sample") if hasattr(self, "calcs") else None
+        return bool(sample and str(sample.get("code", "")).endswith("(orca_pnmr)"))
+
+    def _read_sample(self, path):
+        """The sample, with its structure when it is an orca_pnmr file."""
+        structure = self.dft_structure_edit.text().strip() or None
+        found = getattr(self, "_structure_found", None)      # (sample, structure)
+        if structure is not None and found and found[1] == structure and found[0] != path:
+            # Found next to another sample, not chosen: look again for this one.
+            structure = None
+            self.dft_structure_edit.setText("")
+        if structure is not None and pmr.is_orca_pnmr(path) is None:
+            structure = None                # only orca_pnmr files take one
+        calc = dft_nmr.read_calculation(path, include_g0=self.dft_g0_check.isChecked(),
+                                        structure=structure)
+        # Show the structure that was found next to the file, so the choice is
+        # visible (and saved with the state).
+        if calc.get("structure_path") and not structure:
+            self.dft_structure_edit.setText(calc["structure_path"])
+            self._structure_found = (path, calc["structure_path"])
+        return calc
+
     @staticmethod
     def _describe_calc(key, c) -> str:
         if c.get("code") == "CRYSTAL":
@@ -1089,7 +1159,9 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
                 + ", ".join(f"{s} {sum(a['species'] == s for a in c['atoms'])}"
                             for s in dft_nmr.species_of(c))
                 + f"); shielding for {n_sigma}, EFG for {n_efg}"
-                + ("" if c.get("lattice") is not None else "; no cell") + g0 + ". "
+                + ("" if c.get("lattice") is not None else "; no cell") + g0
+                + ("" if pmr.has_positions(c) else "; no atomic positions (give its structure)")
+                + ". "
                 + dft_nmr.describe_method(c.get("method")) + ".")
 
     def read_files(self, quiet: bool = False) -> bool:
@@ -1099,7 +1171,7 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
             sample = self.dft_sample_edit.text().strip()
             if not sample:
                 raise ValueError("Choose the sample's calculation file.")
-            self.calcs["sample"] = self._read(sample)
+            self.calcs["sample"] = self._read_sample(sample)
             epr = self.calcs["sample"].get("epr") or {}
             # A new ORCA EPR file sets S from its multiplicity; the same file
             # read again keeps whatever S was chosen (a pseudo-spin, say).
@@ -1536,6 +1608,9 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         vasp = sample is None or str(sample.get("code", "")).upper().startswith("VASP")
         self.dft_g0_check.setVisible(vasp)
         self.dft_g0_help.setVisible(vasp)
+        self._import_form.setRowVisible(
+            self._structure_file_row,
+            self._is_orca_pnmr() or bool(self.dft_structure_edit.text().strip()))
         periodic = sample is not None and sample.get("lattice") is not None
         cell_item = self.dft_frame_combo.model().item(0)
         cell_item.setEnabled(periodic or sample is None)
@@ -1644,6 +1719,8 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         if self._is_orca_epr() and not self._orca_orbital_in_file():
             return pmr.paramagnetic_to_python(
                 self.dft_sample_edit.text().strip(), paramagnetic=self.orca_paramagnetic_arguments(),
+                structure=(self.dft_structure_edit.text().strip() or None)
+                if self._is_orca_pnmr() else None,
                 orbital_shift=self.dft_opm_orbital_spin.value(),
                 **{k: v for k, v in args.items() if k not in ("element",)}, element=args["element"])
         if self._is_crystal():

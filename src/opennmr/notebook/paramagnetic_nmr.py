@@ -63,7 +63,8 @@ from .crystal_nmr import H_PLANCK, K_B, MU_0, MU_B, MU_N, N_A, G_E, A_0
 __all__ = [
     "MODELS", "spin_matrices", "spin_susceptibility", "spin_response", "paramagnetic_shielding",
     "shielding_contributions", "attach_orca_epr", "is_paramagnetic", "apply_paramagnetic",
-    "read_orca_pnmr_input", "read_orca_pnmr_output", "compare_with_orca", "contribution_rows",
+    "read_orca_pnmr_input", "read_orca_pnmr_output", "read_orca_pnmr", "is_orca_pnmr",
+    "has_positions", "compare_with_orca", "contribution_rows",
     "zfs_tensor", "D_E_from_tensor", "g_nuclear_from_pfac", "PFAC_PER_GN",
     "shift_vs_temperature", "fit_temperature", "TEMPERATURE_MODELS", "plot_shift_temperature",
     "plot_contributions", "paramagnetic_to_python",
@@ -335,7 +336,13 @@ def parse_orca_epr(lines) -> dict:
         m = _HFC_HEAD.match(line)
         if m:
             idx = int(m.group(1))
-            for k in range(i + 1, min(len(lines), i + 8)):
+            # A relativistic (DKH/ZORA picture-change) output prints the
+            # 0th/1st/2nd-order transformed matrices first, ~60 lines, before
+            # the "Raw HFC matrix" (which equals the 2nd-order one there):
+            # search up to the next nucleus, not a fixed 8 lines.
+            for k in range(i + 1, min(len(lines), i + 400)):
+                if _HFC_HEAD.match(lines[k]):
+                    break
                 if "Raw HFC matrix" in lines[k]:
                     A, _j = _matrix_after(lines, k)
                     if A is not None:
@@ -577,6 +584,185 @@ def read_orca_pnmr_echo(path) -> dict:
     if out["D_cm"] is not None and not np.any(out["D_cm"]):
         out["D_cm"] = None
     return out
+
+
+_PNMR_BANNER = "ORCA PARAMAGNETIC NMR SHIELDING CALCULATION"
+
+
+def is_orca_pnmr(path, text=None) -> str | None:
+    """``"output"`` for an ``orca_pnmr`` output, ``"input"`` for its input
+    (``.pnmr.inp``), None otherwise -- by content (the input by its
+    ``#Spin multiplicity`` / ``#temp0`` comments, or its name)."""
+    if text is None:
+        with open(path, "r", errors="replace") as f:
+            text = f.read(64000)
+    if _PNMR_BANNER in text:
+        return "output"
+    head = text[:2000]
+    if str(path).lower().endswith(".pnmr.inp") or (
+            "#Spin multiplicity" in head and "#temp0" in head):
+        return "input"
+    return None
+
+
+def _job_names(path, text):
+    """Job names an ``orca_pnmr`` file may belong to: the input it names
+    (an output's "PNMR input file ... X.pnmr.inp"), its own name without
+    ``.pnmr.inp`` / ``_pnmr`` / ``.pnmr``."""
+    names = []
+    m = re.search(r"PNMR input file\s*\.+\s*(\S+)", text)
+    if m:
+        names.append(os.path.basename(m.group(1)))
+    names.append(os.path.basename(str(path)))
+    out = []
+    for n in names:
+        for suffix in (".pnmr.inp", ".inp", ".txt", ".out", ".log"):
+            if n.lower().endswith(suffix):
+                n = n[:-len(suffix)]
+                break
+        for tail in (".pnmr", "_pnmr", "-pnmr"):
+            if n.lower().endswith(tail):
+                n = n[:-len(tail)]
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
+def _matches(atoms, hfc) -> bool:
+    return all(i < len(atoms) and atoms[i]["species"] == h["element"] for i, h in hfc.items())
+
+
+def read_orca_pnmr(path, structure=None, find_structure: bool = True) -> dict:
+    """An ``orca_pnmr`` input (``.pnmr.inp``) or output as a calculation,
+    like :func:`opennmr.notebook.dft_nmr.read_orca` of an EPR output: its
+    g, D and hyperfine tensors (``calc["epr"]``, per atom ``hfc``), so
+    :func:`dft_nmr.dft_sites` with ``paramagnetic=`` gives the shifts,
+    tensors and structure pictures, with any magnetic model.
+
+    An output also keeps what ``orca_pnmr`` printed (``calc["orca_pnmr"]``:
+    ``{T: {"0H": {"iso", "tensor"}}}``), and the notes say how closely eq.
+    (1) with the calculated spin Hamiltonian reproduces it.
+
+    Neither file has coordinates. ``structure`` gives them: an .xyz or the
+    ORCA output (.out) of the same molecule, whose atom order the nucleus
+    indices ("1N" = atom 1, counted from 0 as ORCA does) refer to; the
+    elements are checked. Without it (and ``find_structure``), a
+    ``<job>.xyz`` or ``<job>.out`` next to the file is used when its
+    elements match. Failing both, only the hyperfine nuclei are listed,
+    without positions (no structure picture)."""
+    from . import dft_nmr
+    with open(path, "r", errors="replace") as f:
+        text = f.read()
+    kind = is_orca_pnmr(path, text)
+    name = os.path.basename(str(path))
+    if kind == "output":
+        echo = read_orca_pnmr_echo(path)
+        printed = read_orca_pnmr_output(path)
+        S, g, D, hfc = echo["S"], echo["g"], echo["D_cm"], echo["hfc"]
+        temperatures = sorted(printed)
+        if not hfc:
+            raise ValueError(f"{name}: no hyperfine tensors in the orca_pnmr output's echo of its "
+                             "input (the 'Nucleus  PFAC' table).")
+        if S is None:
+            raise ValueError(f"{name}: no 'Electronic spin quantum number' line.")
+    elif kind == "input":
+        inp = read_orca_pnmr_input(path)
+        S, g, D, hfc = inp["S"], inp["g"], inp["D_cm"], inp["hfc"]
+        temperatures, printed = inp["temperatures"], None
+        if D is not None and not np.any(D):
+            D = None
+    else:
+        raise ValueError(f"{name}: not an orca_pnmr input or output.")
+    notes = []
+    geometry = None
+    if structure is not None:
+        geometry = dft_nmr.read_structure(structure)
+        if not _matches(geometry["atoms"], hfc):
+            bad = [f"{i}{h['element']}" for i, h in hfc.items()
+                   if i >= len(geometry["atoms"]) or geometry["atoms"][i]["species"] != h["element"]]
+            raise ValueError(f"The structure {os.path.basename(str(structure))} does not belong "
+                             f"to {name}: nucleus {', '.join(bad[:4])} is not that element there "
+                             "(nuclei are numbered from 0 in ORCA's atom order).")
+        notes.append(f"Structure from {os.path.basename(str(structure))}.")
+    elif find_structure:
+        folder = os.path.dirname(os.path.abspath(str(path)))
+        for job in _job_names(path, text):
+            for ext in (".xyz", ".out"):
+                candidate = os.path.join(folder, job + ext)
+                if not os.path.isfile(candidate):
+                    continue
+                try:
+                    found = dft_nmr.read_structure(candidate)
+                except (OSError, ValueError):
+                    continue
+                if _matches(found["atoms"], hfc):
+                    geometry = found
+                    notes.append(f"Structure from {os.path.basename(candidate)} (found next to "
+                                 "the file; its elements match the nuclei). Give another with "
+                                 "structure= if it is not the geometry of this calculation.")
+                    break
+            if geometry is not None:
+                break
+    if geometry is not None:
+        atoms = geometry["atoms"]
+        for a in atoms:
+            a["sigma"], a["efg"] = None, None
+    else:
+        atoms = []
+        seen = {}
+        for i in sorted(hfc):
+            el = hfc[i]["element"]
+            seen[el] = seen.get(el, 0) + 1
+            atoms.append(dft_nmr._atom(el, seen[el], el, [np.nan] * 3))
+        notes.append("No structure: only the hyperfine nuclei are listed, without positions "
+                     "(labels count those nuclei only). Give the .xyz or ORCA output of the same "
+                     "molecule (structure=) to draw it and to number atoms as ORCA does.")
+    by_index = {}
+    for i, h in hfc.items():
+        if geometry is not None:
+            a = atoms[i]
+        else:
+            a = atoms[sorted(hfc).index(i)]
+        a["hfc"] = {k: (np.asarray(v, dtype=float) if k == "A_MHz" else v) for k, v in h.items()
+                    if k != "label"}
+        a["orca_label"] = f"{i}{h['element']}"
+        by_index[i] = a
+    mult = int(round(2 * S + 1))
+    calc = {"code": "ORCA (orca_pnmr)", "path": str(path), "lattice": None, "atoms": atoms,
+            "notes": [], "info": {"kind": kind, "temperatures": temperatures}, "g0": "none",
+            "method": {"code": "ORCA (orca_pnmr)", "functional": "", "cutoff": "",
+                       "pseudopotentials": {}, "periodic": False},
+            "epr": {"g": g, "multiplicity": mult, "S": float(S), "D_cm": D},
+            "structure_path": None if geometry is None else geometry["path"]}
+    if geometry is not None and geometry.get("g_axes") is not None:
+        calc["g_axes"] = geometry["g_axes"]
+    calc["notes"] = notes + [
+        f"orca_pnmr {kind} ({name}): hyperfine tensors for {len(hfc)} nuclei, S = {S:g}"
+        + (", g-matrix" if g is not None else ", no g (g_e used)")
+        + (", D tensor" if D is not None else "")
+        + (f"; temperatures {', '.join(f'{t:g}' for t in temperatures[:6])}"
+           + ("…" if len(temperatures) > 6 else "") + " K" if temperatures else "") + ".",
+        "Molecular (non-periodic) calculation: tensors are in the file's x, y, z frame.",
+        "orca_pnmr has no orbital (diamagnetic) shielding: add the orbital shift."]
+    if printed is not None:
+        calc["orca_pnmr"] = printed
+        try:
+            T = temperatures[0]
+            res = compare_with_orca(apply_paramagnetic(calc, model="curie", T=T), printed, T=T)
+            calc["notes"].append(
+                f"Check: eq. (1) with the calculated spin Hamiltonian at {T:g} K reproduces the "
+                f"shielding orca_pnmr printed for {res['n']} nuclei to {res['max_iso_ppm']:.2g} "
+                f"ppm (isotropic), {res['max_element_ppm']:.2g} ppm (every tensor element).")
+        except (ValueError, KeyError, np.linalg.LinAlgError) as exc:
+            calc["notes"].append(f"Could not check against the printed shieldings: {exc}")
+    return calc
+
+
+def has_positions(calc) -> bool:
+    """False when a calculation's atoms have no coordinates (an orca_pnmr
+    file read without a structure)."""
+    return all(np.all(np.isfinite(np.asarray(a["position"], dtype=float)))
+               for a in calc.get("atoms") or [])
 
 
 def compare_with_orca(calc, orca_output, T=None) -> dict:
@@ -944,13 +1130,15 @@ def plot_contributions(rows, figure=None, fontsize=11.0, orbital=None):
 
 
 def paramagnetic_to_python(path, *, element, labels=None, nucleus=None, paramagnetic=None,
-                           orbital_shift=0.0, **site_kwargs) -> str:
-    """Notebook code for an ORCA EPR import: read, apply, sites."""
+                           orbital_shift=0.0, structure=None, **site_kwargs) -> str:
+    """Notebook code for an ORCA EPR (or orca_pnmr) import: read, apply,
+    sites. ``structure`` : the geometry of an orca_pnmr file."""
     kw = ", ".join(f"{k}={v!r}" for k, v in dict(element=element, labels=labels,
                                                   nucleus=nucleus, **site_kwargs).items()
                    if v is not None)
     return ("from opennmr.notebook import dft_nmr, paramagnetic_nmr as pm\n"
-            f"sample = dft_nmr.read_calculation({str(path)!r})\n"
+            f"sample = dft_nmr.read_calculation({str(path)!r}"
+            + (f", structure={str(structure)!r}" if structure else "") + ")\n"
             f"model = dft_nmr.dft_sites(sample, paramagnetic={dict(paramagnetic or {})!r}, "
             f"orbital_shift={float(orbital_shift)!r}, {kw})\n"
             "print(dft_nmr.format_table(model))\n"

@@ -48,6 +48,7 @@ from .widgets.typed_spinbox import LengthSpinBox, TypedDoubleSpinBox, TypedSpinB
 from .widgets import wheel_guard
 from .cpmg_panel import CpmgProcessingPanel
 from .shear_panel import ShearPanel
+from .amat_filter_panel import AmatFilterPanel
 from .compare_2d import Compare2DControls
 from .compare_panels_controls import ComparePanelsControls
 from .panel_label_controls import PanelLabelControls
@@ -23735,8 +23736,25 @@ class MainWindow(QMainWindow):
         self.shear_panel.result_ready.connect(self._add_shear_result)
         self.shear_section = CollapsibleSection("Shearing and Scaling (2D)", content=self.shear_panel)
         layout.addWidget(self.shear_section)
+        # The aMAT spectral filter (2026-11-13, explicit user request; SI
+        # S7 of Angew. Chem. 2024, e202408704): gui/amat_filter_panel.py
+        # over notebook/amat_filter.py.
+        self.amat_filter_panel = AmatFilterPanel()
+        self.amat_filter_panel.result_ready.connect(self._add_amat_filter_result)
+        self.amat_filter_section = CollapsibleSection("aMAT Spectral Filter (2D)",
+                                                      content=self.amat_filter_panel)
+        layout.addWidget(self.amat_filter_section)
         layout.addStretch(1)
         return panel
+
+    def _add_amat_filter_result(self, spectrum, label: str, description: str) -> int:
+        """An aMAT-filtered 2D into the session, with the filter's settings
+        and what it removed written into its history."""
+        index = self._add_derived_spectrum(spectrum, label)
+        history = self._ensure_history(index)
+        if history is not None:
+            io_history.add_event(history, description, kind="amat_filter")
+        return index
 
     def _add_shear_result(self, spectrum, label: str, description: str) -> int:
         """A sheared/scaled 2D into the session, with the plan, the
@@ -31984,6 +32002,7 @@ class MainWindow(QMainWindow):
         if not 0 <= row < len(self.session):
             self.cpmg_panel.set_source(None)
             self.shear_panel.set_source(None)
+            self.amat_filter_panel.set_source(None)
 
     def _on_notes_saved(self, spectrum, where: str) -> None:
         row = self._row_of_spectrum(spectrum)
@@ -32030,6 +32049,7 @@ class MainWindow(QMainWindow):
         self.notes_editor.set_spectrum(spectrum)
         self.cpmg_panel.set_source(spectrum, self.session.label(row))
         self.shear_panel.set_source(spectrum, self.session.label(row))
+        self.amat_filter_panel.set_source(spectrum, self.session.label(row))
         meta = spectrum.metadata
 
         bits = [f"Vendor: {meta.vendor}", f"Nucleus: {meta.nucleus or '—'}"]

@@ -283,3 +283,11 @@ def test_gui_with_nothing_picked(qapp):
             window.multiplet_source_combo.findData(source))
         assert window._on_analyse_multiplets_clicked() is None
         assert "No lines picked" in window.multiplet_results_label.text()
+
+def test_the_notebook_exports():
+    # analyse_spectrum (find the lines, then read them) was missing from
+    # opennmr.notebook in 0.10.0; exported under a name that says what it does.
+    assert nmr.analyse_spectrum_multiplets is ma.analyse_spectrum
+    for name in ("analyse_multiplets", "analyse_multiplet", "format_multiplet_report",
+                 "plot_coupling_trees", "multiplet_rows", "analyse_spectrum_multiplets"):
+        assert name in nmr.__all__

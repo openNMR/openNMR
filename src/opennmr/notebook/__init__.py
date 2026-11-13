@@ -301,8 +301,8 @@ from ..io.export import export_spectrum, read_jcamp_spectrum
 from ..io.load_cache import read as load_cached
 
 from .multiplet_analysis import (
-    analyse_multiplets, analyse_multiplet, format_report as format_multiplet_report,
-    plot_coupling_trees, report_rows as multiplet_rows,
+    analyse_multiplets, analyse_multiplet, analyse_spectrum as analyse_spectrum_multiplets,
+    format_report as format_multiplet_report, plot_coupling_trees, report_rows as multiplet_rows,
 )
 from .jcoupling_fitting import (
     jcoupling_site_lineshape, build_jcoupling_model, initialise_jcoupling_params, build_jcoupling_bounds,
@@ -359,6 +359,11 @@ from .shearing import (
     make_shear_plan, shear_2d, estimate_shear, sideband_positions, isotropic_from_peak,
     plot_shear_scan,
 )
+
+# The aMAT spectral filter (2026-11-13; Angew. Chem. 2024, e202408704, SI
+# S7): each F1 row kept only at its isotropic position + n ν_rot.
+from . import amat_filter
+from .amat_filter import apply_amat_filter, plot_amat_trace, plot_amat_filter_map
 
 # Offset Tracker (Integrate ▸ Offset Tracker; 2026-10-17, lineshapes
 # 2026-10-18): integrals of an HMQC / J-resolved series against O2/O3, and
@@ -519,7 +524,8 @@ __all__ = [
     # export (any vendor -> .csv, .xy, JCAMP-DX)
     "export_spectrum", "read_jcamp_spectrum", "load_cached",
     # multiplet_analysis (multiplets and J couplings from picked lines)
-    "analyse_multiplets", "analyse_multiplet", "format_multiplet_report", "plot_coupling_trees",
+    "analyse_multiplets", "analyse_multiplet", "analyse_spectrum_multiplets",
+    "format_multiplet_report", "plot_coupling_trees",
     "multiplet_rows",
     # jcoupling_fitting
     "jcoupling_site_lineshape", "build_jcoupling_model", "initialise_jcoupling_params", "build_jcoupling_bounds",
@@ -583,6 +589,8 @@ __all__ = [
     # shearing and scaling of 2D spectra
     "shearing", "make_shear_plan", "shear_2d", "estimate_shear", "sideband_positions",
     "isotropic_from_peak", "plot_shear_scan",
+    # the aMAT spectral filter (pulse train at the isotropic shift + n ν_rot)
+    "amat_filter", "apply_amat_filter", "plot_amat_trace", "plot_amat_filter_map",
     # Offset Tracker (HMQC / J-resolved series against O2/O3)
     "offset_tracker", "offset_series", "offset_report", "plot_offset_series", "skyline_spectrum",
     "sideband_pattern", "sideband_spectrum", "stick_spectrum", "pattern_spectrum",

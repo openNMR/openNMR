@@ -531,7 +531,9 @@ class ParamagneticToolsPanel(QWidget):
                       f"theta={self.pm_T_theta_spin.value()!r})"]
         elif self.temperature_curves is not None and src is not None:
             lines += ["from opennmr.notebook import dft_nmr",
-                      f"calc = dft_nmr.read_calculation({src['path']!r})", grid]
+                      f"calc = dft_nmr.read_calculation({src['path']!r}"
+                      + (f", structure={src['structure']!r}" if src.get("structure") else "")
+                      + ")", grid]
             if src.get("kind") == "crystal":
                 args = dict(src["args"])
                 comps = args.pop("components", "both")
