@@ -630,6 +630,42 @@ class JCouplingSitesEditor(QWidget):
                 self.set_coupling_constraint(r, index.row(), bounds=b)
 
 
+class PageSizedStack(QStackedWidget):
+    """A stack as tall as the page on show, not its tallest page.
+
+    A ``QStackedWidget`` takes the size of its largest page, so a short
+    page (the spin-system editor beside the taller mixed-model page) was
+    stretched, and its layout spread the spare height as gaps between its
+    tables (user report, 2026-11-14: "a huge gap between different tables"
+    in the solution NMR simulation). Telling the hidden pages to ask for
+    no height is not enough: Qt's stacked layout still counts every page
+    when one has wrapped text (height-for-width). So the size asked for
+    here is the current page's alone."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.currentChanged.connect(lambda _index: self.updateGeometry())
+
+    def sizeHint(self):  # noqa: N802 -- Qt override
+        page = self.currentWidget()
+        return page.sizeHint() if page is not None else super().sizeHint()
+
+    def minimumSizeHint(self):  # noqa: N802 -- Qt override
+        page = self.currentWidget()
+        return page.minimumSizeHint() if page is not None else super().minimumSizeHint()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 -- Qt override
+        page = self.currentWidget()
+        return page.hasHeightForWidth() if page is not None else False
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 -- Qt override
+        page = self.currentWidget()
+        if page is None:
+            return -1
+        return page.heightForWidth(width) if page.hasHeightForWidth() \
+            else page.sizeHint().height()
+
+
 class SpinSystemEditor(QWidget):
     """An explicit spin system for exact (strong-coupling) simulation and
     fitting: a spins table (label, nucleus, shift, n magnetically
@@ -696,6 +732,8 @@ class SpinSystemEditor(QWidget):
         self.info_label = QLabel("")
         self.info_label.setWordWrap(True)
         v.addWidget(self.info_label)
+        # Any height to spare goes below the tables, never between them.
+        v.addStretch(1)
 
     # ---- editing ---------------------------------------------------------
     def labels(self) -> list[str]:
@@ -1173,7 +1211,7 @@ class JCouplingSimulationPanel(QWidget):
         self.spin_fwhm_spin.setToolTip("Width (FWHM) of every line of the spin system.")
         spin_form.addRow("Linewidth:", self.spin_fwhm_spin)
         spin_layout.addLayout(spin_form)
-        self.model_stack = QStackedWidget()
+        self.model_stack = PageSizedStack()
         self.model_stack.addWidget(self.editor)
         self.model_stack.addWidget(spin_page)
         # Mixed: weak sites and strong spin sets on one spectrum (its own
@@ -1751,7 +1789,7 @@ class JCouplingFitPanel(QWidget):
             "and lists all solutions that fit as well.")
         spin_form.addRow("", self.ambiguity_check)
         spin_layout.addLayout(spin_form)
-        self.model_stack = QStackedWidget()
+        self.model_stack = PageSizedStack()
         self.model_stack.addWidget(self.editor)
         self.model_stack.addWidget(spin_page)
         self.model_combo.currentIndexChanged.connect(self.model_stack.setCurrentIndex)

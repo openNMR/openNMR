@@ -24,7 +24,7 @@ from io import StringIO
 
 import matplotlib.colors
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction, QActionGroup, QDesktopServices, QFont, QFontDatabase, QIcon, QKeySequence, QPalette, QPixmap,
 )
@@ -70,7 +70,7 @@ from ..notebook import slice_phase
 from ..notebook import drift_correction as nb_drift_correction
 from ..notebook import field_drift as nb_field_drift
 from ..notebook import fit_ranges as nb_fit_ranges
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QGuiApplication
 
 
 def _is_dark_colour(colour) -> bool:
@@ -131,7 +131,10 @@ from ..processing import vocs as processing_vocs
 from ..processing.slicing import get_trace
 from ..simulate import bloch as simulate_bloch
 from ..simulate import diffusion as simulate_diffusion
-from .session import Session, strip_label_suffix
+from .session import Session, TrackedRow, strip_label_suffix
+from .widgets.experiment_tree import ExperimentTree
+from .fit_values_dialog import FitValuesDialog
+from ..notebook import experiment_tree as nb_experiment_tree
 from . import style as style_module
 from .style import apply_theme, remember_system_theme
 from .widgets.canvas import MplCanvas
@@ -518,6 +521,15 @@ _NO_ZERO_FILL = 0
 
 
 class MainWindow(QMainWindow):
+    # Rows kept for later follow their experiment (session.TrackedRow): a
+    # row removed or reordered meanwhile cannot make them mean another
+    # spectrum; they read None once their experiment has been removed.
+    _phase_target_index = TrackedRow()
+    _live_reprocess_pending_index = TrackedRow()
+    _sidecar_save_pending_index = TrackedRow()
+    _canvas_2d_refresh_pending_index = TrackedRow()
+    _last_fit_models_index = TrackedRow()
+
     def __init__(self) -> None:
         # Full stop as the decimal point in every number box, whatever the
         # computer's regional settings (numeric_locale).
@@ -574,7 +586,7 @@ class MainWindow(QMainWindow):
         # by which point self._selected_index() already points at the
         # spectrum being switched *to*, not the one whose pending phase
         # delta needs committing.
-        self._phase_target_index: int | None = None
+        self._phase_target_index = None      # a TrackedRow (class attribute)
         # Same reasoning as _phase_target_index just above, for a
         # genuine-2D session's own F2-vs-F1 target specifically (only
         # meaningful when _phase_mode == "2d") -- real bug this fixes:
@@ -646,7 +658,7 @@ class MainWindow(QMainWindow):
         self._live_reprocess_timer = QTimer(self)
         self._live_reprocess_timer.setSingleShot(True)
         self._live_reprocess_timer.timeout.connect(self._run_debounced_multi_row_reprocess)
-        self._live_reprocess_pending_index: int | None = None
+        self._live_reprocess_pending_index = None      # a TrackedRow
         # The y views to carry across a baseline correction that has not
         # reached the screen yet (see _capture_baseline_view).
         self._baseline_view_follow: dict | None = None
@@ -664,7 +676,7 @@ class MainWindow(QMainWindow):
         self._sidecar_save_timer = QTimer(self)
         self._sidecar_save_timer.setSingleShot(True)
         self._sidecar_save_timer.timeout.connect(self._run_debounced_sidecar_save)
-        self._sidecar_save_pending_index: int | None = None
+        self._sidecar_save_pending_index = None      # a TrackedRow
         # Same debounce reasoning as _live_reprocess_timer above, for
         # self.canvas's own 2D/pseudo-2D contour during a live phase
         # drag on a genuine 2D or "apply to every slice" pseudo-2D --
@@ -683,7 +695,7 @@ class MainWindow(QMainWindow):
         self._canvas_2d_refresh_timer = QTimer(self)
         self._canvas_2d_refresh_timer.setSingleShot(True)
         self._canvas_2d_refresh_timer.timeout.connect(self._run_debounced_canvas_2d_refresh)
-        self._canvas_2d_refresh_pending_index: int | None = None
+        self._canvas_2d_refresh_pending_index = None      # a TrackedRow
         # How long a contour rebuild actually took, keyed by the
         # spectrum's own data shape -- what
         # _schedule_canvas_2d_refresh uses to decide between live
@@ -2804,7 +2816,36 @@ class MainWindow(QMainWindow):
         self.notes_editor = ExperimentNotesEditor()
         self.notes_editor.saved.connect(self._on_notes_saved)
         self.notes_editor.failed.connect(self._on_notes_save_failed)
+        # What is shown: the same experiments as a tree, each with its
+        # type, a spectrum's fits beneath it and a multi-spectrum fit as a
+        # group (explicit user request, 2026-11-13). The list stays the
+        # model behind it -- its rows, selection and drag data are what
+        # everything else uses -- but is no longer on show.
+        self.experiment_tree = ExperimentTree()
+        self.experiment_tree.setToolTip(self.spectrum_list.toolTip() + (
+            "\nA spectrum's fits are listed beneath it: double-click one to show it again."))
+        self.experiment_tree.mime_for_rows = lambda rows: self.spectrum_list.model().mimeData(
+            [self.spectrum_list.model().index(r, 0) for r in rows])
+        self.experiment_tree.rowsChosen.connect(self._on_tree_rows_chosen)
+        self.experiment_tree.nodeActivated.connect(self._on_tree_node_activated)
+        self.experiment_tree.menuRequested.connect(self._on_tree_menu)
+        open_experiments_layout.addWidget(self.experiment_tree, 1)
         open_experiments_layout.addWidget(self.spectrum_list, 1)
+        self.spectrum_list.hide()
+        self._tree_refresh_timer = QTimer(self)
+        self._tree_refresh_timer.setSingleShot(True)
+        self._tree_refresh_timer.setInterval(0)
+        self._tree_refresh_timer.timeout.connect(self._refresh_experiment_tree)
+        for signal in (self.spectrum_list.model().rowsInserted,
+                       self.spectrum_list.model().rowsRemoved,
+                       self.spectrum_list.model().rowsMoved,
+                       self.spectrum_list.model().modelReset,
+                       self.spectrum_list.model().dataChanged):
+            signal.connect(lambda *_: self._schedule_tree_refresh())
+        # The selection model's signals, not the view's: _select_single_row
+        # blocks the view's.
+        self.spectrum_list.selectionModel().selectionChanged.connect(
+            lambda *_: self._sync_tree_selection())
         # Model signals, not the view's: _select_single_row blocks the
         # view's signals, but every row added or removed still passes
         # through the model. A pending edit is saved before its row goes.
@@ -4588,11 +4629,19 @@ class MainWindow(QMainWindow):
             return
         self._run_vocs_sum(stack)
 
-    def _on_spectrum_list_context_menu(self, pos) -> None:
-        item = self.spectrum_list.itemAt(pos)
-        if item is None:
-            return
-        index = self.spectrum_list.row(item)
+    def _on_spectrum_list_context_menu(self, pos, index: int | None = None,
+                                       global_pos=None) -> None:
+        """The right-click menu of an Open experiments row: at ``pos`` in
+        the list, or (from the tree) for row ``index`` at ``global_pos``."""
+        if index is None:
+            item = self.spectrum_list.itemAt(pos)
+            if item is None:
+                return
+            index = self.spectrum_list.row(item)
+        else:
+            if not (0 <= index < min(len(self.session), self.spectrum_list.count())):
+                return
+            item = self.spectrum_list.item(index)
 
         spectrum = self.session.spectra[index]
 
@@ -4651,10 +4700,11 @@ class MainWindow(QMainWindow):
         if spectrum.ndim == 2 and spectrum.is_pseudo_2d:
             menu.addSeparator()
             fit_curve_action = menu.addAction("Fit Curve (relaxation/diffusion)…")
-        show_kept_fit_action = kept_fit_view_action = None
+        show_kept_fit_action = kept_fit_view_action = kept_fit_values_action = None
         if MplCanvas.compare_fit_model(spectrum) is not None:
             menu.addSeparator()
             show_kept_fit_action = menu.addAction("Show the Fit")
+            kept_fit_values_action = menu.addAction("Fit Parameters and Errors…")
             kept_fit_view_action = menu.addAction("Fit Display (in Compare)…")
         menu.addSeparator()
         n_selected = len(self.spectrum_list.selectedItems())
@@ -4662,7 +4712,8 @@ class MainWindow(QMainWindow):
         remove_all = n_selected > 1 and item.isSelected()
         remove_action = menu.addAction(f"Remove {n_selected} Selected" if remove_all else "Remove")
 
-        chosen = menu.exec(self.spectrum_list.viewport().mapToGlobal(pos))
+        chosen = menu.exec(global_pos if global_pos is not None
+                           else self.spectrum_list.viewport().mapToGlobal(pos))
         if chosen is rename_action:
             self._on_rename_spectrum_action(index)
         elif chosen is override_action:
@@ -4685,6 +4736,9 @@ class MainWindow(QMainWindow):
             self._draw_fit_model(MplCanvas.compare_fit_model(spectrum))
         elif kept_fit_view_action is not None and chosen is kept_fit_view_action:
             self._open_fit_view_dialog(index)
+        elif kept_fit_values_action is not None and chosen is kept_fit_values_action:
+            self._show_fit_parameters({"row": index, "virtual": False, "action": None,
+                                       "label": self.session.label(index), "key": None})
         elif chosen is remove_action:
             if remove_all:
                 self._on_remove_clicked()
@@ -11911,6 +11965,8 @@ class MainWindow(QMainWindow):
         e.g. a metadata change made via a right-click action on a
         *different* row than the one currently shown still passes its
         own ``index`` explicitly rather than relying on the default."""
+        # Whatever changed may be a fit: the tree lists them.
+        self._schedule_tree_refresh()
         target = index if index is not None else self._selected_index()
         if target is None:
             return
@@ -11990,6 +12046,9 @@ class MainWindow(QMainWindow):
         result = io_serialize.decode(encoded)
         row = self._row_of_spectrum(spectrum) if spectrum is not None else -1
         result["spectrum_index"] = row if row >= 0 else result.get("spectrum_index")
+        result.pop(Session.ID_KEY, None)      # an ID is this session's only
+        if row >= 0:
+            result[Session.ID_KEY] = self.session.entry_id(row)
         self._csa_fit_result = result
         self._report_csa_fit()
 
@@ -12103,15 +12162,15 @@ class MainWindow(QMainWindow):
         # The fit panel whose curve the Fit view now shows -- what
         # "Keep This Fit…" keeps.
         self._last_fit_key = key
+        result = (self._csa_fit_result if key == "csa" else getattr(panel, "result", None))
         if index is None:
-            result = getattr(panel, "result", None) or {}
-            index = result.get("spectrum_index", result.get("index"))
-            spectrum = result.get("spectrum")
-            if spectrum is not None:
-                row = self._row_of_spectrum(spectrum)
-                index = row if row >= 0 else index
+            index = self._result_row(result)
         if index is None or not (0 <= index < len(self.session)):
             return
+        if isinstance(result, dict):
+            # The experiment the fit belongs to, by its stable ID: the row
+            # number kept beside it goes stale when rows are removed.
+            result[Session.ID_KEY] = self.session.entry_id(index)
         spectrum = self.session.spectra[index]
         encoded = panel.result_state()
         if encoded is None:
@@ -18354,9 +18413,8 @@ class MainWindow(QMainWindow):
                   "skew_or_eta": float(skew), "fwhm": float(fwhm),
                   "eta": float(np.clip(eta, 0, 1)), "amount": float(amounts[s])}
                  for s, (d_iso, aniso, skew, fwhm, _amp, eta) in enumerate(params)]
-        spectrum = (self.session.spectra[r["spectrum_index"]]
-                    if r.get("spectrum_index") is not None
-                    and 0 <= r["spectrum_index"] < len(self.session) else None)
+        row_now = self._result_row(r)
+        spectrum = self.session.spectra[row_now] if row_now is not None else None
         nucleus = getattr(getattr(spectrum, "metadata", None), "nucleus", None)
         sfo1 = getattr(getattr(spectrum, "metadata", None), "sfo1", None)
         if nucleus:
@@ -18503,7 +18561,7 @@ class MainWindow(QMainWindow):
         """The spectrum's kept fit models, as ``(name, model)``, for the
         advice to compare a new fit with (only those of the same data and
         window are compared -- fit_advice.compare_items checks)."""
-        index = fit.get("spectrum_index")
+        index = self._result_row(fit)
         if index is None:
             index = self._selected_index()
         return [(m.get("name") or "kept fit", m) for m in self._fit_models(index)]
@@ -18744,8 +18802,7 @@ class MainWindow(QMainWindow):
         index = self._selected_index()
         if index is None or not (0 <= index < len(self.session)):
             return getattr(self, "_last_fit_models_index", None) \
-                if getattr(self, "_last_fit_models_index", None) is not None \
-                and self._last_fit_models_index < len(self.session) else None
+                if getattr(self, "_last_fit_models_index", None) is not None else None
         source = (self.session.spectra[index].metadata.raw or {}).get("fit_model_source") or {}
         if source.get("spectrum"):
             for i in range(len(self.session)):
@@ -18769,6 +18826,7 @@ class MainWindow(QMainWindow):
         return out
 
     def _set_fit_models(self, index, models, event: str | None = None) -> None:
+        self._schedule_tree_refresh()          # the tree lists kept fits
         raw = self.session.spectra[index].metadata.raw
         raw["fit_models"] = [nb_fit_models.encode_fit_model(m) for m in models]
         if event:
@@ -19136,11 +19194,8 @@ class MainWindow(QMainWindow):
             kind = panel_key if result else "spectrum"
             report = panel.report_text() if (panel is not None and result) else ""
             if result:
-                spectrum = result.get("spectrum")
-                row = self._row_of_spectrum(spectrum) if spectrum is not None else -1
-                if row < 0 and result.get("spectrum_index") is not None:
-                    row = result["spectrum_index"]
-                index = row if row is not None and row >= 0 else index
+                row = self._result_row(result)
+                index = row if row is not None else index
         if index is None:
             QMessageBox.information(self, "Keep fit", "Select the spectrum the fit belongs to.")
             return None
@@ -19377,6 +19432,8 @@ class MainWindow(QMainWindow):
                             raw={"fit_model": nb_fit_models.encode_fit_model(model),
                                  "fit_model_view": nb_fit_models.fit_view(view),
                                  "fit_model_source": {"spectrum": source_label,
+                                                      Session.ID_KEY:
+                                                          self.session.entry_id(index),
                                                       "id": model.get("id"),
                                                       "time": model.get("time")}}))
             meta = source.metadata
@@ -27929,6 +27986,7 @@ class MainWindow(QMainWindow):
         )
 
     def _store_slice_results(self, spectrum, results: list[dict]) -> None:
+        self._schedule_tree_refresh()          # the tree lists the fit
         self._slice_fit_results = results
         # Kept per-spectrum (not just in the live _slice_fit_results
         # attribute) so "Spectrum fit (slice #)"/Fit Curve survive a
@@ -28258,6 +28316,7 @@ class MainWindow(QMainWindow):
 
         if persist_to is not None:
             persist_to.metadata.raw["relaxation_fit_results"] = results
+            self._schedule_tree_refresh()      # the tree lists the curve fit
             persist_to.metadata.raw["relaxation_fit_xlabel"] = xlabel
             # Siloed with the results, so reselecting this spectrum
             # later can still refit a peak the way it was fitted. Not
@@ -28671,9 +28730,8 @@ class MainWindow(QMainWindow):
         # one component per site.
         components = result.get("components")
         labels = result["info"]["labels"] if components else None
-        index = result.get("spectrum_index")
-        spectrum = (self.session.spectra[index]
-                    if index is not None and 0 <= index < len(self.session) else None)
+        index = self._result_row(result)
+        spectrum = self.session.spectra[index] if index is not None else None
         self.fit_canvas.show_slice_fit(
             result["x"], np.asarray(results["real_spectrum"])[order], result["y_fit"],
             components=components, peak_labels=labels,
@@ -32294,6 +32352,422 @@ class MainWindow(QMainWindow):
                 self.notes_editor.edit.setFocus()
         else:
             self.notes_editor.flush()
+    # ---- the Open experiments tree ----------------------------------------
+
+    def _schedule_tree_refresh(self) -> None:
+        timer = getattr(self, "_tree_refresh_timer", None)
+        if timer is None:
+            return
+        try:
+            timer.start()
+        except RuntimeError:
+            # The window is being destroyed: its timer has gone before the
+            # list's last rows (whose removal asks for a refresh). Nothing
+            # is left to refresh.
+            self._tree_refresh_timer = None
+
+    def _experiment_tree_entries(self) -> list[dict]:
+        """What the tree is built from: each open experiment's row, name,
+        stable ID and record of itself."""
+        n = min(len(self.session), self.spectrum_list.count())
+        return [{"row": row, "label": self.session.label(row),
+                 "entry_id": self.session.entry_id(row),
+                 "raw": self.session.spectra[row].metadata.raw or {}} for row in range(n)]
+
+    def _refresh_experiment_tree(self) -> None:
+        """Rebuild the tree from the session now (it otherwise follows
+        every change by itself, a moment later)."""
+        tree = getattr(self, "experiment_tree", None)
+        if tree is None or getattr(self, "_tree_refresh_timer", None) is None:
+            return
+        self._tree_refresh_timer.stop()
+        try:
+            nodes = nb_experiment_tree.build_experiment_tree(self._experiment_tree_entries())
+        except Exception as exc:  # noqa: BLE001 -- the list of what is open must always show
+            nodes = [nb_experiment_tree._node("spectrum", self.session.label(row), row, None)
+                     for row in range(min(len(self.session), self.spectrum_list.count()))]
+            self.statusBar().showMessage(f"Couldn't group the open experiments: {exc}", 8000)
+        keep = getattr(self, "_tree_selected_key", None)
+        tree.set_nodes(nodes)
+        self._sync_tree_selection()
+        # A fit stored with the selected spectrum stays the highlighted
+        # entry when the tree is rebuilt under it.
+        item = tree.find(keep) if keep else None
+        if item is not None and tree.node(item)["row"] in self._selected_rows() \
+                and len(self._selected_rows()) == 1:
+            tree._syncing = True
+            try:
+                tree.clearSelection()
+                item.setSelected(True)
+                tree.setCurrentItem(item)
+            finally:
+                tree._syncing = False
+        else:
+            self._tree_selected_key = None
+
+    def _sync_tree_selection(self) -> None:
+        tree = getattr(self, "experiment_tree", None)
+        if tree is None or getattr(self, "_tree_choosing", False):
+            return
+        try:
+            tree.select_rows(self._selected_rows(), self.spectrum_list.currentRow())
+        except RuntimeError:
+            pass        # the window is being destroyed (see _schedule_tree_refresh)
+
+    def _on_tree_rows_chosen(self, rows, current: int) -> None:
+        """The tree's selection, made the list's (which everything else
+        follows): one row is selected as a click on it was; several as a
+        Ctrl/Shift selection was."""
+        tree = self.experiment_tree
+        item = tree.currentItem()
+        node = tree.node(item) if item is not None else None
+        self._tree_selected_key = node["key"] if node is not None and node["virtual"] else None
+        rows = [r for r in rows if 0 <= r < self.spectrum_list.count()]
+        if not rows:
+            # A click on empty space: what is selected stays selected (and
+            # stays shown as selected).
+            self._sync_tree_selection()
+            return
+        if rows == self._selected_rows():
+            return
+        self._tree_choosing = True
+        try:
+            if len(rows) == 1:
+                self._select_single_row(rows[0])
+            else:
+                self.spectrum_list.blockSignals(True)
+                try:
+                    self.spectrum_list.clearSelection()
+                    for row in rows:
+                        self.spectrum_list.item(row).setSelected(True)
+                    if current in rows:
+                        self.spectrum_list.setCurrentRow(
+                            current, QItemSelectionModel.SelectionFlag.NoUpdate)
+                finally:
+                    self.spectrum_list.blockSignals(False)
+                self._on_list_selection_changed()
+        finally:
+            self._tree_choosing = False
+
+    def _on_tree_node_activated(self, node) -> None:
+        """Open a tree entry: a row is selected and shown; a fit is put
+        back on the Fit view (replotted) as it was."""
+        row = node.get("row")
+        if row is None or not (0 <= row < len(self.session)):
+            return
+        if self._selected_rows() != [row]:
+            self._select_single_row(row)
+        action = node.get("action")
+        if action is None:
+            if MplCanvas.compare_fit_model(self.session.spectra[row]) is not None:
+                self._show_kept_fit_experiment(row)
+            return
+        try:
+            self._show_tree_fit(row, action)
+        except Exception as exc:  # noqa: BLE001 -- told, not raised
+            QMessageBox.information(self, "Open experiments",
+                                    f"“{node['label']}” could not be shown again:\n\n{exc}")
+            return
+        self._tree_selected_key = node["key"]
+        item = self.experiment_tree.find(node["key"])
+        if item is not None:
+            self.experiment_tree._syncing = True
+            try:
+                self.experiment_tree.clearSelection()
+                item.setSelected(True)
+                self.experiment_tree.setCurrentItem(item)
+            finally:
+                self.experiment_tree._syncing = False
+        self.statusBar().showMessage(
+            f"{node['type_label']} “{node['label']}” of {self.session.label(row)} shown again.",
+            6000)
+
+    def _show_kept_fit_experiment(self, row: int) -> None:
+        """A kept fit listed as an experiment: its fit on the Fit view."""
+        source = (self.session.spectra[row].metadata.raw or {}).get("fit_model_source") or {}
+        parent = self.session.index_of_id(source.get(Session.ID_KEY))
+        if parent is None:
+            parent = next((i for i in range(len(self.session))
+                           if self.session.label(i) == source.get("spectrum")), None)
+        if parent is None or source.get("id") is None:
+            return
+        try:
+            self._show_fit_model(parent, source["id"])
+        except Exception:  # noqa: BLE001 -- the row itself is still shown
+            pass
+
+    def _show_tree_fit(self, row: int, action) -> None:
+        """Replot the fit ``action`` names for the (selected) row ``row``."""
+        what = action[0]
+        spectrum = self.session.spectra[row]
+        if what == "fit_model":
+            self._show_fit_model(row, action[1])
+        elif what == "slice_fit":
+            results = spectrum.metadata.raw.get("slice_fit_results")
+            if not results:
+                raise ValueError("The spectral fit is no longer stored with this spectrum.")
+            self._slice_fit_results = results
+            self._on_view_slice_fit_changed(self.view_slice_fit_spin.value() or 1)
+        elif what == "curve_fit":
+            if not self._relaxation_fit_results:
+                raise ValueError("The curve fit is no longer stored with this spectrum.")
+            self._display_relaxation_peak(0)
+        elif what == "stored_fit":
+            key = action[1]
+            if key == "csa":
+                if not self._csa_fit_result:
+                    raise ValueError("The CSA fit is no longer stored with this spectrum.")
+                self._draw_csa_fit()
+            else:
+                panel = self._fit_panels().get(key) if key != "multi" else self.multi_fit_panel
+                if panel is None or not getattr(panel, "result", None):
+                    raise ValueError("That fit is no longer stored with this spectrum.")
+                if key == "multi":
+                    panel.show_selected()
+                else:
+                    panel._draw_fit(panel.result)
+            self._last_fit_key = key
+        else:
+            raise ValueError(f"Unknown entry: {what}")
+        self._raise_fit_canvas()
+
+    def _on_tree_menu(self, node, global_pos) -> None:
+        row = node.get("row")
+        if row is None:
+            return
+        if not node.get("virtual"):
+            self._on_spectrum_list_context_menu(None, index=row, global_pos=global_pos)
+            return
+        menu = QMenu(self)
+        show = menu.addAction("Show")
+        show.setToolTip("Put this fit back on the Fit view.")
+        parameters = menu.addAction("Parameters and Errors…")
+        parameters.setToolTip("The fitted values and their uncertainties as a table: copy it, "
+                              "export it to CSV, or restore the fit from it.")
+        copy_action = menu.addAction("Copy Parameters")
+        export_action = menu.addAction("Export Parameters to CSV…")
+        menu.addSeparator()
+        restore = menu.addAction("Restore")
+        restore.setToolTip("Put this fit back in the panel that made it, as its current fit.")
+        chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
+        if chosen is show:
+            self._on_tree_node_activated(node)
+        elif chosen is parameters:
+            self._show_fit_parameters(node)
+        elif chosen is copy_action:
+            self._copy_fit_parameters(node)
+        elif chosen is export_action:
+            dialog = self._show_fit_parameters(node, show=False)
+            if dialog is not None:
+                dialog.export_csv()
+        elif chosen is restore:
+            self._restore_tree_fit(node)
+
+    # ---- a fit entry's parameters and errors ------------------------------
+
+    def _tree_fit_record(self, node) -> dict | None:
+        """The fitted values (a :mod:`notebook.fit_values` record) of the
+        fit a tree entry stands for, or None when it has none."""
+        row = node.get("row")
+        if row is None or not (0 <= row < len(self.session)):
+            return None
+        spectrum = self.session.spectra[row]
+        raw = spectrum.metadata.raw or {}
+        label = self.session.label(row)
+        source = str(spectrum.metadata.source_path or "")
+        action = node.get("action")
+        if action is None:
+            # A kept fit listed as an experiment: its model's own record.
+            src = raw.get("fit_model_source") or {}
+            parent = self.session.index_of_id(src.get(Session.ID_KEY))
+            if parent is None:
+                parent = next((i for i in range(len(self.session))
+                               if self.session.label(i) == src.get("spectrum")), None)
+            model = None
+            if parent is not None and src.get("id") is not None:
+                try:
+                    model = self._fit_model_by_id(parent, src["id"])
+                except Exception:  # noqa: BLE001 -- fall back to the copy it carries
+                    model = None
+            if model is None and raw.get("fit_model"):
+                model, parent = nb_fit_models.decode_fit_model(raw["fit_model"]), row
+            return self._fit_model_values_record(parent, model) if model is not None else None
+        what = action[0]
+        if what == "fit_model":
+            return self._fit_model_values_record(row, self._fit_model_by_id(row, action[1]))
+        if what == "stored_fit":
+            entry = (raw.get("fits") or {}).get(action[1])
+            if not isinstance(entry, dict):
+                return None
+            try:
+                result = io_serialize.decode(copy.deepcopy(entry.get("result")))
+            except Exception:  # noqa: BLE001 -- the table and report are shown without it
+                result = None
+            table = entry.get("values_table") or {}
+            record = nb_fit_values.fitted_values_record(
+                fit=entry.get("label") or action[1], spectrum=entry.get("target") or label,
+                source=source, columns=table.get("columns"),
+                rows=[tuple(r) for r in table.get("rows") or []],
+                result=result if isinstance(result, dict) else None,
+                report=entry.get("report") or "")
+            record["fitted"] = entry.get("time", "")
+            return record
+        if what == "slice_fit":
+            results = raw.get("slice_fit_results") or []
+            values = {}
+            for k, result in enumerate(results):
+                per_peak = processing_fitting.extract_params_and_errors(
+                    result["popt"], result["pcov"], result["peak_defs"], result["is_free"])
+                for p, peak in enumerate(per_peak):
+                    head = f"Peak {p + 1}" if len(results) == 1 else f"Slice {k + 1}, peak {p + 1}"
+                    cells = values.setdefault(head, {})
+                    for name, value, error, fixed in zip(peak["names"], peak["params"],
+                                                         peak["errors"], peak["fixed"]):
+                        cells[self._SPECTRAL_FIT_HEADINGS.get(name, nb_fit_values.heading(name))] = {
+                            "value": value, "error": error, "fixed": bool(fixed)}
+                    integrals, errors = result.get("integrals"), result.get("integral_errors")
+                    if integrals is not None and p < len(integrals):
+                        cells["Area"] = {"value": integrals[p],
+                                         "error": errors[p] if errors is not None
+                                         and p < len(errors) else None}
+            return nb_fit_values.values_record(values, fit="Spectral fit", spectrum=label,
+                                               source=source) if values else None
+        if what == "curve_fit":
+            results = raw.get("relaxation_fit_results") or []
+            values, quality = {}, {}
+            for k, result in enumerate(results):
+                head = str(result.get("peak_label") or f"Peak {k + 1}")
+                errors = result.get("errors") or {}
+                fixed = result.get("fixed") if isinstance(result.get("fixed"), dict) else {}
+                values[head] = {name: {"value": result["params"].get(name),
+                                       "error": errors.get(name),
+                                       "fixed": bool(fixed.get(name, False))}
+                                for name in result.get("param_names") or result["params"]}
+                r2 = (result.get("fit_quality") or {}).get("r_squared")
+                if r2 is not None:
+                    values[head]["R²"] = {"value": r2}
+                if len(results) == 1:
+                    quality = {k2: v for k2, v in (result.get("fit_quality") or {}).items()
+                               if isinstance(v, (int, float))}
+            model = str((results[0].get("model") if results else "") or "").replace("_", " ")
+            return nb_fit_values.values_record(
+                values, fit="Curve fit" + (f" ({model})" if model else ""), spectrum=label,
+                source=source, quality=quality) if values else None
+        return None
+
+    #: A spectral fit's parameter names, as the table's headings.
+    _SPECTRAL_FIT_HEADINGS = {"shift": "Shift (ppm)", "fwhm": "FWHM (ppm)",
+                              "amplitude": "Amplitude", "eta": "L fraction"}
+
+    def _show_fit_parameters(self, node, show: bool = True):
+        """The parameters-and-errors table of a tree fit entry (its
+        dialog, or None after saying why there is none)."""
+        try:
+            record = self._tree_fit_record(node)
+        except Exception as exc:  # noqa: BLE001 -- told, not raised
+            QMessageBox.information(self, "Fit parameters",
+                                    f"“{node.get('label', '')}” has no readable values:\n\n{exc}")
+            return None
+        if record is None:
+            QMessageBox.information(self, "Fit parameters",
+                                    f"“{node.get('label', '')}” stores no fitted values.")
+            return None
+
+        def saved(path):
+            self._ui_settings["fit_values_folder"] = os.path.dirname(path)
+            self.statusBar().showMessage(f"Fit parameters written to {path}", 8000)
+
+        dialog = FitValuesDialog(
+            record, self, folder=self._fit_values_folder(), on_saved=saved,
+            on_show=lambda: self._on_tree_node_activated(node),
+            on_restore=lambda: self._restore_tree_fit(node))
+        dialogs = getattr(self, "_fit_values_dialogs", None)
+        if dialogs is None:
+            dialogs = self._fit_values_dialogs = []
+        dialogs.append(dialog)
+        dialog.finished.connect(lambda *_: dialog in dialogs and dialogs.remove(dialog))
+        if show:
+            dialog.show()
+        return dialog
+
+    def _copy_fit_parameters(self, node) -> bool:
+        try:
+            record = self._tree_fit_record(node)
+        except Exception:  # noqa: BLE001 -- said below
+            record = None
+        if record is None or not nb_fit_values.parameter_rows(record):
+            self.statusBar().showMessage(
+                f"“{node.get('label', '')}” stores no fitted values to copy.", 8000)
+            return False
+        QGuiApplication.clipboard().setText(nb_fit_values.values_to_tsv(record))
+        self.statusBar().showMessage(
+            f"Parameters of “{node.get('label', '')}” copied (tab-separated).", 6000)
+        return True
+
+    def _restore_tree_fit(self, node) -> bool:
+        """Put a tree fit entry back as its panel's current fit: a kept
+        model into the panel that made it; a panel's stored fit by
+        selecting its spectrum (which brings it back) and showing it; a
+        spectral fit's values into the peak table."""
+        row = node.get("row")
+        if row is None or not (0 <= row < len(self.session)):
+            return False
+        action = node.get("action")
+        try:
+            if action is None:
+                src = (self.session.spectra[row].metadata.raw or {}).get("fit_model_source") or {}
+                parent = self.session.index_of_id(src.get(Session.ID_KEY))
+                if parent is None:
+                    parent = next((i for i in range(len(self.session))
+                                   if self.session.label(i) == src.get("spectrum")), None)
+                if parent is None or src.get("id") is None:
+                    raise ValueError("The spectrum this fit was made of is not open.")
+                self._select_single_row(parent)
+                self._restore_fit_model(parent, src["id"])
+            else:
+                if self._selected_rows() != [row]:
+                    self._select_single_row(row)
+                if action[0] == "fit_model":
+                    self._restore_fit_model(row, action[1])
+                else:
+                    if action[0] == "slice_fit":
+                        results = self.session.spectra[row].metadata.raw.get(
+                            "slice_fit_results") or []
+                        if results:
+                            self._update_peak_table_from_fit(results[0])
+                    self._show_tree_fit(row, action)
+        except Exception as exc:  # noqa: BLE001 -- told, not raised
+            QMessageBox.information(self, "Open experiments",
+                                    f"“{node.get('label', '')}” could not be restored:\n\n{exc}")
+            return False
+        self.statusBar().showMessage(
+            f"“{node.get('label', '')}” restored: it is its panel's current fit again.", 8000)
+        return True
+
+    def _result_row(self, result) -> int | None:
+        """The Open experiments row a fit result belongs to *now*: by its
+        spectrum object, else its experiment's stable ID, else the row it
+        recorded (for a result made before IDs). None if it has none or
+        the experiment has been removed. An ID saved in another session is
+        ignored."""
+        if not isinstance(result, dict):
+            return None
+        spectrum = result.get("spectrum")
+        if spectrum is not None:
+            row = self._row_of_spectrum(spectrum)
+            if row >= 0:
+                return row
+        entry = result.get(Session.ID_KEY)
+        if self.session.owns_id(entry):
+            # Known by ID: gone means gone, never "whatever is at that row".
+            return self.session.index_of_id(entry)
+        index = result.get("spectrum_index", result.get("index"))
+        if isinstance(index, int) and 0 <= index < len(self.session):
+            return index
+        return None
+
     def _row_of_spectrum(self, spectrum) -> int:
         for row, candidate in enumerate(self.session.spectra):
             if candidate is spectrum:

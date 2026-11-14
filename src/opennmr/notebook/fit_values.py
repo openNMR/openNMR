@@ -195,6 +195,129 @@ def fitted_values_record(*, fit: str = "", spectrum: str = "", source: str = "",
     return record
 
 
+def values_record(values: dict, *, fit: str = "", spectrum: str = "", source: str = "",
+                  quality: dict | None = None, report: str = "", when=None) -> dict:
+    """A fitted-values record straight from numbers: ``values`` is
+    ``{row: {column: {"value", "error", "fixed"}}}`` (``error`` and
+    ``fixed`` optional) -- for fits whose values are not read from a shown
+    table (a spectral fit's peaks, a curve fit's parameters)."""
+    clean, columns = {}, []
+    for row, cols in values.items():
+        clean[str(row)] = {}
+        for column, cell in cols.items():
+            cell = cell if isinstance(cell, dict) else {"value": cell}
+            fixed = bool(cell.get("fixed", False))
+            clean[str(row)][str(column)] = {
+                "value": _number(cell.get("value")),
+                "error": None if fixed else _number(cell.get("error")), "fixed": fixed}
+            if str(column) not in columns:
+                columns.append(str(column))
+    record = {
+        FORMAT_KEY: FORMAT_VERSION, "fit": str(fit), "spectrum": str(spectrum),
+        "saved": (when or _dt.datetime.now()).isoformat(timespec="seconds"),
+        "columns": columns, "values": clean,
+        "values are": "full precision from the fit itself",
+        "errors are": "1σ (one standard deviation); null where the value was held fixed",
+    }
+    if source:
+        record["source"] = str(source)
+    kept = {k: _number(v) for k, v in (quality or {}).items() if _number(v) is not None}
+    if kept:
+        record["quality"] = kept
+    if report:
+        record["report"] = str(report)
+    return record
+
+
+#: The columns of :func:`parameter_rows`.
+PARAMETER_ROW_COLUMNS = ("Site", "Parameter", "Value", "Error (1σ)", "Fixed")
+
+
+def parameter_rows(record: dict) -> list[dict]:
+    """A record's values as one row per parameter -- ``{"site",
+    "parameter", "value", "error", "fixed", "text"}`` -- in the record's
+    row and column order. ``value``/``error`` are numbers (None where
+    there is none); ``text`` is a cell that was not a number."""
+    values = record.get("values") if isinstance(record, dict) else None
+    if not isinstance(values, dict):
+        return []
+    order = [str(c) for c in record.get("columns") or []]
+    rows = []
+    for site, cols in values.items():
+        if not isinstance(cols, dict):
+            continue
+        names = [c for c in order if c in cols] + [c for c in cols if c not in order]
+        for name in names:
+            cell = cols[name] if isinstance(cols[name], dict) else {"value": cols[name]}
+            rows.append({"site": str(site), "parameter": str(name),
+                         "value": _number(cell.get("value")), "error": _number(cell.get("error")),
+                         "fixed": bool(cell.get("fixed", False)),
+                         "text": str(cell.get("text") or "")})
+    return rows
+
+
+def format_number(value, digits: int = 10) -> str:
+    """A number in full (up to ``digits`` significant figures, no padding);
+    "" for None."""
+    if value is None:
+        return ""
+    return f"{float(value):.{int(digits)}g}"
+
+
+def parameter_cells(record: dict) -> list[list[str]]:
+    """:func:`parameter_rows` as text cells, in :data:`PARAMETER_ROW_COLUMNS`
+    order -- what the GUI's table shows and what is copied or exported."""
+    return [[r["site"], r["parameter"],
+             format_number(r["value"]) if r["value"] is not None else r["text"],
+             format_number(r["error"]), "yes" if r["fixed"] else ""]
+            for r in parameter_rows(record)]
+
+
+def quality_text(record: dict) -> str:
+    """The record's fit quality on one line ("R² 0.9991 · reduced χ² 1.04")."""
+    names = {"r2": "R²", "r_squared": "R²", "reduced_chi2": "reduced χ²", "rmse": "RMSE",
+             "aic": "AIC", "bic": "BIC", "n": "points", "k": "free parameters"}
+    quality = record.get("quality") if isinstance(record, dict) else None
+    if not isinstance(quality, dict):
+        return ""
+    return " · ".join(f"{names.get(k, k)} {format_number(v, 6)}" for k, v in quality.items()
+                      if _number(v) is not None)
+
+
+def values_to_tsv(record: dict) -> str:
+    """The parameter table as tab-separated text (pastes into a
+    spreadsheet): a header row, then one row per parameter."""
+    lines = ["\t".join(PARAMETER_ROW_COLUMNS)]
+    lines += ["\t".join(cells) for cells in parameter_cells(record)]
+    return "\n".join(lines)
+
+
+def values_to_csv(record: dict, path) -> str:
+    """Write the parameter table as CSV (UTF-8 with a byte-order mark, so
+    Excel reads δ and σ), headed by what was fitted, and return the path."""
+    import csv
+    path = os.path.expanduser(os.fspath(path))
+    if not path.lower().endswith(".csv"):
+        path += ".csv"
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.writer(handle)
+        for label, key in (("Fit", "fit"), ("Spectrum", "spectrum"), ("Source", "source"),
+                           ("Saved", "saved")):
+            if record.get(key):
+                writer.writerow([f"# {label}", record[key]])
+        quality = quality_text(record)
+        if quality:
+            writer.writerow(["# Quality", quality])
+        if record.get("errors are"):
+            writer.writerow(["# Errors", record["errors are"]])
+        writer.writerow(PARAMETER_ROW_COLUMNS)
+        writer.writerows(parameter_cells(record))
+    return path
+
+
 def _json_default(value):
     if isinstance(value, (np.floating, np.integer)):
         return value.item()

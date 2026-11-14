@@ -583,7 +583,8 @@ class QuadrupolarFitPanel(QWidget):
             pcov = notebook_fitting.expand_pcov(pcov_free, is_free, len(popt))
             self.result = {"popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
                            "x": x, "y": y, "y_fit": y_fit, "components": components,
-                           "regions": regions, "spectrum": spectrum, "index": index,
+                           "regions": regions, "spectrum": spectrum,
+                           "index": job.current_index(),
                            # Which slice of a pseudo-2D this was fitted to -- the
                            # reference for applying the model to every slice.
                            "row": row,
@@ -599,10 +600,11 @@ class QuadrupolarFitPanel(QWidget):
             QMessageBox.warning(self, "Quadrupolar fit", f"The fit did not succeed:\n\n{exc}")
 
         from . import jobs
-        return jobs.submit(self, jobs.Job(
+        job = jobs.Job(
             "Quadrupolar fit", compute, apply, fail=fail, spectrum_index=index,
             inputs=self.get_state(), current_inputs=self.get_state,
-            restore_inputs=self.set_state))
+            restore_inputs=self.set_state)
+        return jobs.submit(self, job)
 
     # ---- report --------------------------------------------------------------
 

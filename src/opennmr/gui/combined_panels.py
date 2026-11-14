@@ -2221,7 +2221,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             if timing:
                 fit["log"] = fit.get("log", "") + "\n" + timing
             fit["spectrum"] = spectrum
-            fit["spectrum_index"] = index
+            fit["spectrum_index"] = job.current_index()
             fit["site_labels"] = [s.label for s in args["sites"]]
             # The slice of a pseudo-2D this was fitted to, and the window --
             # what applying the model to every slice starts from.
@@ -2239,9 +2239,10 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
 
         from . import jobs
         inputs = self.get_state()
-        return jobs.submit(self, jobs.Job(
+        job = jobs.Job(
             "Solid-state NMR fit", compute, apply, fail=fail, spectrum_index=index,
-            inputs=inputs, current_inputs=self.get_state, restore_inputs=self.set_state))
+            inputs=inputs, current_inputs=self.get_state, restore_inputs=self.set_state)
+        return jobs.submit(self, job)
 
     # ---- starting values estimated from the spectrum -------------------------
 

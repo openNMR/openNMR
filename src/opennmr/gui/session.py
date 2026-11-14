@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import re
+import uuid
 
 from .. import io
 from ..core.registry import find_gamma
@@ -46,8 +47,47 @@ def strip_label_suffix(name: str) -> str:
             return text
         text = trimmed
 
+class TrackedRow:
+    """A stored Open experiments row that follows its experiment.
+
+    A class attribute of an object with a ``session``: assigned a row, it
+    remembers the *experiment* (its bookkeeping dict, :meth:`Session.info`);
+    read, it gives the row that experiment is at now -- after other rows
+    were removed or reordered -- or None once it has been removed. So a row
+    kept for later (a debounced save, a pending reprocess, the phase
+    target) can never come to mean a different spectrum. Anything that is
+    not a current row (None, an out-of-range number) is kept as given."""
+
+    def __set_name__(self, owner, name) -> None:
+        self._slot = f"_tracked_row{name}"
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        stored = obj.__dict__.get(self._slot)
+        if stored is None:
+            return None
+        tracked, value = stored
+        if not tracked:
+            return value
+        return obj.session.index_of_info(value)
+
+    def __set__(self, obj, value) -> None:
+        session = getattr(obj, "session", None)
+        if value is None:
+            obj.__dict__[self._slot] = None
+        elif (session is not None and isinstance(value, int) and not isinstance(value, bool)
+                and 0 <= value < len(session)):
+            obj.__dict__[self._slot] = (True, session.info(value))
+        else:
+            obj.__dict__[self._slot] = (False, value)
+
+
 class Session:
     """Holds the spectra loaded into one GUI session, in load order."""
+
+    #: The key of an entry's stable ID in its bookkeeping dict.
+    ID_KEY = "entry_id"
 
     def __init__(self) -> None:
         self.spectra: list[NMRSpectrum] = []
@@ -56,6 +96,39 @@ class Session:
         # the same call plus that one override, rather than needing a
         # separate reprocessing path for already-loaded data.
         self._load_info: list[dict] = []
+        self._next_entry = 1
+        # In every ID, so one saved with a fit and read back in another
+        # session (or after Clear and reopening) can never match an entry
+        # here by accident.
+        self._id_prefix = uuid.uuid4().hex[:8]
+
+    def entry_id(self, index: int) -> str:
+        """The stable ID of entry ``index``: unique in this session, never
+        reused, and unchanged when the entry moves (other rows removed,
+        :meth:`swap`) or is reprocessed (:meth:`reload`, :meth:`reset`).
+        What to keep instead of a row number. Given on first asking, so
+        every route into the session has one."""
+        info = self._load_info[index]
+        entry = info.get(self.ID_KEY)
+        if entry is None:
+            entry = info[self.ID_KEY] = f"{self._id_prefix}-e{self._next_entry}"
+            self._next_entry += 1
+        return entry
+
+    def owns_id(self, entry_id) -> bool:
+        """Whether ``entry_id`` was given by this session (one read back
+        from a file saved in another session was not)."""
+        return isinstance(entry_id, str) and entry_id.startswith(self._id_prefix + "-")
+
+    def index_of_id(self, entry_id) -> int | None:
+        """The row entry ``entry_id`` is at now; None once removed (or
+        for an ID never given)."""
+        if entry_id is None:
+            return None
+        for i, info in enumerate(self._load_info):
+            if info.get(self.ID_KEY) == entry_id:
+                return i
+        return None
 
     def add(self, path: str, vendor: str | None = None, **kwargs) -> NMRSpectrum:
         """Load ``path`` via :func:`opennmr.io.load` (auto-detecting
