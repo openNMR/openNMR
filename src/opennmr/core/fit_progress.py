@@ -105,6 +105,7 @@ actually used, and why when that differs from the choice, is
 from __future__ import annotations
 
 import math
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -259,7 +260,41 @@ class _Watcher:
                 self.keep_pending = True
 
 
-_ACTIVE: list[_Watcher] = []
+class _PerThread:
+    """The watched fit, per thread: a fit running in the background
+    (gui/jobs.py) and one run on the GUI thread meanwhile must not report
+    to, or be stopped by, each other's watcher. Behaves as the list it
+    replaced."""
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+
+    def _list(self) -> list:
+        items = getattr(self._local, "items", None)
+        if items is None:
+            items = self._local.items = []
+        return items
+
+    def __bool__(self) -> bool:
+        return bool(self._list())
+
+    def __len__(self) -> int:
+        return len(self._list())
+
+    def __getitem__(self, index):
+        return self._list()[index]
+
+    def __iter__(self):
+        return iter(list(self._list()))
+
+    def append(self, item) -> None:
+        self._list().append(item)
+
+    def remove(self, item) -> None:
+        self._list().remove(item)
+
+
+_ACTIVE = _PerThread()
 
 
 @contextmanager
@@ -292,6 +327,61 @@ def set_stage(text: str) -> None:
         _ACTIVE[0].status.stage = str(text)
         # Shown at the next report; a new stage is worth one straight away.
         _ACTIVE[0].last_report = -np.inf
+
+
+def report_stage(text: str) -> None:
+    """Say what the watched run is doing and report it now (at most every
+    ``min_interval``), for long steps that evaluate no model -- a
+    lineshape library, a field calculation. Raises :class:`FitCancelled`
+    when the watcher asks to stop; a Stop and Keep Best asked for here
+    ends the fit at its first evaluation (keeping its starting point).
+    A no-op when nothing watches."""
+    if not _ACTIVE:
+        return
+    watcher = _ACTIVE[0]
+    if watcher.cancelled:
+        raise FitCancelled("The fit was stopped before it finished.")
+    status = watcher.status
+    status.stage = str(text)
+    now = time.perf_counter()
+    status.elapsed = now - watcher.started
+    if now - watcher.last_report < watcher.min_interval:
+        return
+    watcher.last_report = now
+    answer = watcher.callback(status)
+    if answer is False:
+        watcher.cancelled = True
+        raise FitCancelled("The fit was stopped before it finished.")
+    if answer == KEEP:
+        watcher.keep_pending = True
+
+
+def _short_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f} s"
+    minutes, secs = divmod(int(round(seconds)), 60)
+    return f"{minutes} min {secs:02d} s"
+
+
+def stage_callback(what: str = "lineshape"):
+    """A ``progress(done, total)`` callback (the lineshape-library
+    builders' protocol) that reports through :func:`report_stage` --
+    "lineshape 40 of 400, about 1 min left" -- and returns False (stop)
+    when the watcher asks to stop. Safe on any thread."""
+    started = time.perf_counter()
+
+    def progress(done, total) -> bool:
+        done, total = int(done), int(total)
+        text = f"{what} {done:,} of {total:,}"
+        if 0 < done < total:
+            left = (time.perf_counter() - started) / done * (total - done)
+            text += f", about {_short_duration(left)} left"
+        try:
+            report_stage(text)
+        except FitCancelled:
+            return False
+        return True
+    return progress
 
 
 def stopped_early() -> bool:

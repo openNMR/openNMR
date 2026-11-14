@@ -75,6 +75,29 @@ def is_dataless(path: str) -> bool:
         # placeholder sits beside it under a dotted name.
         directory, name = os.path.split(path)
         return os.path.exists(os.path.join(directory, f".{name}.icloud"))
+    return is_dataless_stat(info)
+
+
+#: Windows: the file's contents are fetched when it is read (OneDrive's
+#: "online-only" files and other cloud-filter placeholders carry the
+#: first; the other two are older and rarer forms of the same thing).
+#: ``os.stat`` reports them in ``st_file_attributes`` without reading.
+FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
+FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x00040000
+FILE_ATTRIBUTE_OFFLINE = 0x00001000
+_WINDOWS_DATALESS = (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN
+                     | FILE_ATTRIBUTE_OFFLINE)
+
+
+def is_dataless_stat(info) -> bool:
+    """:func:`is_dataless` for a stat result already in hand (an
+    ``os.DirEntry.stat()``, which on Windows costs nothing).
+
+    Windows is checked by its file attributes: it has no ``st_blocks``,
+    so until 2026-11-13 a OneDrive online-only file on Windows was never
+    recognised as one -- and the folder scan opened (so downloaded) it."""
+    if getattr(info, "st_file_attributes", 0) & _WINDOWS_DATALESS:
+        return True
     if getattr(info, "st_flags", 0) & UF_DATALESS:
         return True
     blocks = getattr(info, "st_blocks", None)

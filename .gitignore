@@ -50,3 +50,4 @@ Claude outputs/
 # Manual release route (packaging/release_tools.py): collected installers and its private venv
 /release-*/
 /.release-venv/
+opennmr_src.zip

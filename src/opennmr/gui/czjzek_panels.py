@@ -18,19 +18,19 @@ import time
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QMessageBox,
-    QProgressDialog, QPushButton, QTableWidgetItem, QVBoxLayout, QWidget,
+    QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QMessageBox,
+    QPushButton, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .widgets.typed_spinbox import TypedSpinBox
-from .fit_progress_dialog import FitProgress
+from ..core import fit_progress
 from ..core import registry as core_registry
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from ..io import serialize
 from ..notebook import czjzek as cz
 from ..notebook import fitting as notebook_fitting
 from ..notebook import quadrupolar_fitting as qfit
-from . import panel_state
+from . import jobs, panel_state
 from .quadrupolar_panels import QuadrupolarFitPanel
 from .widgets.report_label import ReportLabel
 from .widgets.field_input import link_field
@@ -122,53 +122,6 @@ def _slow_warning(parent, settings, sigma, d, n_cq, n_eta, stages=2, cq0=0.0, et
         f"Go ahead? (A grid of about {faster} cells, or a static/central-transition "
         f"simulation, is quicker.)")
     return answer == QMessageBox.StandardButton.Yes
-
-
-class LibraryProgress:
-    """A Stop-able progress dialog for a lineshape-library build, as the
-    ``progress(done, total)`` callback the notebook functions take. Keeps
-    the window responsive while the lineshapes are simulated (the build
-    runs on the GUI thread; a frozen window is what Windows reports as
-    "not responding" and offers to close)."""
-
-    def __init__(self, parent, title: str) -> None:
-        self._parent, self._title = parent, title
-        self._dialog = None
-        self._started = time.perf_counter()
-        self.cancelled = False
-
-    def __call__(self, done: int, total: int) -> bool:
-        if done >= total:
-            # Library complete: make way for the fit's own pop-up.
-            self.close()
-            return True
-        if self._dialog is None:
-            if time.perf_counter() - self._started < 0.4:
-                return True
-            self._dialog = QProgressDialog(f"{self._title}: simulating lineshapes…", "Stop", 0,
-                                           int(total), self._parent)
-            self._dialog.setWindowTitle(self._title)
-            self._dialog.setWindowModality(Qt.WindowModality.WindowModal)
-            self._dialog.setMinimumDuration(0)
-        self._dialog.setMaximum(int(total))
-        self._dialog.setValue(int(done))
-        elapsed = time.perf_counter() - self._started
-        if done:
-            left = elapsed / done * (total - done)
-            self._dialog.setLabelText(f"{self._title}: lineshape {done} of {total}, about "
-                                      f"{_format_duration(left)} left")
-        QApplication.processEvents()
-        if self._dialog.wasCanceled():
-            self.cancelled = True
-            return False
-        return True
-
-    def close(self) -> None:
-        if self._dialog is not None:
-            self._dialog.reset()
-            self._dialog.close()
-            self._dialog.deleteLater()
-            self._dialog = None
 
 
 def citation_html(extended: bool) -> str:
@@ -454,10 +407,15 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
                              cq0=widest.get("CQ0", 0.0), eta0=widest.get("eta0", 0.0)):
             return
         regions = self.fit_regions()
-        progress = LibraryProgress(self, "Czjzek fit")
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        started = time.perf_counter()
-        with FitProgress(self, "Czjzek fit") as fit_progress_box:
+        _target, row, _index = self._get_target()
+        nucleus = self.nucleus_combo.currentText().strip()
+
+        # Inputs read above; the library build and the fit touch no widget,
+        # so they run in the background (gui/jobs.py; explicit user request,
+        # 2026-11-13). The library's progress is the job's stage ("lineshape
+        # 40 of 400, about 1 min left"), and Stop works during it.
+        def compute():
+            started = time.perf_counter()
             try:
                 popt, pcov_free, is_free, _scale, info = cz.fit_czjzek_spectrum(
                     results, sites, fit_regions=regions, I=settings["I"],
@@ -465,37 +423,40 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
                     order=settings["order"], transitions=settings["transitions"],
                     lineshape=settings["lineshape"], n_zcw=settings["n_zcw"] or 4181,
                     fit_baseline=settings["fit_baseline"], n_cq=n_cq, n_eta=n_eta,
-                    progress=progress)
-                x = np.sort(np.asarray(results["x_ppm"], dtype=float))
-                y_fit, components = cz.evaluate_czjzek_fit(x, popt, info)
-            except cz.SimulationCancelled:
-                QMessageBox.information(self, "Czjzek fit", "Fit stopped. A coarser grid is quicker.")
-                return
-            except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
-                QMessageBox.warning(self, "Czjzek fit", f"The fit did not succeed:\n\n{exc}")
-                return
-            finally:
-                progress.close()
-                QApplication.restoreOverrideCursor()
-        if fit_progress_box.stopped:
-            return
-        elapsed = time.perf_counter() - started
-        self._library = info.pop("library")
-        order = np.argsort(results["x_ppm"])
-        y = np.asarray(results["real_spectrum"], dtype=float)[order]
-        pcov = notebook_fitting.expand_pcov(pcov_free, is_free, len(popt))
-        _target, row, _index = self._get_target()
-        self.result = {"popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
-                       "x": x, "y": y, "y_fit": y_fit, "components": components,
-                       "regions": regions, "spectrum": spectrum, "index": index, "row": row,
-                       "settings": settings, "elapsed": elapsed, "title": "Czjzek fit",
-                       "nucleus": self.nucleus_combo.currentText().strip(),
-                       "report": cz.czjzek_fit_report(popt, pcov, is_free, info)}
-        self._draw_fit(self.result)
-        self._report()
-        self.send_button.setEnabled(self._send_to_simulation is not None)
-        self.use_fitted_button.setEnabled(True)
-        self._on_fitted()
+                    progress=fit_progress.stage_callback("lineshape"))
+            except cz.SimulationCancelled as exc:
+                raise fit_progress.FitCancelled("The library build was stopped.") from exc
+            x = np.sort(np.asarray(results["x_ppm"], dtype=float))
+            y_fit, components = cz.evaluate_czjzek_fit(x, popt, info)
+            report = cz.czjzek_fit_report(popt, notebook_fitting.expand_pcov(
+                pcov_free, is_free, len(popt)), is_free, info)
+            return (popt, pcov_free, is_free, info, x, y_fit, components, report,
+                    time.perf_counter() - started)
+
+        def apply(outcome, _stopped_early):
+            popt, pcov_free, is_free, info, x, y_fit, components, report, elapsed = outcome
+            self._library = info.pop("library")
+            order = np.argsort(results["x_ppm"])
+            y = np.asarray(results["real_spectrum"], dtype=float)[order]
+            pcov = notebook_fitting.expand_pcov(pcov_free, is_free, len(popt))
+            self.result = {"popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
+                           "x": x, "y": y, "y_fit": y_fit, "components": components,
+                           "regions": regions, "spectrum": spectrum,
+                           "index": job.current_index(), "row": row,
+                           "settings": settings, "elapsed": elapsed, "title": "Czjzek fit",
+                           "nucleus": nucleus, "report": report}
+            self._draw_fit(self.result)
+            self._report()
+            self.send_button.setEnabled(self._send_to_simulation is not None)
+            self.use_fitted_button.setEnabled(True)
+            self._on_fitted()
+
+        job = jobs.Job("Czjzek fit", compute, apply, spectrum_index=index,
+                       fail=lambda exc: QMessageBox.warning(
+                           self, "Czjzek fit", f"The fit did not succeed:\n\n{exc}"),
+                       inputs=self.get_state(), current_inputs=self.get_state,
+                       restore_inputs=self.set_state)
+        return jobs.submit(self, job)
 
     def _map_sites(self):
         r = self.result
@@ -921,23 +882,33 @@ class CzjzekSimPanel(QWidget):
         if not _slow_warning(self, s, s["sigma"], s["d"], s["n_cq"], s["n_eta"], stages=1,
                              cq0=s["cq0"], eta0=s["eta0"], ppm_axis=x - s["delta_iso"]):
             return None
-        progress = LibraryProgress(self, "Czjzek simulation")
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            sim = cz.czjzek_spectrum(s["I"], s["sigma"], s["larmor_Hz"], x, d=s["d"],
-                                     delta_iso=s["delta_iso"], fwhm=s["fwhm"], mas_Hz=s["mas_Hz"],
-                                     order=s["order"], transitions=s["transitions"],
-                                     n_cq=s["n_cq"], n_eta=s["n_eta"], cq0_MHz=s["cq0"],
-                                     eta0=s["eta0"], progress=progress)
-        except cz.SimulationCancelled:
-            self.results_label.setText("Simulation stopped. A coarser grid is quicker.")
-            return None
-        except Exception as exc:  # noqa: BLE001 -- surfaced to the user
-            QMessageBox.warning(self, "Czjzek simulation", str(exc))
-            return None
-        finally:
-            progress.close()
-            QApplication.restoreOverrideCursor()
+        layout = self.layout_combo.currentData()
+
+        # Settings read above; the simulation touches no widget, so it runs
+        # in the background (gui/jobs.py; explicit user request, 2026-11-13),
+        # its progress the job's stage. Stop discards it.
+        def compute():
+            try:
+                return cz.czjzek_spectrum(
+                    s["I"], s["sigma"], s["larmor_Hz"], x, d=s["d"],
+                    delta_iso=s["delta_iso"], fwhm=s["fwhm"], mas_Hz=s["mas_Hz"],
+                    order=s["order"], transitions=s["transitions"],
+                    n_cq=s["n_cq"], n_eta=s["n_eta"], cq0_MHz=s["cq0"],
+                    eta0=s["eta0"], progress=fit_progress.stage_callback("lineshape"))
+            except cz.SimulationCancelled as exc:
+                raise fit_progress.FitCancelled("The simulation was stopped.") from exc
+
+        shown = []
+        job = jobs.Job("Czjzek simulation", compute,
+                       lambda sim, _early: shown.append(self._show_simulation(sim, s, layout)),
+                       fail=lambda exc: QMessageBox.warning(self, "Czjzek simulation", str(exc)),
+                       keepable=False, inputs=self.get_state(), current_inputs=self.get_state,
+                       restore_inputs=self.set_state)
+        jobs.submit(self, job)
+        return shown[0] if shown else None
+
+    def _show_simulation(self, sim, s, layout) -> dict:
+        """Show a Czjzek simulation just finished (GUI thread)."""
         sim["settings"] = s
         self.result = sim
         st = sim["stats"]
@@ -952,7 +923,6 @@ class CzjzekSimPanel(QWidget):
             xlabel = core_registry.NUC_label(s["nucleus"], x_unit="ppm")
         except Exception:  # noqa: BLE001 -- a label must not sink a plot
             xlabel = None
-        layout = self.layout_combo.currentData()
         self._last_layout = layout
 
         def draw(figure):

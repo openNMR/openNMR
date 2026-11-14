@@ -21,7 +21,6 @@ observe frequency; shifts are in ppm.
 
 from __future__ import annotations
 
-import contextlib
 import json
 from io import StringIO
 from typing import Callable
@@ -39,7 +38,8 @@ from PySide6.QtWidgets import (
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .fit_progress_dialog import FitProgress
+from ..core import thread_io
+from . import jobs
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from ..io import serialize
 from . import panel_state
@@ -2035,40 +2035,44 @@ class JCouplingFitPanel(QWidget):
             return False
 
         lineshape, eta = self.lineshape_combo.currentData(), self.eta_spin.value()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        with FitProgress(self, "J-coupling fit") as fit_progress_box:
-            try:
-                with contextlib.redirect_stdout(StringIO()):
-                    popt, pcov_free, is_free, scale, info = jfit.fit_jcoupling_spectrum(
-                        results, sites, larmor_Hz=larmor, lineshape=lineshape, eta=eta,
-                        fit_regions=regions)
-            except Exception as exc:  # noqa: BLE001 -- a fit that will not converge is an outcome
-                QApplication.restoreOverrideCursor()
-                QMessageBox.warning(self, "J-coupling fit", f"The fit did not succeed:\n\n{exc}")
-                return False
-        if fit_progress_box.stopped:
-            return False
-        QApplication.restoreOverrideCursor()
 
-        pcov = notebook_fitting.expand_pcov(pcov_free, is_free, len(popt))
-        x_sorted = np.sort(np.asarray(results["x_ppm"], dtype=float))
-        order = np.argsort(results["x_ppm"])
-        y_sorted = np.asarray(results["real_spectrum"], dtype=float)[order]
-        y_fit, components = jfit.evaluate_jcoupling_fit(x_sorted, popt, info,
-                                                         return_components=True)
-        mask = (notebook_fitting.build_region_mask(x_sorted, regions) if regions
-                else np.ones(x_sorted.size, dtype=bool))
-        self.result = {"popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
-                       "sites": sites, "regions": regions, "larmor_Hz": larmor,
-                       "x": x_sorted, "y": y_sorted, "y_fit": y_fit, "components": components,
-                       "mask": mask, "spectrum": spectrum, "spectrum_index": index,
-                       "nucleus": results.get("nuclide") or spectrum.metadata.nucleus or "",
-                       "lineshape": lineshape, "eta": eta}
-        self._report()
-        self._draw_fit(self.result)
-        self._sync_result_buttons()
-        self._on_fitted()
-        return True
+        # Inputs read above; the fit touches no widget, so it runs in the
+        # background (gui/jobs.py; explicit user request, 2026-11-13).
+        def compute():
+            with thread_io.quiet_stdout():
+                popt, pcov_free, is_free, _scale, info = jfit.fit_jcoupling_spectrum(
+                    results, sites, larmor_Hz=larmor, lineshape=lineshape, eta=eta,
+                    fit_regions=regions)
+            x_sorted = np.sort(np.asarray(results["x_ppm"], dtype=float))
+            y_fit, components = jfit.evaluate_jcoupling_fit(x_sorted, popt, info,
+                                                             return_components=True)
+            return popt, pcov_free, is_free, info, x_sorted, y_fit, components
+
+        def apply(outcome, _stopped_early):
+            popt, pcov_free, is_free, info, x_sorted, y_fit, components = outcome
+            pcov = notebook_fitting.expand_pcov(pcov_free, is_free, len(popt))
+            order = np.argsort(results["x_ppm"])
+            y_sorted = np.asarray(results["real_spectrum"], dtype=float)[order]
+            mask = (notebook_fitting.build_region_mask(x_sorted, regions) if regions
+                    else np.ones(x_sorted.size, dtype=bool))
+            self.result = {"popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
+                           "sites": sites, "regions": regions, "larmor_Hz": larmor,
+                           "x": x_sorted, "y": y_sorted, "y_fit": y_fit,
+                           "components": components, "mask": mask, "spectrum": spectrum,
+                           "spectrum_index": job.current_index(),
+                           "nucleus": results.get("nuclide") or spectrum.metadata.nucleus or "",
+                           "lineshape": lineshape, "eta": eta}
+            self._report()
+            self._draw_fit(self.result)
+            self._sync_result_buttons()
+            self._on_fitted()
+
+        job = jobs.Job("J-coupling fit", compute, apply, spectrum_index=index,
+                       fail=lambda exc: QMessageBox.warning(
+                           self, "J-coupling fit", f"The fit did not succeed:\n\n{exc}"),
+                       inputs=self.get_state(), current_inputs=self.get_state,
+                       restore_inputs=self.set_state)
+        return jobs.submit(self, job)
 
     # ---- results ----------------------------------------------------------
     # ---- spin system -------------------------------------------------------
@@ -2133,27 +2137,39 @@ class JCouplingFitPanel(QWidget):
             return False
 
         lineshape, eta = self.lineshape_combo.currentData(), self.eta_spin.value()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        with FitProgress(self, "Spin-system fit") as fit_progress_box:
-            try:
-                popt, pcov, is_free, info = nss.fit_spin_system_spectrum(
-                    results, spins, couplings, B0_tesla=B0, fwhm_Hz=self.spin_fwhm_spin.value(),
-                    lineshape=lineshape, eta=eta, fit_regions=regions, fixed=fixed, bounds=bounds,
-                    observe=observe)
-                if self.ambiguity_check.isChecked():
-                    solutions = nss.equivalent_solutions(results, popt, info, fixed=fixed,
-                                                         bounds=bounds, pcov=pcov, is_free=is_free)
-                else:
-                    solutions = [{"popt": popt, "pcov": pcov, "is_free": is_free, "rmse": None,
-                                  "differences": []}]
-            except Exception as exc:  # noqa: BLE001 -- a fit that will not converge is an outcome
-                QApplication.restoreOverrideCursor()
-                QMessageBox.warning(self, title, f"The fit did not succeed:\n\n{exc}")
-                return False
-        if fit_progress_box.stopped:
-            return False
-        QApplication.restoreOverrideCursor()
+        fwhm_hz = self.spin_fwhm_spin.value()
+        ambiguity = self.ambiguity_check.isChecked()
 
+        # Inputs read above; the fit touches no widget, so it runs in the
+        # background (gui/jobs.py; explicit user request, 2026-11-13).
+        def compute():
+            popt, pcov, is_free, info = nss.fit_spin_system_spectrum(
+                results, spins, couplings, B0_tesla=B0, fwhm_Hz=fwhm_hz,
+                lineshape=lineshape, eta=eta, fit_regions=regions, fixed=fixed, bounds=bounds,
+                observe=observe)
+            if ambiguity:
+                solutions = nss.equivalent_solutions(results, popt, info, fixed=fixed,
+                                                     bounds=bounds, pcov=pcov, is_free=is_free)
+            else:
+                solutions = [{"popt": popt, "pcov": pcov, "is_free": is_free, "rmse": None,
+                              "differences": []}]
+            return solutions, info
+
+        job = jobs.Job(title, compute,
+                       lambda outcome, _early: self._show_spin_system_fit(
+                           *outcome, regions=regions, larmor=larmor, B0=B0, results=results,
+                           spectrum=spectrum, index=job.current_index(), observe=observe,
+                           lineshape=lineshape, eta=eta),
+                       spectrum_index=index,
+                       fail=lambda exc: QMessageBox.warning(
+                           self, title, f"The fit did not succeed:\n\n{exc}"),
+                       inputs=self.get_state(), current_inputs=self.get_state,
+                       restore_inputs=self.set_state)
+        return jobs.submit(self, job)
+
+    def _show_spin_system_fit(self, solutions, info, *, regions, larmor, B0, results, spectrum,
+                              index, observe, lineshape, eta) -> None:
+        """Show a spin-system fit just finished (GUI thread)."""
         x_sorted = np.sort(np.asarray(results["x_ppm"], dtype=float))
         order = np.argsort(results["x_ppm"])
         y_sorted = np.asarray(results["real_spectrum"], dtype=float)[order]
@@ -2176,7 +2192,6 @@ class JCouplingFitPanel(QWidget):
         self._select_solution(0)
         self._sync_result_buttons()
         self._on_fitted()
-        return True
 
     def _select_solution(self, k: int) -> None:
         r = self.result
@@ -2407,7 +2422,7 @@ class JCouplingFitPanel(QWidget):
             return self.results_label.text() + "\n\n" + "\n".join(rows)
         buffer = StringIO()
         try:
-            with contextlib.redirect_stdout(buffer):
+            with thread_io.quiet_stdout() as buffer:
                 jfit.print_jcoupling_fit_report(
                     r["x"][r["mask"]], r["y"][r["mask"]], r["popt"], r["pcov"], r["is_free"],
                     r["info"], chemist_notation=True)

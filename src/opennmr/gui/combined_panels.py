@@ -19,20 +19,20 @@ import numpy as np
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QGuiApplication, QPalette
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QListWidget, QMenu, QMessageBox, QPushButton, QSpinBox, QStackedWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .widgets.typed_spinbox import TypedSpinBox
-from .fit_progress_dialog import FitProgress
 from .widgets.report_label import ReportLabel
 from . import report_format
 from . import long_run
 from .widgets.advice_box import AdviceBox
 from .widgets.sideband_hint import sideband_hint_label
 from .widgets.ranges_edit import PpmRangesEdit
+from ..core import thread_io
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from . import panel_state
 from ..notebook.simulations import CSA_ANISOTROPY_TIP, CSA_ASYMMETRY_TIP
@@ -1256,8 +1256,16 @@ class CombinedHamiltonianPanel(QWidget):
                                                  runs=3 if compare else 1)
             if estimate is False:
                 return False
+        except (ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "Solid-state NMR", str(exc))
+            return False
+
+        # The simulation touches no widget: it can run in the background
+        # (gui/jobs.py; explicit user request, 2026-11-13).
+        def compute():
             started = time.perf_counter()
             comparison = None
+            result = None
             if compare:
                 comparison = {}
                 for order in ("first", "second", "exact"):
@@ -1268,10 +1276,21 @@ class CombinedHamiltonianPanel(QWidget):
                         result = run
             else:
                 result = ch.simulate_combined(sites, axis, **settings)
-            elapsed = time.perf_counter() - started
-        except (ValueError, KeyError) as exc:
+            return result, comparison, time.perf_counter() - started
+
+        def apply(outcome, _stopped_early):
+            result, comparison, elapsed = outcome
+            self._show_simulation(sites, settings, axis, result, comparison, elapsed, estimate)
+
+        def fail(exc):
             QMessageBox.warning(self, "Solid-state NMR", str(exc))
-            return False
+
+        from . import jobs
+        return jobs.submit(self, jobs.Job("Solid-state NMR simulation", compute, apply,
+                                          fail=fail, watched=False))
+
+    def _show_simulation(self, sites, settings, axis, result, comparison, elapsed,
+                         estimate) -> None:
         nucleus = self.observed() or sites[0].nucleus
         self.result = {"result": result, "sites": sites, "settings": settings, "axis": axis}
         data = np.asarray(result["real_spec"], dtype=float)
@@ -1298,7 +1317,6 @@ class CombinedHamiltonianPanel(QWidget):
             report_format.combined_simulation_html(result, elapsed, warning=warn.strip(),
                                                    muted=muted, warn=warn_colour))
         self.export_button.setEnabled(True)
-        return True
 
     def _compare_orders_wanted(self, sites) -> bool:
         check = getattr(self, "compare_orders_check", None)
@@ -2184,41 +2202,46 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                                       starts=args["starts"], screen_n_zcw=screen)
         if estimate is False:
             return False
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        started = time.perf_counter()
-        with FitProgress(self, "Solid-state NMR fit") as fit_progress_box:
-            try:
-                if args["starts"]:
-                    fit = cfit.fit_combined_multistart(
-                        results, args["sites"], args["starts"], verbose=False,
-                        screen_n_zcw=screen, **kwargs)
-                else:
-                    fit = cfit.fit_combined(results, args["sites"], **kwargs)
-            except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
-                QApplication.restoreOverrideCursor()
-                QMessageBox.warning(self, "Solid-state NMR fit", f"The fit did not succeed:\n\n{exc}")
-                return False
-        if fit_progress_box.stopped:
-            return False
-        QApplication.restoreOverrideCursor()
-        fit["elapsed"] = time.perf_counter() - started
-        timing = long_run.report_line(estimate, fit["elapsed"])
-        if timing:
-            fit["log"] = fit.get("log", "") + "\n" + timing
-        fit["spectrum"] = spectrum
-        fit["spectrum_index"] = index
-        fit["site_labels"] = [s.label for s in args["sites"]]
-        # The slice of a pseudo-2D this was fitted to, and the window --
-        # what applying the model to every slice starts from.
-        fit["row"] = row
-        fit["fit_regions"] = args["fit_regions"]
-        fit["advice"] = self.make_advice(fit)
-        self.result = fit
-        self._report()
-        self._draw_fit(fit, keep_zoom=True)
-        self._sync_result_buttons()
-        self._on_fitted()
-        return True
+
+        # Inputs read above; the fit itself touches no widget, so it can run
+        # in the background (gui/jobs.py; explicit user request, 2026-11-13).
+        def compute():
+            started = time.perf_counter()
+            if args["starts"]:
+                fit = cfit.fit_combined_multistart(
+                    results, args["sites"], args["starts"], verbose=False,
+                    screen_n_zcw=screen, **kwargs)
+            else:
+                fit = cfit.fit_combined(results, args["sites"], **kwargs)
+            fit["elapsed"] = time.perf_counter() - started
+            return fit
+
+        def apply(fit, _stopped_early):
+            timing = long_run.report_line(estimate, fit["elapsed"])
+            if timing:
+                fit["log"] = fit.get("log", "") + "\n" + timing
+            fit["spectrum"] = spectrum
+            fit["spectrum_index"] = index
+            fit["site_labels"] = [s.label for s in args["sites"]]
+            # The slice of a pseudo-2D this was fitted to, and the window --
+            # what applying the model to every slice starts from.
+            fit["row"] = row
+            fit["fit_regions"] = args["fit_regions"]
+            fit["advice"] = self.make_advice(fit)
+            self.result = fit
+            self._report()
+            self._draw_fit(fit, keep_zoom=True)
+            self._sync_result_buttons()
+            self._on_fitted()
+
+        def fail(exc):
+            QMessageBox.warning(self, "Solid-state NMR fit", f"The fit did not succeed:\n\n{exc}")
+
+        from . import jobs
+        inputs = self.get_state()
+        return jobs.submit(self, jobs.Job(
+            "Solid-state NMR fit", compute, apply, fail=fail, spectrum_index=index,
+            inputs=inputs, current_inputs=self.get_state, restore_inputs=self.set_state))
 
     # ---- starting values estimated from the spectrum -------------------------
 
@@ -2565,9 +2588,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
     def text_report(self) -> str:
         if not self.result:
             return ""
-        import contextlib
-        import io
-        with contextlib.redirect_stdout(io.StringIO()):
+        with thread_io.quiet_stdout():
             return cfit.print_combined_fit_report(self.result)
 
     def _on_results_menu(self, pos) -> None:

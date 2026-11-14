@@ -57,7 +57,9 @@ def _duration(seconds: float) -> str:
 def status_text(title: str, status) -> str:
     """The pop-up's lines for ``status`` (a FitStatus)."""
     head = title + (f" — {status.stage}" if status.stage else "")
-    lines = [head, f"{status.evaluations:,} model evaluations, {_duration(status.elapsed)}"]
+    # A stage that evaluates no model (a lineshape library) has no count.
+    lines = [head, (f"{status.evaluations:,} model evaluations, {_duration(status.elapsed)}"
+                    if status.evaluations else _duration(status.elapsed))]
     method = getattr(status, "method", "")
     if method and method != "auto":
         lines.append(f"Algorithm: {fit_progress.METHODS.get(method, method)} (Settings ▸ Fitting)")

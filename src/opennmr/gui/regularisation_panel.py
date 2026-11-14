@@ -16,13 +16,14 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
     QVBoxLayout, QWidget,
 )
 
 from .widgets.typed_spinbox import TypedSpinBox
 from ..notebook import regularisation as reg
+from . import jobs
 from .plot_options_dialog import PlotOptionsDialog
 from .widgets.report_label import ReportLabel
 
@@ -556,14 +557,27 @@ class RegularisationPanel(QWidget):
         except (ValueError, OSError) as exc:
             QMessageBox.information(self, "Regularisation", str(exc))
             return None
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            result = getattr(reg, call[0])(*call[1], label=label, **call[2])
-        except (ValueError, np.linalg.LinAlgError, MemoryError) as exc:
-            QMessageBox.warning(self, "Regularisation failed", str(exc))
-            return None
-        finally:
-            QApplication.restoreOverrideCursor()
+        # Inputs read above; the inversion touches no widget, so it runs in
+        # the background (gui/jobs.py; explicit user request, 2026-11-13).
+        shown = []
+
+        def apply(result, _stopped_early):
+            shown.append(self._show_result(result, call, label))
+
+        def fail(exc):
+            if isinstance(exc, (ValueError, np.linalg.LinAlgError, MemoryError)):
+                QMessageBox.warning(self, "Regularisation failed", str(exc))
+            else:
+                QMessageBox.warning(self, "Regularisation failed",
+                                    f"{type(exc).__name__}: {exc}")
+
+        jobs.submit(self, jobs.Job(
+            "Regularisation", lambda: getattr(reg, call[0])(*call[1], label=label, **call[2]),
+            apply, fail=fail, watched=False))
+        return shown[0] if shown else None
+
+    def _show_result(self, result, call, label) -> dict:
+        """Show an inversion just finished (GUI thread)."""
         self.result = result
         self._last_call = call
         self.export_button.setEnabled(True)

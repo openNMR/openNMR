@@ -14,13 +14,13 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
     QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .widgets.typed_spinbox import TypedSpinBox
-from .fit_progress_dialog import FitProgress
+from ..core import thread_io
 from ..core import registry as core_registry
 from ..io import serialize
 from . import panel_state
@@ -561,43 +561,48 @@ class QuadrupolarFitPanel(QWidget):
             QMessageBox.warning(self, "Quadrupolar fit", str(exc))
             return
         regions = self.fit_regions()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        started = time.perf_counter()
-        with FitProgress(self, "Quadrupolar fit") as fit_progress_box:
-            try:
-                popt, pcov_free, is_free, _scale, info = qfit.fit_quadrupolar_spectrum(
-                    results, sites, fit_regions=regions, **settings)
-            except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
-                QApplication.restoreOverrideCursor()
-                QMessageBox.warning(self, "Quadrupolar fit", f"The fit did not succeed:\n\n{exc}")
-                return
-        if fit_progress_box.stopped:
-            return
-        elapsed = time.perf_counter() - started
-        x = np.sort(np.asarray(results["x_ppm"], dtype=float))
-        try:
-            y_fit, components = qfit.evaluate_quad_fit(
-                x, popt, info, return_components=True,
-                n_zcw=self.render_orientations_spin.value())
-        finally:
-            QApplication.restoreOverrideCursor()
-        order = np.argsort(results["x_ppm"])
-        y = np.asarray(results["real_spectrum"], dtype=float)[order]
-        pcov = notebook_fitting.expand_pcov(pcov_free, is_free, len(popt))
+        render_n_zcw = self.render_orientations_spin.value()
         _target, row, _index = self._get_target()
-        self.result = {"popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
-                       "x": x, "y": y, "y_fit": y_fit, "components": components,
-                       "regions": regions, "spectrum": spectrum, "index": index,
-                       # Which slice of a pseudo-2D this was fitted to -- the
-                       # reference for applying the model to every slice.
-                       "row": row,
-                       "settings": settings, "elapsed": elapsed,
-                       "nucleus": self.nucleus_combo.currentText().strip()}
-        self._draw_fit(self.result)
-        self._report()
-        self.send_button.setEnabled(self._send_to_simulation is not None)
-        self.use_fitted_button.setEnabled(True)
-        self._on_fitted()
+
+        # Inputs read above; the fit touches no widget, so it can run in the
+        # background (gui/jobs.py; explicit user request, 2026-11-13).
+        def compute():
+            started = time.perf_counter()
+            popt, pcov_free, is_free, _scale, info = qfit.fit_quadrupolar_spectrum(
+                results, sites, fit_regions=regions, **settings)
+            elapsed = time.perf_counter() - started
+            x = np.sort(np.asarray(results["x_ppm"], dtype=float))
+            y_fit, components = qfit.evaluate_quad_fit(
+                x, popt, info, return_components=True, n_zcw=render_n_zcw)
+            return popt, pcov_free, is_free, info, x, y_fit, components, elapsed
+
+        def apply(outcome, _stopped_early):
+            popt, pcov_free, is_free, info, x, y_fit, components, elapsed = outcome
+            order = np.argsort(results["x_ppm"])
+            y = np.asarray(results["real_spectrum"], dtype=float)[order]
+            pcov = notebook_fitting.expand_pcov(pcov_free, is_free, len(popt))
+            self.result = {"popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
+                           "x": x, "y": y, "y_fit": y_fit, "components": components,
+                           "regions": regions, "spectrum": spectrum, "index": index,
+                           # Which slice of a pseudo-2D this was fitted to -- the
+                           # reference for applying the model to every slice.
+                           "row": row,
+                           "settings": settings, "elapsed": elapsed,
+                           "nucleus": self.nucleus_combo.currentText().strip()}
+            self._draw_fit(self.result)
+            self._report()
+            self.send_button.setEnabled(self._send_to_simulation is not None)
+            self.use_fitted_button.setEnabled(True)
+            self._on_fitted()
+
+        def fail(exc):
+            QMessageBox.warning(self, "Quadrupolar fit", f"The fit did not succeed:\n\n{exc}")
+
+        from . import jobs
+        return jobs.submit(self, jobs.Job(
+            "Quadrupolar fit", compute, apply, fail=fail, spectrum_index=index,
+            inputs=self.get_state(), current_inputs=self.get_state,
+            restore_inputs=self.set_state))
 
     # ---- report --------------------------------------------------------------
 
@@ -664,9 +669,7 @@ class QuadrupolarFitPanel(QWidget):
             return ""
         mask = notebook_fitting.build_region_mask(r["x"], r["regions"]) if r["regions"] else \
             np.ones(r["x"].size, dtype=bool)
-        import contextlib
-        import io
-        with contextlib.redirect_stdout(io.StringIO()):
+        with thread_io.quiet_stdout():
             return qfit.print_quadrupolar_fit_report(r["x"][mask], r["y"][mask], r["y_fit"][mask],
                                                      r["popt"], r["pcov"], r["is_free"], r["info"])
 

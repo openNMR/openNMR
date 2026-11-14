@@ -1524,71 +1524,129 @@ class ParamagneticToolsPanel(QWidget):
         return (src, tuple((k, tuple(v) if isinstance(v, (list, tuple)) else v)
                            for k, v in sorted(fkw.items())))
 
-    def _bms_field_for(self, particles, fkw, comps, quiet):
-        """The field: the kept one when its inputs are the same and it has
-        the components, else a new one (after a time check)."""
-        from . import long_run
-        from ..notebook import run_time
-        key = self._field_key(particles, fkw, comps)
+    def _bms_field_kept(self, key, comps) -> bool:
+        """Whether the kept field has these inputs and components."""
         keys = {"tensor": "delta_tensor", "iso": "delta_iso", "zz": "delta_zz"}
-        if self._bms_field_key == key and self.bms_field is not None and \
-                all(keys[c] in self.bms_field for c in comps):
-            return self.bms_field, False
-        if long_run.enabled() and not quiet:
-            est = bms_views.estimate_field_time(particles, components=comps, **fkw)
-            if est["seconds"] > run_time.SIMULATION_WARN_S or est["memory_GB"] > 4.0:
-                if not long_run.ask(self, "BMS field", "field calculation", est["text"],
-                                    "To make it faster: a coarser grid (each step down halves "
-                                    "the time or better); single precision; a periodic "
-                                    "boundary (isolated has 8× the voxels)."):
-                    return None, False
-        with _busy():
-            field = bmsf.bms_field(particles, components=comps, sample_shape="sphere", **fkw)
-        self._bms_field_key = key
-        return field, True
+        return self._bms_field_key == key and self.bms_field is not None and \
+            all(keys[c] in self.bms_field for c in comps)
 
-    def simulate_bms(self, quiet=False) -> bool:
-        from . import long_run
+    def _bms_inputs(self) -> dict:
+        """The BMS section's input widgets (a background run's inputs)."""
+        from . import panel_state
+        return panel_state.capture_widgets(self, prefixes=("pm_bms_",))
+
+    def _restore_bms_inputs(self, widgets: dict) -> None:
+        """Put the BMS section's inputs back (as :meth:`set_state` does,
+        without touching the panel's other tools)."""
+        from . import panel_state
+        self._bms_restoring = True
+        self._bms_setting_box = True
+        try:
+            panel_state.restore_widgets(self, widgets or {})
+        finally:
+            self._bms_restoring = False
+            self._bms_setting_box = False
+        self._bms_length_unit = self.pm_bms_length_unit_combo.currentData()
+        self._sync_bms_rows()
+        self._sync_chi_rows()
+
+    def _bms_failed(self, exc, quiet) -> None:
+        if quiet:
+            return
+        msg = str(exc).strip("'\"")
+        if isinstance(exc, MemoryError):
+            msg = "Not enough memory for this grid: choose a smaller one."
+        QMessageBox.warning(self, "BMS simulation", msg)
+
+    def simulate_bms(self, quiet=False, then=None) -> bool:
+        """Simulate the BMS spectrum: the field (unless the kept one has
+        the same inputs), then the spectrum from it -- each in the
+        background (gui/jobs.py; explicit user request, 2026-11-13), the
+        spectrum's own time check asked between the two (it needs the
+        field). ``then()``: called once the spectrum is shown. Returns
+        whether it was shown (jobs on the GUI thread) or started (in the
+        background)."""
+        from . import jobs, long_run
         from ..notebook import run_time
         try:
             particles = self.bms_particles_for_run()
             fkw = self.bms_field_arguments()
             skw = self.bms_spectrum_arguments()
             sampled, comps = bmsf.route(skw["mode"], skw["sample"], skw["local"])
-            field, new = self._bms_field_for(particles, fkw, comps, quiet)
-            if field is None:
-                return False
-            self.bms_field = field
-            if sampled and long_run.enabled() and not quiet:
-                n = skw["n_samples"] or bmsf.default_samples(skw["mode"])
-                est = bms_views.estimate_sampling_time(
-                    field, n, **self._sampling_kwargs(skw))
-                if est["seconds"] > run_time.SIMULATION_WARN_S:
-                    if not long_run.ask(self, "BMS spectrum", "spectrum", est["text"],
-                                        "To make it faster: fewer samples (more Monte Carlo "
-                                        "noise); a faster MAS rate (fewer sidebands); the "
-                                        "central transition only; second rather than exact "
-                                        "quadrupolar theory."):
+            key = self._field_key(particles, fkw, comps)
+            kept = self._bms_field_kept(key, comps)
+            if not kept and long_run.enabled() and not quiet:
+                est = bms_views.estimate_field_time(particles, components=comps, **fkw)
+                if est["seconds"] > run_time.SIMULATION_WARN_S or est["memory_GB"] > 4.0:
+                    if not long_run.ask(self, "BMS field", "field calculation", est["text"],
+                                        "To make it faster: a coarser grid (each step down "
+                                        "halves the time or better); single precision; a "
+                                        "periodic boundary (isolated has 8× the voxels)."):
                         return False
-            with _busy():
-                spectrum = bmsf.spectrum_from_field(field, **skw)
         except (ValueError, KeyError, OSError, MemoryError) as exc:
-            if not quiet:
-                msg = str(exc).strip("'\"")
-                if isinstance(exc, MemoryError):
-                    msg = "Not enough memory for this grid: choose a smaller one."
-                QMessageBox.warning(self, "BMS simulation", msg)
+            self._bms_failed(exc, quiet)
             return False
-        self.bms_spectrum = spectrum
-        self._bms_field_new = new
-        self.bms_nmr_spectrum = self._bms_nmr_spectrum(spectrum, fkw, skw)
-        self.pm_bms_keep_button.setEnabled(self._keep_spectrum is not None)
-        self._show_bms_report()
-        self._sync_slice_controls()
-        self.pm_bms_view_combo.setCurrentIndex(self.pm_bms_view_combo.findData("spectrum"))
-        if self._plot_spectrum is not None:
-            self._plot_spectrum(self.bms_nmr_spectrum)
-        return True
+        # The inputs it was started with: the report and the kept spectrum
+        # describe these, not the panel as it is when the run finishes.
+        # Only the BMS section's: the panel's other tools are left alone.
+        inputs = self._bms_inputs()
+        shown = []
+
+        def spectrum_stage(field, new):
+            self.bms_field = field
+            if new:
+                self._bms_field_key = key
+            try:
+                if sampled and long_run.enabled() and not quiet:
+                    n = skw["n_samples"] or bmsf.default_samples(skw["mode"])
+                    est = bms_views.estimate_sampling_time(
+                        field, n, **self._sampling_kwargs(skw))
+                    if est["seconds"] > run_time.SIMULATION_WARN_S:
+                        if not long_run.ask(self, "BMS spectrum", "spectrum", est["text"],
+                                            "To make it faster: fewer samples (more Monte Carlo "
+                                            "noise); a faster MAS rate (fewer sidebands); the "
+                                            "central transition only; second rather than exact "
+                                            "quadrupolar theory."):
+                            return
+            except (ValueError, KeyError, MemoryError) as exc:
+                self._bms_failed(exc, quiet)
+                return
+
+            def show(spectrum, _early):
+                self.bms_spectrum = spectrum
+                self._bms_field_new = new
+                self.bms_nmr_spectrum = self._bms_nmr_spectrum(spectrum, fkw, skw)
+                self.pm_bms_keep_button.setEnabled(self._keep_spectrum is not None)
+                self._show_bms_report()
+                self._sync_slice_controls()
+                self.pm_bms_view_combo.setCurrentIndex(
+                    self.pm_bms_view_combo.findData("spectrum"))
+                if self._plot_spectrum is not None:
+                    self._plot_spectrum(self.bms_nmr_spectrum)
+                shown.append(True)
+                if then is not None:
+                    then()
+
+            jobs.submit(self, jobs.Job(
+                "BMS spectrum", lambda: bmsf.spectrum_from_field(field, **skw), show,
+                fail=lambda exc: self._bms_failed(exc, quiet), watched=False,
+                inputs=inputs, current_inputs=self._bms_inputs,
+                restore_inputs=self._restore_bms_inputs))
+
+        if kept:
+            spectrum_stage(self.bms_field, False)
+        else:
+            started = jobs.submit(self, jobs.Job(
+                "BMS field",
+                lambda: bmsf.bms_field(particles, components=comps, sample_shape="sphere",
+                                       **fkw),
+                lambda field, _early: spectrum_stage(field, True),
+                fail=lambda exc: self._bms_failed(exc, quiet), watched=False,
+                inputs=inputs, current_inputs=self._bms_inputs,
+                restore_inputs=self._restore_bms_inputs))
+            if not started:
+                return False
+        return bool(shown) or jobs.in_background(self)
 
     @staticmethod
     def _sampling_kwargs(skw):
@@ -1774,8 +1832,8 @@ class ParamagneticToolsPanel(QWidget):
 
     def plot_bms_slice(self) -> bool:
         if self.bms_field is None:
-            if not self.simulate_bms():
-                return False
+            # The slice once the run (perhaps in the background) is shown.
+            return self.simulate_bms(then=self.plot_bms_slice)
         self._sync_slice_controls()
         field = self.bms_field
         quantity = self.pm_bms_quantity_combo.currentData()

@@ -53,6 +53,7 @@ from .compare_2d import Compare2DControls
 from .compare_panels_controls import ComparePanelsControls
 from .panel_label_controls import PanelLabelControls
 from .widgets.spacing_slider import SpacingSlider
+from ..core import thread_io
 from ..notebook import peak_integral_labels as integral_labels_module
 from ..notebook import notes as nb_notes
 from ..notebook import referencing as nb_referencing
@@ -106,7 +107,9 @@ from ..io import history as io_history
 from ..io import serialize as io_serialize
 from ..io import state as io_state
 from ..io import recovery as io_recovery
+from ..io import scan as io_scan
 from . import panel_state
+from . import jobs
 from . import data_directory
 from .. import _version
 from . import progress as progress_dialogs
@@ -163,7 +166,6 @@ from .fit_models_panel import FitModelsPanel
 from .curve_fit_plot_box import CurveFitPlotBox
 from .plot_options_dialog import PlotOptionsDialog
 from .regularisation_panel import RegularisationPanel
-from .fit_progress_dialog import FitProgress
 from ..core.atomic_write import write_json_atomic
 from .widgets.sideband_hint import sideband_hint_label
 from ..core import fit_progress as core_fit_progress
@@ -705,6 +707,12 @@ class MainWindow(QMainWindow):
         # message clears only when the last one lands.
         self._loader = None
         self._pending_loads = 0
+        # Long fits and simulations run in the background, one at a time,
+        # the rest queued (explicit user request, 2026-11-13; gui/jobs.py).
+        # Its indicator sits at the right of the status bar while a job runs.
+        from . import jobs as _jobs
+        self.job_manager = _jobs.JobManager(self)
+        self.statusBar().addPermanentWidget(self.job_manager.indicator)
         #: What the last read of each path reported (seconds, saved copy).
         self._load_infos: dict[str, dict] = {}
         #: The status-bar row shown while experiments open (created on first use).
@@ -1777,6 +1785,10 @@ class MainWindow(QMainWindow):
         # Ctrl+, is the usual preferences shortcut.
         # The same action is also in File (built above).
         window_menu.addAction(self.settings_menu_action)
+        # The background job and its queue (Ctrl/Cmd+R).
+        from . import jobs as _jobs
+        self.jobs_menu_action = _jobs.make_action(self.job_manager, self)
+        window_menu.addAction(self.jobs_menu_action)
 
         # " View" suffix: the canvas tab's own name would otherwise
         # collide with the identically-named Panel entry above it for
@@ -2711,6 +2723,13 @@ class MainWindow(QMainWindow):
         # remembered in ui_settings.json. Restored here or in
         # _build_settings_panel, whichever runs second.
         self.data_browser.sortModeChanged.connect(self._on_browser_sort_changed)
+        # Folder scans run in the background from what was found last time
+        # (explicit user request, 2026-11-13) -- see gui/folder_scan.py.
+        self._folder_scanner = None
+        self._folder_scan_known: set[str] = set()
+        self.data_browser.refreshRequested.connect(
+            lambda: self._browse_folder(self.data_browser.root(), full=True))
+        self.data_browser.scanCancelRequested.connect(self._on_folder_scan_stop)
         if hasattr(self, "_ui_settings"):
             self.data_browser.set_sort_mode(self._ui_settings.get("browser_sort", ""))
         browser_layout.addWidget(self.data_browser)
@@ -3469,82 +3488,13 @@ class MainWindow(QMainWindow):
         separate matches once the one real 2D dataset they belong to
         is already found.
         """
+        # The scan itself is io.scan (2026-11-13): the same experiments,
+        # found without opening every file, and cloud-only files never
+        # downloaded. The window's own folder browsing uses it through
+        # gui/folder_scan.py, remembered and in the background.
         if max_matches is None:
             max_matches = cls.SCAN_LIMIT
-        matches: list[tuple[str, str]] = []
-
-        def walk(path: str, depth: int) -> None:
-            if len(matches) >= max_matches:
-                return
-            try:
-                vendor = io.detect_vendor(path)
-            except ValueError:
-                vendor = None
-            if vendor is not None:
-                matches.append((path, vendor))
-                # Don't descend into a recognised experiment's own
-                # subtree -- except for the spectra saved from it
-                # (Save Progress on a slice, CPMG sum, ...), which live
-                # in its opennmr_derived/ folder so they stay with it.
-                derived = os.path.join(path, "opennmr_derived") if os.path.isdir(path) else None
-                if derived and os.path.isdir(derived) and depth < max_depth:
-                    walk(derived, depth + 1)
-                if vendor == "spinsolve" and os.path.isdir(path):
-                    # Spinsolve Expert keeps a 2D's 1D reference scan
-                    # inside it (``PilotScan/``): an experiment of its
-                    # own, worth offering (2026-10-15, Magritek data).
-                    try:
-                        children = sorted(os.scandir(path), key=lambda e: cls._natural_sort_key(e.name))
-                    except OSError:
-                        children = []
-                    for child in children:
-                        if len(matches) >= max_matches:
-                            return
-                        if child.is_dir(follow_symlinks=False) and \
-                                io.spinsolve.is_spinsolve_standard(child.path):
-                            matches.append((child.path, "spinsolve"))
-                return
-
-            if depth >= max_depth:
-                return
-            try:
-                entries = sorted(os.scandir(path), key=lambda e: cls._natural_sort_key(e.name))
-            except OSError:
-                return
-            # A genuine X-Pulse 2D dataset (e.g. an HSQC's own
-            # "..._avg.jdx" NTUPLES file) already contains everything
-            # its own sibling raw_slices/ folder holds per-F1-increment
-            # -- don't also offer those (128+, for a real dataset)
-            # individual slice files as separate matches once the one
-            # real dataset they belong to is already found here.
-            # raw_slices/ folders that *aren't* siblings of an NTUPLES
-            # file (e.g. a genuine per-slice pseudo-2D PFG series) are
-            # untouched -- their own contents are the real dataset,
-            # not a redundant duplicate of one.
-            has_ntuples_sibling = any(
-                entry.is_file(follow_symlinks=False)
-                and os.path.splitext(entry.name)[1].lower() in (".jdx", ".dx")
-                and io.xpulse._is_ntuples_2d_file(entry.path)
-                for entry in entries
-            )
-            for entry in entries:
-                if len(matches) >= max_matches:
-                    return
-                if entry.is_dir(follow_symlinks=False):
-                    if has_ntuples_sibling and entry.name.lower() == "raw_slices":
-                        continue
-                    walk(entry.path, depth + 1)
-                elif entry.is_file(follow_symlinks=False):
-                    if cls._XPULSE_RAW_SCAN_RE.search(entry.name):
-                        continue
-                    try:
-                        file_vendor = io.detect_vendor(entry.path)
-                    except ValueError:
-                        continue
-                    matches.append((entry.path, file_vendor))
-
-        walk(os.path.abspath(directory), 0)
-        return matches
+        return io_scan.scan_for_spectra(directory, max_depth=max_depth, max_matches=max_matches)
 
     def _prompt_select_spectra(self, matches: list[tuple[str, str]], base_dir: str) -> list[tuple[str, str]]:
         """Let the user pick one or more of several spectra found
@@ -3584,6 +3534,13 @@ class MainWindow(QMainWindow):
         if self._loader is not None:
             self._loader.shutdown()
             self._loader = None
+        # And a background fit or simulation.
+        if getattr(self, "job_manager", None) is not None:
+            self.job_manager.shutdown()
+        # And a folder scan.
+        if getattr(self, "_folder_scanner", None) is not None:
+            self._folder_scanner.shutdown()
+            self._folder_scanner = None
         # Same for a pNMR enumeration running in the background.
         self.pnmr_panel.shutdown()
         # And an edit to the title/notes still inside its save delay.
@@ -4505,10 +4462,7 @@ class MainWindow(QMainWindow):
             self, "Choose a folder to browse", data_directory.start_directory())
         if not directory:
             return
-        matches = self._scan_for_spectra(directory)
-        self.data_browser.set_matches(
-            directory, matches,
-            truncated_at=self.SCAN_LIMIT if self._scan_was_truncated(matches) else None)
+        self._browse_folder(directory)
 
     def _on_browser_spectrum_activated(self, path: str, vendor: str) -> None:
         """Load an experiment picked in the browser -- the same path
@@ -8357,10 +8311,88 @@ class MainWindow(QMainWindow):
         directory = data_directory.default_data_directory()
         if not directory or not hasattr(self, "data_browser"):
             return
-        matches = self._scan_for_spectra(directory)
-        self.data_browser.set_matches(
-            directory, matches,
-            truncated_at=self.SCAN_LIMIT if self._scan_was_truncated(matches) else None)
+        self._browse_folder(directory)
+
+    def _browse_folder(self, directory: str | None, full: bool = False) -> None:
+        """List the experiments under ``directory`` in the Open panel.
+
+        What was found there last time is shown at once (io.scan's
+        remembered index); a scan then looks for what changed -- in the
+        background, so the window never waits for it -- adds and removes
+        experiments as it finds them, and remembers the result.
+        ``full``: look through everything again (right-click ▸ Refresh).
+        Synchronous when OPENNMR_BACKGROUND_SCAN=0 (tests)."""
+        if not directory:
+            return
+        from . import folder_scan
+        limit = self.SCAN_LIMIT
+        if not folder_scan.background_scan_enabled():
+            result = folder_scan.run_scan(directory, full=full, max_matches=limit)
+            self.data_browser.set_matches(
+                directory, result, truncated_at=limit if result.truncated else None,
+                dates=result.dates)
+            return
+        remembered = io_scan.ScanIndex.load(directory)
+        same_root = self.data_browser.root() is not None and \
+            os.path.normcase(os.path.abspath(self.data_browser.root())) == \
+            os.path.normcase(os.path.abspath(directory))
+        if not same_root:
+            self.data_browser.set_matches(
+                directory, remembered.matches,
+                truncated_at=limit if remembered.truncated else None, dates=remembered.dates)
+        self._folder_scan_known = {path for path, _vendor in self.data_browser.matches()}
+        first = not remembered.matches and not same_root
+        self.data_browser.set_scan_status(
+            "Looking for experiments in this folder…" if first else
+            "Checking this folder for new or removed data…")
+        if self._folder_scanner is None:
+            self._folder_scanner = folder_scan.FolderScanner(self)
+            self._folder_scanner.progress.connect(self._on_folder_scan_progress)
+            self._folder_scanner.finished.connect(self._on_folder_scan_finished)
+            self._folder_scanner.failed.connect(self._on_folder_scan_failed)
+        self._folder_scanner.scan(directory, full=full, max_matches=limit)
+
+    def _on_folder_scan_progress(self, root: str, folders: int, found) -> None:
+        if root != self.data_browser.root():
+            return
+        # New experiments appear as they are found; nothing is taken
+        # away until the scan has seen the whole folder.
+        self.data_browser.update_matches(found, dates=getattr(found, "dates", None),
+                                         remove_missing=False)
+        self.data_browser.set_scan_status(
+            f"Checking this folder… {folders:,} folders, {len(found):,} experiments so far.")
+
+    def _on_folder_scan_finished(self, root: str, result) -> None:
+        if root != self.data_browser.root():
+            return
+        self.data_browser.set_scan_status(None)
+        if result.cancelled:
+            self.data_browser.update_matches(result, dates=result.dates, remove_missing=False)
+            self.statusBar().showMessage(
+                "Stopped looking through the folder: some new or removed experiments may "
+                "not be shown. Right-click the list ▸ Refresh to look again.", 10000)
+            return
+        added, removed = self.data_browser.update_matches(
+            result, truncated_at=self.SCAN_LIMIT if result.truncated else None,
+            dates=result.dates)
+        new = len({path for path, _vendor in result} - self._folder_scan_known)
+        if self._folder_scan_known and (new or removed):
+            parts = []
+            if new:
+                parts.append(f"{new:,} new experiment{'s' if new != 1 else ''}")
+            if removed:
+                parts.append(f"{removed:,} no longer there")
+            self.statusBar().showMessage(f"Data folder: {' and '.join(parts)}.", 8000)
+
+    def _on_folder_scan_failed(self, root: str, message: str) -> None:
+        if root != self.data_browser.root():
+            return
+        self.data_browser.set_scan_status(None)
+        self.statusBar().showMessage(f"Could not look through {root}: {message}", 10000)
+
+    def _on_folder_scan_stop(self) -> None:
+        if self._folder_scanner is not None:
+            self._folder_scanner.cancel()
 
     def _on_browse_state_folder(self) -> None:
         start = io_state.default_state_root()
@@ -9052,26 +9084,31 @@ class MainWindow(QMainWindow):
                 "Fit Curve needs at least two 1D spectra checked in the Compare list.",
             )
             return
-        with FitProgress(self, "Spectral fit") as fit_progress_box:
-            try:
-                slice_results = self._fit_peaks(stack)
-            except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
-                QMessageBox.critical(self, "Fit failed", str(exc))
+        try:
+            plan = self._spectral_fit_plan(stack)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Fit failed", str(exc))
+            return
+
+        def apply(slice_results, stopped_early):
+            if stopped_early and len(slice_results) < len(stack):
+                self._partial_series_stopped(slice_results, len(stack))
                 return
-        if fit_progress_box.stopped:
-            return
-        if fit_progress_box.stopped_early and len(slice_results) < len(stack):
-            self._partial_series_stopped(slice_results, len(stack))
-            return
-        self._warn_if_fit_near_region_edge(slice_results)
-        # No single spectrum "owns" a Compare-stack fit the way a
-        # pseudo-2D's own slices do -- reference_spectrum only
-        # supplies vendor/path context for the Values-source combo
-        # (Auto/vclist/relative-gradient), and persist_to is
-        # deliberately None (see _run_curve_fit's own docstring):
-        # switching away and back loses this result, matching the
-        # Compare tab's own existing no-per-item-persistence character.
-        self._run_curve_fit(slice_results, len(stack), stack[0], persist_to=None)
+            self._warn_if_fit_near_region_edge(slice_results)
+            # No single spectrum "owns" a Compare-stack fit the way a
+            # pseudo-2D's own slices do -- reference_spectrum only
+            # supplies vendor/path context for the Values-source combo
+            # (Auto/vclist/relative-gradient), and persist_to is
+            # deliberately None (see _run_curve_fit's own docstring):
+            # switching away and back loses this result, matching the
+            # Compare tab's own existing no-per-item-persistence character.
+            self._run_curve_fit(slice_results, len(stack), stack[0], persist_to=None)
+
+        # The peak fits run in the background (gui/jobs.py); the curve fit,
+        # quick, when they are shown.
+        jobs.submit(self, jobs.Job(
+            "Spectral fit (Compare)", lambda: self._run_spectral_fit(plan), apply,
+            fail=lambda exc: QMessageBox.critical(self, "Fit failed", str(exc))))
 
     def _on_combine_spectra_clicked(self) -> None:
         """Compare > Spectrum Arithmetic's Combine, with a message box
@@ -27802,6 +27839,12 @@ class MainWindow(QMainWindow):
         :attr:`amplitude_bound_regions_checkbox` is checked (see its
         own tooltip) -- fitting-wizard-roadmap item "bounding possibly
         from integrals"."""
+        return self._run_spectral_fit(self._spectral_fit_plan(entries))
+
+    def _spectral_fit_plan(self, entries: list) -> dict:
+        """Everything :meth:`_fit_peaks` reads from the window, read now
+        (GUI thread), so the fit itself (:meth:`_run_spectral_fit`) can run
+        in the background touching no widget."""
         peak_defs = self._read_peak_defs()
         if not peak_defs:
             raise ValueError("Add at least one peak to fit.")
@@ -27818,13 +27861,18 @@ class MainWindow(QMainWindow):
         # no other slice to take a lineshape from, and passing an
         # anchor for one would be describing a choice that isn't there.
         anchor = self.anchor_slice_spin.value() if (seed_mode == "apply_first" and len(prepared) > 1) else None
+        return {"prepared": prepared, "peak_defs": peak_defs,
+                "kwargs": dict(mode="rows", fit_regions=fit_regions,
+                               show_report=False, show_warnings=False, seed_mode=seed_mode,
+                               anchor_slice=anchor,
+                               amplitude_bound_regions=amplitude_bound_regions,
+                               **sn_kwargs)}
+
+    @staticmethod
+    def _run_spectral_fit(plan: dict) -> list[dict]:
+        """The fit of :meth:`_spectral_fit_plan` (touches no widget)."""
         fitted = processing_fitting.NMR2D_fit_slices(
-            {"rows": prepared}, peak_defs, mode="rows", fit_regions=fit_regions,
-            show_report=False, show_warnings=False, seed_mode=seed_mode,
-            anchor_slice=anchor,
-            amplitude_bound_regions=amplitude_bound_regions,
-            **sn_kwargs,
-        )
+            {"rows": plan["prepared"]}, plan["peak_defs"], **plan["kwargs"])
         return fitted["rows"]
 
     #: Fraction of a region's own width, measured from either edge,
@@ -28033,25 +28081,31 @@ class MainWindow(QMainWindow):
             )
             return
 
-        with FitProgress(self, "Spectral fit") as fit_progress_box:
-            try:
-                if spectrum.ndim == 1:
-                    entries = [spectrum]
-                else:
-                    entries = processing_slicing.get_slices(
-                        spectrum, rows=self._fit_slice_rows(spectrum))["rows"]
-                results = self._fit_peaks(entries)
-            except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
-                QMessageBox.critical(self, "Fit failed", str(exc))
-                return
-        if fit_progress_box.stopped:
+        try:
+            if spectrum.ndim == 1:
+                entries = [spectrum]
+            else:
+                entries = processing_slicing.get_slices(
+                    spectrum, rows=self._fit_slice_rows(spectrum))["rows"]
+            plan = self._spectral_fit_plan(entries)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Fit failed", str(exc))
             return
-        if fit_progress_box.stopped_early and len(results) < len(entries):
-            self._partial_series_stopped(results, len(entries))
-            return
-        self._warn_if_fit_near_region_edge(results)
+        n_slices = len(entries)
 
-        self._show_spectral_fit_results(spectrum, results)
+        # Inputs read above; the fit touches no widget, so it runs in the
+        # background (gui/jobs.py; explicit user request, 2026-11-13).
+        def apply(results, stopped_early):
+            if stopped_early and len(results) < n_slices:
+                self._partial_series_stopped(results, n_slices)
+                return
+            self._warn_if_fit_near_region_edge(results)
+            self._show_spectral_fit_results(spectrum, results)
+
+        jobs.submit(self, jobs.Job(
+            "Spectral fit", lambda: self._run_spectral_fit(plan), apply,
+            fail=lambda exc: QMessageBox.critical(self, "Fit failed", str(exc)),
+            spectrum_index=index))
 
     def _partial_series_stopped(self, results: list[dict], n_slices: int) -> None:
         """Stop and Keep Best part-way through a series. Fit Curve pairs
@@ -28488,56 +28542,58 @@ class MainWindow(QMainWindow):
             common["mas_Hz"] = mas
 
         fit_regions = self._csa_fit_regions()
-        self.statusBar().showMessage("Fitting CSA lineshape…")
-        with FitProgress(self, "CSA fit") as fit_progress_box:
-            try:
-                popt, pcov, is_free, scale, info = notebook_csa.fit_csa_spectrum(
-                    results, sites, fit_regions=fit_regions,
-                    **self._csa_grid_kwargs(scheme, fitting_n), **common)
-            except Exception as exc:  # noqa: BLE001 -- a fit that will not converge
-                # is a normal outcome here, not a bug to crash on.
-                self.statusBar().clearMessage()
-                QMessageBox.warning(self, "CSA fit", f"The CSA fit did not succeed:\n\n{exc}")
-                return
-        if fit_progress_box.stopped:
-            return
-        self.statusBar().clearMessage()
+        render_n = self.csa_render_orientations_spin.value()
+        fit_kwargs = self._csa_grid_kwargs(scheme, fitting_n)
+        render_kwargs = self._csa_grid_kwargs(scheme, render_n)
 
-        # Re-simulate the drawn curve at the finer grid. Rebuilding
-        # `sim_kwargs` rather than reusing the fit's own is what makes
-        # "coarse to fit, fine to show" actually happen.
-        info = dict(info)
-        info["sim_kwargs"] = {
-            **info["sim_kwargs"],
-            **self._csa_grid_kwargs(scheme, self.csa_render_orientations_spin.value()),
-        }
-        x_sorted = np.sort(results["x_ppm"])
-        fitted = notebook_csa.evaluate_csa_fit(x_sorted, popt, info)
-        # Per-site curves as well as the total, when there is more
-        # than one site -- the same "judge it peak by peak, not only
-        # as a summed curve" the slice-fit view already offers.
-        components = None
-        if info["n_sites"] > 1:
-            try:
-                components = list(notebook_csa.evaluate_csa_fit(
-                    x_sorted, popt, info, return_components=True)[1])
-            except Exception:  # noqa: BLE001 -- the total curve is the point
-                components = None
+        # Inputs read above; the fit and the fine render touch no widget, so
+        # they run in the background (gui/jobs.py; explicit user request,
+        # 2026-11-13).
+        def compute():
+            popt, pcov, is_free, _scale, info = notebook_csa.fit_csa_spectrum(
+                results, sites, fit_regions=fit_regions, **fit_kwargs, **common)
+            # Re-simulate the drawn curve at the finer grid. Rebuilding
+            # `sim_kwargs` rather than reusing the fit's own is what makes
+            # "coarse to fit, fine to show" actually happen.
+            info = dict(info)
+            info["sim_kwargs"] = {**info["sim_kwargs"], **render_kwargs}
+            x_sorted = np.sort(results["x_ppm"])
+            fitted = notebook_csa.evaluate_csa_fit(x_sorted, popt, info)
+            # Per-site curves as well as the total, when there is more
+            # than one site -- the same "judge it peak by peak, not only
+            # as a summed curve" the slice-fit view already offers.
+            components = None
+            if info["n_sites"] > 1:
+                try:
+                    components = list(notebook_csa.evaluate_csa_fit(
+                        x_sorted, popt, info, return_components=True)[1])
+                except Exception:  # noqa: BLE001 -- the total curve is the point
+                    components = None
+            return popt, pcov, is_free, info, x_sorted, fitted, components
 
-        self._csa_fit_result = {
-            "popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
-            "x": x_sorted, "y_fit": fitted, "components": components, "results": results,
-            "convention": common["convention"], "spectrum_index": index, "row": row,
-            # How the fit was set up -- what the report says it did.
-            "sites": sites, "fit_regions": fit_regions, "static": static,
-            "mas_Hz": common.get("mas_Hz"), "scheme": scheme,
-            "fit_n": self._powder_count(scheme, fitting_n),
-            "render_n": self._powder_count(scheme, self.csa_render_orientations_spin.value()),
-        }
-        self._draw_csa_fit()
-        self._report_csa_fit()
-        self._store_fit("csa", index)
-        self._refresh_model_series_buttons()
+        def apply(outcome, _stopped_early):
+            popt, pcov, is_free, info, x_sorted, fitted, components = outcome
+            now = job.current_index()
+            self._csa_fit_result = {
+                "popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
+                "x": x_sorted, "y_fit": fitted, "components": components, "results": results,
+                "convention": common["convention"], "spectrum_index": now, "row": row,
+                # How the fit was set up -- what the report says it did.
+                "sites": sites, "fit_regions": fit_regions, "static": static,
+                "mas_Hz": common.get("mas_Hz"), "scheme": scheme,
+                "fit_n": self._powder_count(scheme, fitting_n),
+                "render_n": self._powder_count(scheme, render_n),
+            }
+            self._draw_csa_fit()
+            self._report_csa_fit()
+            self._store_fit("csa", now)
+            self._refresh_model_series_buttons()
+
+        # A fit that will not converge is a normal outcome here, not a bug.
+        job = jobs.Job("CSA fit", compute, apply, spectrum_index=index,
+                       fail=lambda exc: QMessageBox.warning(
+                           self, "CSA fit", f"The CSA fit did not succeed:\n\n{exc}"))
+        jobs.submit(self, job)
 
     #: Tooltip addition shared by every "Powder averaging" combo.
     _POWDER_SCHEME_TIP = (
@@ -28747,7 +28803,7 @@ class MainWindow(QMainWindow):
         measured = np.asarray(result["results"]["real_spectrum"])[order]
         buffer = StringIO()
         try:
-            with contextlib.redirect_stdout(buffer):
+            with thread_io.quiet_stdout() as buffer:
                 notebook_csa.print_csa_fit_report(
                     result["x"], measured, result["y_fit"],
                     result["popt"], result["pcov"], result["is_free"],
@@ -28873,21 +28929,26 @@ class MainWindow(QMainWindow):
         data = np.real(spectrum.data)[:n_slices][rows]
         b_values = b_values[rows]
         ppm = spectrum.axes[1].values("ppm")
-        self.statusBar().showMessage("Building DOSY map (inverse Laplace transform)…")
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            dosy = processing_ilt.dosy_map(
+        def compute():
+            return processing_ilt.dosy_map(
                 b_values, data, ppm, alpha=settings["alpha"], n_grid=settings["n_grid"],
                 d_range=(settings["d_min"], settings["d_max"]),
                 threshold=settings["threshold"], auto_alpha=settings["auto_alpha"],
             )
-        except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
-            QMessageBox.critical(self, "DOSY failed", str(exc))
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-            self.statusBar().clearMessage()
 
+        # The inversion touches no widget, so it runs in the background
+        # (gui/jobs.py; explicit user request, 2026-11-13).
+        job = jobs.Job("DOSY map", compute,
+                       lambda dosy, _early: self._show_dosy_map(job, spectrum, dosy, settings),
+                       fail=lambda exc: QMessageBox.critical(self, "DOSY failed", str(exc)),
+                       spectrum_index=index, watched=False)
+        jobs.submit(self, job)
+
+    def _show_dosy_map(self, job, spectrum, dosy, settings) -> None:
+        """Show a DOSY map just built (GUI thread)."""
+        index = job.current_index()
+        if index is None:
+            return
         # Hz per ppm of the F2 axis, so Measure on the map quotes Hz as
         # well as ppm (explicit user request, 2026-11-12).
         f2 = spectrum.axes[1]
@@ -29315,23 +29376,25 @@ class MainWindow(QMainWindow):
             return
         settings = dialog.values()
 
-        self.statusBar().showMessage("Resolving components (SCORE)…")
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            result = processing_score.score(
+        def compute():
+            return processing_score.score(
                 x_values, data, n_components=settings["n_components"],
                 kind="diffusion" if is_diffusion else "relaxation",
                 method=settings["method"], model=model,
                 threshold=settings["threshold"], non_negative=settings["non_negative"],
                 non_negative_during_fit=settings["non_negative_during_fit"],
             )
-        except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
-            QMessageBox.critical(self, "SCORE failed", str(exc))
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-            self.statusBar().clearMessage()
 
+        # The resolution touches no widget, so it runs in the background
+        # (gui/jobs.py; explicit user request, 2026-11-13).
+        jobs.submit(self, jobs.Job(
+            "SCORE", compute,
+            lambda result, _early: self._show_score_result(spectrum, result, rows, model_note),
+            fail=lambda exc: QMessageBox.critical(self, "SCORE failed", str(exc)),
+            spectrum_index=index, watched=False))
+
+    def _show_score_result(self, spectrum, result, rows, model_note) -> None:
+        """Show a SCORE/OUTSCORE result just computed (GUI thread)."""
         # Which slices were resolved (0-based), so the residual and the
         # measured spectrum are the same row as the fit's first level, and
         # the report names a slice by its own number.
@@ -31016,21 +31079,35 @@ class MainWindow(QMainWindow):
                     "• Integrate: drag one or more regions (each is integrated as it is drawn);\n"
                     "• Isotropic: add peaks, then Fit Spectrum.")
                 return
-        with FitProgress(self, "Spectral fit") as fit_progress_box:
-            try:
-                slice_results = spectrum.metadata.raw.get("slice_fit_results")
-                if not slice_results:
-                    entries = processing_slicing.get_slices(
-                        spectrum, rows=self._fit_slice_rows(spectrum))["rows"]
-                    slice_results = self._fit_peaks(entries)
-                    self._warn_if_fit_near_region_edge(slice_results)
-                    self._show_spectral_fit_results(spectrum, slice_results)
-            except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
-                QMessageBox.critical(self, "Fit failed", str(exc))
-                return
-        if fit_progress_box.stopped:
+        slice_results = spectrum.metadata.raw.get("slice_fit_results")
+        if slice_results:
+            self._run_curve_fit(slice_results, len(slice_results), spectrum, persist_to=spectrum)
             return
-        self._run_curve_fit(slice_results, len(slice_results), spectrum, persist_to=spectrum)
+        try:
+            entries = processing_slicing.get_slices(
+                spectrum, rows=self._fit_slice_rows(spectrum))["rows"]
+            plan = self._spectral_fit_plan(entries)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Fit failed", str(exc))
+            return
+        n_slices = len(entries)
+
+        def apply(results, stopped_early):
+            if stopped_early and len(results) < n_slices:
+                # Fit Curve pairs every slice with its delay: a part-fitted
+                # series is not curve-fitted (as Fit Spectrum).
+                self._partial_series_stopped(results, n_slices)
+                return
+            self._warn_if_fit_near_region_edge(results)
+            self._show_spectral_fit_results(spectrum, results)
+            self._run_curve_fit(results, len(results), spectrum, persist_to=spectrum)
+
+        # The peak fits run in the background (gui/jobs.py); the curve fit,
+        # quick, when they are shown.
+        jobs.submit(self, jobs.Job(
+            "Spectral fit", lambda: self._run_spectral_fit(plan), apply,
+            fail=lambda exc: QMessageBox.critical(self, "Fit failed", str(exc)),
+            spectrum_index=index))
 
     def _on_view_slice_fit_changed(self, value: int) -> None:
         if not self._slice_fit_results:
@@ -31504,6 +31581,13 @@ class MainWindow(QMainWindow):
             name_item.setCheckState(Qt.CheckState.Checked if len(entry) > 4 and entry[4] == "1"
                                      else Qt.CheckState.Unchecked)
 
+    def _is_selected_info(self, info) -> bool:
+        """Whether the spectrum with session bookkeeping ``info`` is the
+        one selected (gui/jobs.py: a finished fit is shown only on its
+        own spectrum)."""
+        row = self.spectrum_list.currentRow() if hasattr(self, "spectrum_list") else -1
+        return row >= 0 and self._history_info(row) is info
+
     def _save_current_analysis_state(self) -> None:
         index = self._current_analysis_index
         if index is None:
@@ -31786,6 +31870,11 @@ class MainWindow(QMainWindow):
         # The fit panels show this spectrum's own fits (or a blank fit).
         self._restore_fit_panels(row, previous_info=previous_fit_owner)
         self._fit_owner_info = incoming_info
+        # A background fit of this spectrum that finished while another
+        # was selected: shown now, once this selection has settled.
+        if isinstance(incoming_info, dict) and incoming_info.get("pending_job_results"):
+            QTimer.singleShot(0, lambda info=incoming_info: (
+                self._is_selected_info(info) and self.job_manager.deliver_pending(info)))
         if not self._history_suspended:
             self._ensure_history(row)
 

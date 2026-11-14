@@ -36,12 +36,10 @@ same numbers from the same calls (Copy notebook code).
 
 from __future__ import annotations
 
-import contextlib
 import csv
 import io
 import os
 import re
-import warnings
 from typing import Callable
 
 import numpy as np
@@ -55,13 +53,14 @@ from PySide6.QtWidgets import (
 )
 
 from .widgets.typed_spinbox import TypedSpinBox
+from ..core import thread_io
+from . import jobs
 from ..io import serialize
 from ..notebook import bridge
 from ..notebook import pnmr_export, pnmr_fit
 from ..notebook.pnmr_simulator import species_element
 from . import panel_state
 from .pnmr_export_row import SendSitesRow
-from .fit_progress_dialog import FitProgress
 
 #: The generate_spectrum_dict arguments that define the structural model
 #: (the rest -- nuclide, field, broadening, axis -- only shape a simulated
@@ -382,28 +381,38 @@ class PnmrFitPanel(QWidget):
             QMessageBox.information(self, "pNMR fit", "The starting FWHM is above its maximum.")
             return False
         self._check_nucleus(spectrum, model["atom_of_interest"])
-        out = None
-        with FitProgress(self, "pNMR fit") as progress:
-            try:
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter("always")
-                    out = pnmr_fit.fit_predicted_spectrum(
-                        results, **model, **settings, show_plot=False, show_report=False)
-                for w in caught:
-                    if not issubclass(w.category, DeprecationWarning):
-                        self._log(f"  Note: {w.message}")
-            except Exception as exc:  # noqa: BLE001 -- shown, not raised
-                self._log(f"Fit failed: {exc}")
-                QMessageBox.warning(self, "pNMR fit", f"The fit failed:\n{exc}")
-                return False
-        if progress.stopped or out is None:
-            return False
-        self._maximal, self._maximal_results = out, results
-        self.result = self._result_from(out, "maximal", spectrum, index, settings, model)
-        if self.refit_window_spin.value() == 0:
-            self.refit_window_spin.setValue(float(out["tolerance"]))
-        self._after_fit()
-        return True
+
+        # Inputs read above; the fit touches no widget, so it runs in the
+        # background (gui/jobs.py; explicit user request, 2026-11-13). Its
+        # warnings are collected for this thread only (core/thread_io).
+        def compute():
+            with thread_io.collect_warnings() as caught:
+                out = pnmr_fit.fit_predicted_spectrum(
+                    results, **model, **settings, show_plot=False, show_report=False)
+            notes = [str(w.message) for w in caught
+                     if not issubclass(w.category, DeprecationWarning)]
+            return out, notes
+
+        def apply(outcome, _stopped_early):
+            out, notes = outcome
+            for note in notes:
+                self._log(f"  Note: {note}")
+            self._maximal, self._maximal_results = out, results
+            self.result = self._result_from(out, "maximal", spectrum, job.current_index(),
+                                            settings, model)
+            if self.refit_window_spin.value() == 0:
+                self.refit_window_spin.setValue(float(out["tolerance"]))
+            self._after_fit()
+
+        job = jobs.Job("pNMR fit", compute, apply, spectrum_index=index,
+                       fail=lambda exc: self._fit_failed("Fit", exc),
+                       inputs=self.get_state(), current_inputs=self.get_state,
+                       restore_inputs=self.set_state)
+        return jobs.submit(self, job)
+
+    def _fit_failed(self, what: str, exc) -> None:
+        self._log(f"{what} failed: {exc}")
+        QMessageBox.warning(self, "pNMR fit", f"The {what.lower()} failed:\n{exc}")
 
     def _check_nucleus(self, spectrum, atom) -> None:
         nucleus = getattr(spectrum.metadata, "nucleus", None)
@@ -501,7 +510,7 @@ class PnmrFitPanel(QWidget):
         mode = self.merge_mode_combo.currentData()
         printed = io.StringIO()
         try:
-            with contextlib.redirect_stdout(printed):
+            with thread_io.quiet_stdout() as printed:
                 if mode == "auto":
                     merge_tol = (float(out["tolerance"]) if self.merge_tol_auto_check.isChecked()
                                  else self.merge_tol_spin.value())
@@ -525,29 +534,31 @@ class PnmrFitPanel(QWidget):
             self._log("  " + line.strip())
         settings = dict(self.result["settings"]) if self.result else {}
         spectrum, index = self.result["spectrum"], self.result.get("spectrum_index")
-        refit = None
-        with FitProgress(self, "pNMR refit") as progress:
-            try:
-                refit = pnmr_fit.refit_merged_groups(
-                    merged, self._maximal_results, shift_float_window=window,
-                    fit_regions=settings.get("fit_regions"),
-                    snr_threshold=settings.get("snr_threshold", 3.0),
-                    peak_type=settings.get("peak_type", "gaussian"),
-                    fwhm_init=settings.get("fwhm_init", 5.0),
-                    fwhm_bounds=settings.get("fwhm_bounds", (0.1, 100.0)),
-                    show_plot=False, show_report=False)
-            except Exception as exc:  # noqa: BLE001 -- shown, not raised
-                self._log(f"Refit failed: {exc}")
-                QMessageBox.warning(self, "pNMR fit", f"The refit failed:\n{exc}")
-                return False
-        if progress.stopped or refit is None:
-            return False
-        refit["tolerance"] = out["tolerance"]
-        settings.update({"refit_shift_window": window, "simplified": how})
-        self.result = self._result_from(refit, "refit", spectrum, index, settings,
-                                        self.result.get("model") if self.result else {})
-        self._after_fit()
-        return True
+        model = dict(self.result.get("model") or {}) if self.result else {}
+        maximal_results = self._maximal_results
+
+        # The refit touches no widget, so it runs in the background
+        # (gui/jobs.py; explicit user request, 2026-11-13).
+        def compute():
+            return pnmr_fit.refit_merged_groups(
+                merged, maximal_results, shift_float_window=window,
+                fit_regions=settings.get("fit_regions"),
+                snr_threshold=settings.get("snr_threshold", 3.0),
+                peak_type=settings.get("peak_type", "gaussian"),
+                fwhm_init=settings.get("fwhm_init", 5.0),
+                fwhm_bounds=settings.get("fwhm_bounds", (0.1, 100.0)),
+                show_plot=False, show_report=False)
+
+        def apply(refit, _stopped_early):
+            refit["tolerance"] = out["tolerance"]
+            settings.update({"refit_shift_window": window, "simplified": how})
+            self.result = self._result_from(refit, "refit", spectrum, job.current_index(),
+                                            settings, model)
+            self._after_fit()
+
+        job = jobs.Job("pNMR refit", compute, apply, spectrum_index=index,
+                       fail=lambda exc: self._fit_failed("Refit", exc))
+        return jobs.submit(self, job)
 
     # ------------------------------------------------------------------
     # The result, as plain data (saved with the spectrum, kept, restored)

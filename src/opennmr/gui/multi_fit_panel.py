@@ -21,9 +21,7 @@ each parameter's trend on the Fit view, CSV export, and the full report.
 
 from __future__ import annotations
 
-import contextlib
 import copy
-import io
 import os
 import re
 import time
@@ -32,21 +30,22 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMenu,
-    QMessageBox, QProgressDialog, QPushButton, QTableWidget, QTableWidgetItem,
+    QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from .widgets.typed_spinbox import TypedSpinBox
+from ..core import fit_progress, thread_io
 from ..core.acquisition import acquisition_constants
 from ..io import serialize
 from ..notebook import fit_ranges
 from ..notebook import combined_fitting as cfit
 from ..notebook import combined_hamiltonian as ch
 from ..notebook import multi_fitting as mf
-from . import data_directory, long_run, panel_state
+from . import data_directory, jobs, long_run, panel_state
 from .widgets.report_label import ReportLabel
 from .widgets.advice_box import AdviceBox
 from ..notebook import fit_advice
@@ -986,55 +985,58 @@ class MultiFitPanel(QWidget):
                 joint=len(experiments) > 1)
             if estimate is False:
                 return False
-        started = time.perf_counter()
-        dialog = None
-        if show_progress:
-            dialog = QProgressDialog("Fitting…", "Cancel", 0, len(experiments) + 1, self)
-            dialog.setWindowTitle("Multi-spectrum fit")
-            dialog.setWindowModality(Qt.WindowModality.WindowModal)
-            dialog.setMinimumDuration(300)
+        x_label = self.x_label_edit.text().strip() or "x"
 
-        def progress(done, total, message):
-            if dialog is None:
-                return True
-            dialog.setMaximum(total)
-            dialog.setValue(done)
-            dialog.setLabelText(message)
-            QApplication.processEvents()
-            return not dialog.wasCanceled()
+        # Inputs read above; the fit touches no widget, so it runs in the
+        # background (gui/jobs.py; explicit user request, 2026-11-13). Its
+        # steps ("experiment 2 of 4", "joint refinement") are the job's
+        # stage, shown in the progress pop-up (or Ctrl+R); Stop works between
+        # and during them. ``show_progress`` is kept for callers; the
+        # pop-up is the job's own.
+        def progress(_done, _total, message):
+            try:
+                fit_progress.report_stage(message)
+            except fit_progress.FitCancelled:
+                return False
+            return True
 
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self._busy = True
-        try:
-            result = mf.fit_multi(experiments, args["sites"], scopes=args["scopes"],
-                                  amounts=args["amounts"], vary=args["vary"],
-                                  bounds=args["bounds"], seed=args["seed"], progress=progress)
-        except mf.MultiFitCancelled:
-            QApplication.restoreOverrideCursor()
-            return False
-        except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
-            QApplication.restoreOverrideCursor()
-            if dialog is not None:
-                dialog.close()
-            QMessageBox.warning(self, "Multi-spectrum fit", f"The fit did not succeed:\n\n{exc}")
-            return False
-        finally:
+        def compute():
+            started = time.perf_counter()
+            try:
+                result = mf.fit_multi(experiments, args["sites"], scopes=args["scopes"],
+                                      amounts=args["amounts"], vary=args["vary"],
+                                      bounds=args["bounds"], seed=args["seed"],
+                                      progress=progress)
+            except mf.MultiFitCancelled as exc:
+                raise fit_progress.FitCancelled("The fit was stopped.") from exc
+            return result, time.perf_counter() - started
+
+        def apply(outcome, _stopped_early):
+            result, elapsed = outcome
+            timing = long_run.report_line(estimate, elapsed)
+            if timing:
+                result["run_time"] = timing
+            result["keys"] = [e["key"] for e in args["experiments"]]
+            result["x_label"] = x_label
+            self.result = result
+            self._report()
+            if self.show_combo.count():
+                self.show_combo.setCurrentIndex(0)
+                self.show_selected()
+            self._on_fitted()
+
+        def ended():
             self._busy = False
-            if dialog is not None:
-                dialog.close()
-        QApplication.restoreOverrideCursor()
-        timing = long_run.report_line(estimate, time.perf_counter() - started)
-        if timing:
-            result["run_time"] = timing
-        result["keys"] = [e["key"] for e in args["experiments"]]
-        result["x_label"] = self.x_label_edit.text().strip() or "x"
-        self.result = result
-        self._report()
-        if self.show_combo.count():
-            self.show_combo.setCurrentIndex(0)
-            self.show_selected()
-        self._on_fitted()
-        return True
+
+        # Busy until it is over: selecting a spectrum meanwhile must not
+        # restore a saved multi-fit over the inputs it was started with.
+        self._busy = True
+        return jobs.submit(self, jobs.Job(
+            "Multi-spectrum fit", compute, apply,
+            fail=lambda exc: QMessageBox.warning(
+                self, "Multi-spectrum fit", f"The fit did not succeed:\n\n{exc}"),
+            inputs=self.get_state(), current_inputs=self.get_state,
+            restore_inputs=self.set_state, on_end=ended))
 
     # ---- keeping the fits -------------------------------------------------
 
@@ -1406,7 +1408,7 @@ class MultiFitPanel(QWidget):
     def text_report(self) -> str:
         if not self.result:
             return ""
-        with contextlib.redirect_stdout(io.StringIO()):
+        with thread_io.quiet_stdout():
             return mf.print_multi_fit_report(self.result)
 
     def csv_text(self) -> str:

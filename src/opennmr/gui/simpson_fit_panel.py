@@ -21,16 +21,16 @@ from typing import Callable
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCursor, QGuiApplication
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QMessageBox, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..io import serialize
 from ..notebook import simpson_fit
-from . import panel_state
+from . import jobs, panel_state
 
 BASELINES = (("none", "None"), ("offset", "Constant offset"), ("slope", "Offset and slope"))
 COLUMNS = ("Template", "Amplitude", "Shift (ppm)", "Lorentzian lb (Hz)", "Gaussian gb (Hz)",
@@ -202,27 +202,33 @@ class SimpsonFitPanel(QWidget):
         except ValueError as exc:
             QMessageBox.information(self, "SIMPSON fit", str(exc))
             return None
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-        try:
-            experiment = spectrum
-            result = simpson_fit.SIMPSONfit_spectrum(
-                experiment, [s for _n, s in self.templates],
-                names=[n for n, _s in self.templates], **self.fit_kwargs())
-        except Exception as exc:  # noqa: BLE001 -- shown
-            QApplication.restoreOverrideCursor()
-            QMessageBox.warning(self, "SIMPSON fit", str(exc))
-            return None
-        QApplication.restoreOverrideCursor()
-        result["spectrum"] = spectrum
-        result["spectrum_index"] = index
-        self.result = result
-        self._report()
-        self._draw_fit(result)
-        self._show_view()
-        if self._on_fitted:
-            self._on_fitted()
-        self._sync_controls()
-        return result
+        templates = [s for _n, s in self.templates]
+        names = [n for n, _s in self.templates]
+        kwargs = self.fit_kwargs()
+
+        # Inputs read above; the fit touches no widget, so it runs in the
+        # background (gui/jobs.py; explicit user request, 2026-11-13).
+        def apply(result, _stopped_early):
+            result["spectrum"] = spectrum
+            result["spectrum_index"] = job.current_index()
+            self.result = result
+            self._report()
+            self._draw_fit(result)
+            self._show_view()
+            if self._on_fitted:
+                self._on_fitted()
+            self._sync_controls()
+
+        job = jobs.Job("SIMPSON fit",
+                       lambda: simpson_fit.SIMPSONfit_spectrum(spectrum, templates, names=names,
+                                                               **kwargs),
+                       apply, spectrum_index=index,
+                       fail=lambda exc: QMessageBox.warning(self, "SIMPSON fit", str(exc)),
+                       inputs=self.get_state(), current_inputs=self.get_state,
+                       restore_inputs=self.set_state)
+        shown = jobs.submit(self, job)
+        # The result when it was shown at once (jobs run on the GUI thread).
+        return self.result if shown and not jobs.in_background(self) else None
 
     # -- results --------------------------------------------------------
     def _build_results_box(self) -> QGroupBox:

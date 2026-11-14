@@ -29,6 +29,13 @@ os.environ.setdefault(
 # fast machine and flaking on a slow one. tests/test_background_load.py
 # exercises the threaded path deliberately, driving the event loop.
 os.environ.setdefault("OPENNMR_BACKGROUND_LOAD", "0")
+# Folder scans too (gui/folder_scan.py); tests/test_folder_scan.py runs
+# the background path itself.
+os.environ.setdefault("OPENNMR_BACKGROUND_SCAN", "0")
+# And long fits and simulations (gui/jobs.py): run at once, with the modal
+# pop-up, as before; tests/test_background_jobs.py runs them in the
+# background itself.
+os.environ.setdefault("OPENNMR_BACKGROUND_JOBS", "0")
 
 # No update check at start-up under test: a MainWindow is built
 # thousands of times, and none of them should touch the network.
@@ -78,6 +85,8 @@ def _isolate_interface_settings(tmp_path, monkeypatch):
     # Saved copies of slow reads (io.load_cache): never the user's own
     # cache folder, and never one test's copy served to another.
     monkeypatch.setenv("OPENNMR_CACHE_DIR", str(tmp_path / "load_cache"))
+    # Remembered folder scans (io.scan.ScanIndex): never the user's own.
+    monkeypatch.setenv("OPENNMR_SCAN_INDEX_DIR", str(tmp_path / "scan_index"))
     # Autosave and crash recovery (io.recovery): never the user's own
     # recovery folder -- a test window would otherwise take a running
     # app's lock for a crashed session and move its autosave aside.

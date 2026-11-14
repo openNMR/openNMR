@@ -88,6 +88,8 @@ _VENDOR_ROLE = Qt.ItemDataRole.UserRole + 1
 _DESCRIBED_ROLE = Qt.ItemDataRole.UserRole + 2
 #: An experiment's date (seconds since the epoch), read once when first needed.
 _DATE_ROLE = Qt.ItemDataRole.UserRole + 3
+#: Set on a leaf once it has been described (see _describe_children).
+_LEAF_DESCRIBED_ROLE = Qt.ItemDataRole.UserRole + 4
 
 #: The orders the tree can be sorted in: ``{key: menu text}``.
 SORT_MODES = {
@@ -138,11 +140,21 @@ class DataBrowser(QWidget):
     #: The sort order chosen from the right-click menu (a SORT_MODES key),
     #: so the window can remember it.
     sortModeChanged = Signal(str)
+    #: Right-click ▸ Refresh: look through the whole folder again.
+    refreshRequested = Signal()
+    #: Stop on the "Checking for new data…" line.
+    scanCancelRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._root: str | None = None
         self._sort_mode = DEFAULT_SORT
+        # path -> leaf, and relative folder -> folder item, for updating
+        # the tree in place (update_matches) rather than rebuilding it.
+        self._leaves: dict[str, QTreeWidgetItem] = {}
+        self._folders: dict[str, QTreeWidgetItem] = {}
+        self._truncated_at: int | None = None
+        self._scanning = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -212,67 +224,42 @@ class DataBrowser(QWidget):
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
 
+        # While a background scan is looking for new or removed data
+        # (gui/folder_scan.py): what it has done so far, and Stop.
+        self._scan_row = QWidget()
+        scan_layout = QHBoxLayout(self._scan_row)
+        scan_layout.setContentsMargins(0, 0, 0, 0)
+        self._scan_label = QLabel("")
+        self._scan_label.setWordWrap(True)
+        scan_layout.addWidget(self._scan_label, 1)
+        self._scan_stop_button = QPushButton("Stop")
+        self._scan_stop_button.setToolTip(
+            "Stop looking through the folder. What is listed stays; right-click ▸ "
+            "Refresh looks again.")
+        self._scan_stop_button.clicked.connect(self.scanCancelRequested)
+        scan_layout.addWidget(self._scan_stop_button)
+        self._scan_row.setVisible(False)
+        layout.addWidget(self._scan_row)
+
     # -- population ----------------------------------------------------
 
     def set_matches(self, root: str, matches: list[tuple[str, str]],
-                    truncated_at: int | None = None) -> None:
+                    truncated_at: int | None = None, dates: dict | None = None) -> None:
         """Show ``matches`` -- ``(path, vendor)`` pairs, as returned by
         the same scan Open… uses -- grouped by their folders under
         ``root``. ``truncated_at``: the scan stopped at this many, so
-        the folder holds more than are listed -- said in the status line."""
+        the folder holds more than are listed -- said in the status line.
+        ``dates``: ``{path: time}`` already known (from the scan), so
+        sorting by date need not read them again."""
         self._root = root
         self._tree.clear()
+        self._leaves = {}
+        self._folders = {}
         self._root_label.setText(root)
         self._update_open_selected_button()
-
-        if not matches:
-            self._status.setText("No loadable experiments found in this folder.")
-            return
-        self._status.setText(
-            f"{len(matches):,} experiment{'s' if len(matches) != 1 else ''}. "
-            f"Double-click to load, or Ctrl/Shift-click to select several "
-            f"and Open Selected."
-            + (f" The scan stops at {truncated_at:,}: this folder holds more – browse a "
-               f"subfolder to see them." if truncated_at else "")
-        )
-
-        folders: dict[str, QTreeWidgetItem] = {}
-
-        def folder_item(relative: str) -> QTreeWidgetItem | None:
-            """The node for a folder, creating its ancestors as needed.
-            ``None`` means the tree's own invisible root."""
-            if not relative or relative == ".":
-                return None
-            if relative in folders:
-                return folders[relative]
-            parent = folder_item(os.path.dirname(relative))
-            item = QTreeWidgetItem([os.path.basename(relative)])
-            if parent is None:
-                self._tree.addTopLevelItem(item)
-            else:
-                parent.addChild(item)
-            folders[relative] = item
-            return item
-
-        for path, vendor in matches:
-            relative = os.path.relpath(path, root)
-            parent = folder_item(os.path.dirname(relative))
-            leaf = QTreeWidgetItem([os.path.basename(path)])
-            leaf.setData(0, _PATH_ROLE, path)
-            leaf.setData(0, _VENDOR_ROLE, vendor)
-            leaf.setToolTip(0, path)
-            # Say up front what opening this will cost, rather than
-            # letting the first click block on a silent download.
-            pending = cloud.pending_download_bytes(path)
-            if pending:
-                leaf.setToolTip(
-                    0, f"{path}\n\nNot downloaded yet – opening this will "
-                       f"fetch {cloud.format_bytes(pending)} from the cloud.",
-                )
-            if parent is None:
-                self._tree.addTopLevelItem(leaf)
-            else:
-                parent.addChild(leaf)
+        self._add_leaves(matches, dates)
+        self._truncated_at = truncated_at
+        self._update_count_status()
 
         # The scan already lists by name, A to Z; any other order is
         # applied here, before anything is described or shown.
@@ -282,6 +269,122 @@ class DataBrowser(QWidget):
         # Describe whatever is visible without expanding anything --
         # top-level leaves are on screen immediately.
         self._describe_children(self._tree.invisibleRootItem())
+
+    def update_matches(self, matches: list[tuple[str, str]], truncated_at: int | None = None,
+                       dates: dict | None = None, remove_missing: bool = True) -> tuple[int, int]:
+        """Bring the tree in line with ``matches`` without rebuilding it:
+        new experiments are added, and (``remove_missing``) ones no longer
+        found are taken out. What is expanded, selected and scrolled to
+        stays so. Returns ``(added, removed)``."""
+        wanted = {path for path, _vendor in matches}
+        removed = 0
+        if remove_missing:
+            for path in [p for p in self._leaves if p not in wanted]:
+                self._remove_leaf(path)
+                removed += 1
+        new = [(path, vendor) for path, vendor in matches if path not in self._leaves]
+        added = self._add_leaves(new, dates)
+        if remove_missing:
+            self._truncated_at = truncated_at
+        if added or removed:
+            if added:
+                self._sort_tree()        # new ones were added at the end
+            self._describe_children(self._tree.invisibleRootItem())
+            for path, _vendor in new:
+                leaf = self._leaves.get(path)
+                parent = leaf.parent() if leaf is not None else None
+                if parent is not None and parent.isExpanded():
+                    self._describe_leaf(leaf)
+        self._update_count_status()
+        self._update_open_selected_button()
+        return added, removed
+
+    def matches(self) -> list[tuple[str, str]]:
+        """Every experiment listed, as ``(path, vendor)``."""
+        return [(path, leaf.data(0, _VENDOR_ROLE)) for path, leaf in self._leaves.items()]
+
+    def root(self) -> str | None:
+        return self._root
+
+    def set_scan_status(self, text: str | None) -> None:
+        """Show (or, with None, hide) the background scan's line."""
+        self._scanning = bool(text)
+        self._scan_row.setVisible(bool(text))
+        self._scan_label.setText(text or "")
+        self._update_count_status()
+
+    def _update_count_status(self) -> None:
+        count = len(self._leaves)
+        if not count:
+            self._status.setText(
+                "" if self._scanning else "No loadable experiments found in this folder.")
+            return
+        truncated_at = self._truncated_at
+        self._status.setText(
+            f"{count:,} experiment{'s' if count != 1 else ''}. "
+            f"Double-click to load, or Ctrl/Shift-click to select several "
+            f"and Open Selected."
+            + (f" The scan stops at {truncated_at:,}: this folder holds more – browse a "
+               f"subfolder to see them." if truncated_at else "")
+        )
+
+    def _folder_item(self, relative: str) -> QTreeWidgetItem | None:
+        """The node for a folder, creating its ancestors as needed.
+        ``None`` means the tree's own invisible root."""
+        if not relative or relative == ".":
+            return None
+        if relative in self._folders:
+            return self._folders[relative]
+        parent = self._folder_item(os.path.dirname(relative))
+        item = QTreeWidgetItem([os.path.basename(relative)])
+        if parent is None:
+            self._tree.addTopLevelItem(item)
+        else:
+            parent.addChild(item)
+        self._folders[relative] = item
+        return item
+
+    def _add_leaves(self, matches, dates=None) -> int:
+        root = self._root or ""
+        added = 0
+        for path, vendor in matches:
+            if path in self._leaves:
+                continue
+            relative = os.path.relpath(path, root)
+            parent = self._folder_item(os.path.dirname(relative))
+            leaf = QTreeWidgetItem([os.path.basename(path)])
+            leaf.setData(0, _PATH_ROLE, path)
+            leaf.setData(0, _VENDOR_ROLE, vendor)
+            leaf.setToolTip(0, path)
+            if dates and path in dates:
+                leaf.setData(0, _DATE_ROLE, float(dates[path]))
+            if parent is None:
+                self._tree.addTopLevelItem(leaf)
+            else:
+                parent.addChild(leaf)
+            self._leaves[path] = leaf
+            added += 1
+        return added
+
+    def _remove_leaf(self, path: str) -> None:
+        leaf = self._leaves.pop(path, None)
+        if leaf is None:
+            return
+        parent = leaf.parent()
+        while True:
+            if parent is None:
+                index = self._tree.indexOfTopLevelItem(leaf)
+                if index >= 0:
+                    self._tree.takeTopLevelItem(index)
+                return
+            parent.removeChild(leaf)
+            if parent.childCount():
+                return
+            # An emptied folder goes too.
+            for key, item in list(self._folders.items()):
+                if item is parent:
+                    del self._folders[key]
+            leaf, parent = parent, parent.parent()
 
     # -- sorting -------------------------------------------------------
 
@@ -392,13 +495,27 @@ class DataBrowser(QWidget):
             parent.setData(0, _DESCRIBED_ROLE, True)
 
         for index in range(parent.childCount()):
-            child = parent.child(index)
-            path = child.data(0, _PATH_ROLE)
-            if not path:
-                continue
-            summary = self._describe(path, child.data(0, _VENDOR_ROLE))
-            if summary:
-                child.setText(0, f"{os.path.basename(path)}   {summary}")
+            self._describe_leaf(parent.child(index))
+
+    def _describe_leaf(self, child: QTreeWidgetItem) -> None:
+        """Describe one leaf, once; and say up front what opening a
+        cloud-only one will cost, rather than letting the first click
+        block on a silent download. (Done here, for what is on screen,
+        not for every experiment as the list is built: that was a dozen
+        file checks per experiment before the folder could be shown.)"""
+        path = child.data(0, _PATH_ROLE)
+        if not path or child.data(0, _LEAF_DESCRIBED_ROLE):
+            return
+        child.setData(0, _LEAF_DESCRIBED_ROLE, True)
+        pending = cloud.pending_download_bytes(path)
+        if pending:
+            child.setToolTip(
+                0, f"{path}\n\nNot downloaded yet – opening this will "
+                   f"fetch {cloud.format_bytes(pending)} from the cloud.",
+            )
+        summary = self._describe(path, child.data(0, _VENDOR_ROLE))
+        if summary:
+            child.setText(0, f"{os.path.basename(path)}   {summary}")
 
     @staticmethod
     def _describe(path: str, vendor: str) -> str:
@@ -491,6 +608,12 @@ class DataBrowser(QWidget):
                 action.setChecked(mode == self._sort_mode)
                 group.addAction(action)
                 chosen[action] = (lambda m=mode: self.set_sort_mode(m, emit=True))
+        if self._root:
+            if chosen:
+                menu.addSeparator()
+            refresh = menu.addAction("Refresh")
+            refresh.setToolTip("Look through the whole folder again for new or removed data.")
+            chosen[refresh] = self.refreshRequested.emit
         if not chosen:
             return
         picked = menu.exec(self._tree.viewport().mapToGlobal(pos))

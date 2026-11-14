@@ -349,6 +349,9 @@ from ..core.fit_progress import (
 from ..core.fit_progress import (
     FIT_METHODS, fitting_method, set_fit_method, fit_method, last_fit_method,
 )
+# Find every experiment under a folder (2026-11-13): the scan the Open
+# panel uses -- remembered between calls when given an index.
+from ..io.scan import ScanIndex, scan_for_spectra as find_experiments
 # Pulse calculator (2026-11-13): pulse lengths, powers (W, dB, scaled),
 # nutation frequencies and bandwidths; Simulate ▸ Pulse calculator.
 from . import pulse_calculator
@@ -594,7 +597,7 @@ __all__ = [
     # fitting limits and sideband guidance
     "DEFAULT_MAX_ITERATIONS", "FitNotConverged", "iteration_limit", "max_iterations",
     "set_max_iterations", "FIT_METHODS", "fitting_method", "set_fit_method", "fit_method",
-    "last_fit_method", "pulse_calculator", "calculate_pulse", "excitation_profile",
+    "last_fit_method", "find_experiments", "ScanIndex", "pulse_calculator", "calculate_pulse", "excitation_profile",
     "nutation_frequency", "pulse_bandwidth", "pulse_length", "GOOD_SIDEBANDS", "MIN_SIDEBANDS", "SIDEBAND_GUIDANCE",
     "csa_span_ppm", "sideband_count", "sideband_note",
     # fitted values as readable JSON
