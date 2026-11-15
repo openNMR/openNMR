@@ -6549,9 +6549,21 @@ class MainWindow(QMainWindow):
         self.output_limits_note_label.setVisible(bool(note))
 
     def _on_output_style_changed(self, *_args) -> None:
+        """A Plot Style control was edited: push *what changed*, not every
+        control. The panel's boxes can lag a canvas (a colour scale or
+        contour colour set from the plot's own menu, another plot's
+        values), and re-sending all of them on a linewidth edit put the
+        stale ones back -- the colours "returned to the old colourmap"
+        (user report 2026-11-15). A setting stays as set until it is
+        changed or reset."""
         kwargs = self._current_output_style_kwargs()
-        for canvas in self._style_target_canvases():
-            canvas.set_style(**kwargs)
+        last = getattr(self, "_output_style_synced", None)
+        changed = kwargs if last is None else {
+            key: value for key, value in kwargs.items() if key not in last or last[key] != value}
+        self._output_style_synced = dict(kwargs)
+        if changed:
+            for canvas in self._style_target_canvases():
+                canvas.set_style(**changed)
         self._refresh_style_scope_label()
 
     def _set_custom_contour_colour(self, colour: str, *, signals: bool = True) -> None:
@@ -6827,6 +6839,9 @@ class MainWindow(QMainWindow):
         self._refresh_trace_color_button()
         self._refresh_slice_colour_rows()
         self._refresh_line_rows()
+        # What the boxes now show, so the next edit pushes only its own
+        # change (see _on_output_style_changed).
+        self._output_style_synced = self._current_output_style_kwargs()
         self._sync_view_limit_controls(canvas)
         self._refresh_style_scope_label()
 
@@ -8649,6 +8664,12 @@ class MainWindow(QMainWindow):
     def _on_list_selection_changed(self) -> None:
         rows = self._selected_rows()
         if len(rows) > 1:
+            # A Compare list left with its signals blocked by an interrupted
+            # rebuild would never plot again: nothing legitimately holds it
+            # blocked once control is back here.
+            if self.compare_list.signalsBlocked() and not getattr(
+                    self, "_compare_list_rebuilding", False):
+                self.compare_list.blockSignals(False)
             self._populate_compare_list(rows)
             self._refresh_compare_view()
         else:
@@ -8709,6 +8730,11 @@ class MainWindow(QMainWindow):
         # shorter length.
         n = len(self.session)
         rows = [r for r in rows if 0 <= r < n]
+        # Entries are session rows: those of a set that has gone (spectra
+        # removed or replaced) must not carry over to whatever now sits at
+        # the same row, or name a row that no longer exists.
+        self._compare_pinned_entries = [e for e in self._compare_pinned_entries if 0 <= e[0] < n]
+        self._compare_removed_entries = {e for e in self._compare_removed_entries if 0 <= e[0] < n}
         # A removed whole spectrum stays out only while it is still
         # selected in Open experiments: deselecting it forgets the
         # removal, so selecting it again brings it back.
@@ -8759,31 +8785,39 @@ class MainWindow(QMainWindow):
             new_order = ([e for e in previous_order if e in entries_set]
                          + [e for e in entries if e not in previous_order])
 
+        # Signals back on whatever happens in between: left blocked (an
+        # error while labelling an entry went to stderr, unseen) the Compare
+        # list stopped answering ticks and selections, and Compare could not
+        # be plotted until a state was reopened (user report 2026-11-15).
+        self._compare_list_rebuilding = True
         self.compare_list.blockSignals(True)
-        self.compare_list.clear()
-        for entry in new_order:
-            item = QListWidgetItem(self._compare_entry_label(entry))
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(previous_checked.get(entry, Qt.CheckState.Checked))
-            item.setData(Qt.ItemDataRole.UserRole, entry)
-            self.compare_list.addItem(item)
-        # Keep whatever the user had current across a rebuild (so Move
-        # Up/Down and check-state toggles don't lose their place), but
-        # never *pre*-select anything on a fresh populate. Explicit user
-        # request: "in compare, none of the spectra should be
-        # pre-selected like the last one is now."
-        #
-        # This narrows, rather than reverses, the earlier feedback that
-        # it was "no longer obvious which spectrum is selected" here:
-        # that was about the highlight being invisible once a row *had*
-        # been chosen, which still works. What is gone is the automatic
-        # choice made on the user's behalf before they have clicked
-        # anything.
-        if new_order and previous_current_entry in new_order:
-            self.compare_list.setCurrentRow(new_order.index(previous_current_entry))
-        else:
-            self.compare_list.setCurrentRow(-1)
-        self.compare_list.blockSignals(False)
+        try:
+            self.compare_list.clear()
+            for entry in new_order:
+                item = QListWidgetItem(self._compare_entry_label(entry))
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(previous_checked.get(entry, Qt.CheckState.Checked))
+                item.setData(Qt.ItemDataRole.UserRole, entry)
+                self.compare_list.addItem(item)
+            # Keep whatever the user had current across a rebuild (so Move
+            # Up/Down and check-state toggles don't lose their place), but
+            # never *pre*-select anything on a fresh populate. Explicit user
+            # request: "in compare, none of the spectra should be
+            # pre-selected like the last one is now."
+            #
+            # This narrows, rather than reverses, the earlier feedback that
+            # it was "no longer obvious which spectrum is selected" here:
+            # that was about the highlight being invisible once a row *had*
+            # been chosen, which still works. What is gone is the automatic
+            # choice made on the user's behalf before they have clicked
+            # anything.
+            if new_order and previous_current_entry in new_order:
+                self.compare_list.setCurrentRow(new_order.index(previous_current_entry))
+            else:
+                self.compare_list.setCurrentRow(-1)
+        finally:
+            self.compare_list.blockSignals(False)
+            self._compare_list_rebuilding = False
         self._update_compare_tab_visibility()
 
     # -- external projections (a 1D dropped onto a 2D contour) ---------
@@ -31918,6 +31952,11 @@ class MainWindow(QMainWindow):
         # which must already reflect *this* spectrum, not whatever was
         # last selected.
         self._refresh_selection_display(row)
+        # Typed axis limits belong to the spectrum they were set on: a
+        # different spectrum opens on its automatic range (user report
+        # 2026-11-15). Re-selecting the same one keeps them.
+        if incoming_info is not getattr(self, "_current_analysis_info", None):
+            self.canvas.forget_view_limits()
         self._draw_selected_spectrum(spectrum, row=row)
         self._current_analysis_index = row
         # Which spectrum the analysis panel now belongs to, by its session

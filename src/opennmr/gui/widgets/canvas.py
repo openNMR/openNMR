@@ -4522,6 +4522,20 @@ class MplCanvas(QWidget):
         """Back to the full view on both axes."""
         self.set_view_limits(x=None, y=None)
 
+    def forget_view_limits(self) -> bool:
+        """Drop typed limits without redrawing: for a different spectrum about
+        to be drawn, which must open on its own automatic range (typed limits
+        belong to the spectrum they were set on). Returns whether there were
+        any."""
+        had = self._view_x is not None or self._view_y is not None
+        self._view_x = None
+        self._view_y = None
+        self._natural_limits = None
+        self._view_limits_note = ""
+        if had:
+            self._home_limits = None
+        return had
+
     def _view_limit_axes(self) -> list:
         """The Axes a typed range goes on: the contour's main Axes (its
         projection strips share them), every row of a Compare stack, or the one

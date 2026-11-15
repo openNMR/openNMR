@@ -35,7 +35,7 @@ from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMenu, QMessageBox, QPushButton,
-    QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QSizePolicy, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core import thread_io
@@ -645,6 +645,14 @@ class PageSizedStack(QStackedWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.currentChanged.connect(lambda _index: self.updateGeometry())
+        # Never taller than the page asks for. The size hint alone was not
+        # enough (the gap came back, user report 2026-11-15): a widget with a
+        # layout counts as "expanding" to its parent while its policy can
+        # grow and a table inside it can, so the parent handed it every
+        # spare pixel -- which the spin editor's trailing stretch then put
+        # between its info line and the Linewidth row. A policy that cannot
+        # grow vertically leaves the spare height below the page.
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
     def sizeHint(self):  # noqa: N802 -- Qt override
         page = self.currentWidget()

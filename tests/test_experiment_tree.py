@@ -189,6 +189,37 @@ def test_a_fit_appears_under_its_spectrum_and_opening_it_replots_it(qapp, quiet)
     window.close()
 
 
+def test_one_click_on_a_fit_opens_it_without_a_double_click(qapp, quiet):  # noqa: F811
+    """User report 2026-11-15: a fit in a reopened state needed a click and
+    then a double-click to appear; one click shows it (a click on a
+    spectrum, or a Ctrl-click, only selects)."""
+    window = MainWindow()
+    tree = window.experiment_tree
+    index = _quad_spectrum(window, "data")
+    panel = _fit_quad(window)
+    window._refresh_experiment_tree()
+    other = _quad_spectrum(window, "other")
+    window._refresh_experiment_tree()
+    drawn = []
+    panel._draw_fit = lambda result, **k: drawn.append(result)
+    fit_item = tree.find(f"{window.session.entry_id(index)}:fit:quadrupolar")
+    tree.setCurrentItem(fit_item)                       # the press: selects
+    tree.itemClicked.emit(fit_item, 0)                  # the release: one click
+    assert drawn and drawn[-1] is panel.result
+    assert window._selected_rows() == [index] and other != index
+    # Clicking the same, already selected fit again shows it again.
+    drawn.clear()
+    tree._last_activation = None                        # (a later click, not the same gesture)
+    tree.itemClicked.emit(tree.find(f"{window.session.entry_id(index)}:fit:quadrupolar"), 0)
+    assert drawn
+    # A click on a spectrum row does not open anything.
+    drawn.clear()
+    tree.itemClicked.emit(tree.item_for_row(index), 0)
+    assert not drawn
+    assert not quiet, quiet
+    window.close()
+
+
 def test_kept_fits_are_listed_and_shown(qapp, quiet, monkeypatch):  # noqa: F811
     window = MainWindow()
     tree = window.experiment_tree

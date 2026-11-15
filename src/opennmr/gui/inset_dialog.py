@@ -257,8 +257,42 @@ class InsetPanel(QWidget):
         self.frame_width = QDoubleSpinBox()
         self.frame_width.setRange(0.1, 5.0)
         self.frame_width.setSingleStep(0.1)
-        axes.addRow("Frame colour / width:", self._pair(self.frame_colour, self.frame_width))
+        self.frame_width.setToolTip("The thickness of the inset's axis lines (its frame), in points.")
+        axes.addRow("Axis / frame colour, width:", self._pair(self.frame_colour, self.frame_width))
         editor_layout.addWidget(axes_box)
+
+        # -- the data lines and the ticks (explicit user request, 2026-11-15)
+        lines_box = QGroupBox("Lines and ticks")
+        lines = QFormLayout(lines_box)
+        self.data_width_spin = QDoubleSpinBox()
+        self.data_width_spin.setRange(0.0, 10.0)
+        self.data_width_spin.setDecimals(2)
+        self.data_width_spin.setSingleStep(0.1)
+        self.data_width_spin.setSuffix(" pt")
+        self.data_width_spin.setSpecialValueText("Same as plot")
+        self.data_width_spin.setToolTip(
+            "Width of the magnified spectrum / curve / contour lines. \"Same as plot\" "
+            "copies the plot's line width as it is when the inset is drawn.")
+        lines.addRow("Data line width:", self.data_width_spin)
+        self.tick_length_spin = QDoubleSpinBox()
+        self.tick_length_spin.setRange(0.0, 20.0)
+        self.tick_length_spin.setDecimals(1)
+        self.tick_length_spin.setSingleStep(0.5)
+        self.tick_length_spin.setSuffix(" pt")
+        self.tick_length_spin.setSpecialValueText("Default (3 pt)")
+        lines.addRow("Tick length:", self.tick_length_spin)
+        self.tick_width_spin = QDoubleSpinBox()
+        self.tick_width_spin.setRange(0.0, 5.0)
+        self.tick_width_spin.setDecimals(2)
+        self.tick_width_spin.setSingleStep(0.1)
+        self.tick_width_spin.setSuffix(" pt")
+        self.tick_width_spin.setSpecialValueText("Default")
+        lines.addRow("Tick width:", self.tick_width_spin)
+        self.tick_direction_combo = QComboBox()
+        for text, value in (("In", "in"), ("Out", "out"), ("In and out", "inout")):
+            self.tick_direction_combo.addItem(text, value)
+        lines.addRow("Tick direction:", self.tick_direction_combo)
+        editor_layout.addWidget(lines_box)
 
         # -- text
         text_box = QGroupBox("Typeface")
@@ -304,7 +338,8 @@ class InsetPanel(QWidget):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(300)
         self._debounce.timeout.connect(self.apply)
-        for widget in (self.corner_combo, self.connector_style_combo, self.host_combo):
+        for widget in (self.corner_combo, self.connector_style_combo, self.host_combo,
+                       self.tick_direction_combo):
             widget.currentIndexChanged.connect(self._on_edit)
         for check in (self.auto_y_check, self.show_axes_check, self.frame_check, self.bold_check,
                       self.italic_check, self.connectors_check, self.same_font_check,
@@ -315,7 +350,8 @@ class InsetPanel(QWidget):
         self.font_combo.currentFontChanged.connect(self._on_edit)
         for widget in (self.x_from, self.x_to, self.y_from, self.y_to, self.floor_spin,
                        self.pos_x_spin, self.pos_y_spin, self.width_spin, self.height_spin,
-                       self.frame_width, self.font_size_spin, self.connector_width):
+                       self.frame_width, self.font_size_spin, self.connector_width,
+                       self.data_width_spin, self.tick_length_spin, self.tick_width_spin):
             widget.valueChanged.connect(self._on_edit)
         self.set_canvas(canvas)
 
@@ -550,6 +586,11 @@ class InsetPanel(QWidget):
             self.frame_check.setChecked(bool(spec["frame"]))
             self.frame_colour.set_colour(str(spec["frame_colour"]))
             self.frame_width.setValue(float(spec["frame_width"]))
+            self.data_width_spin.setValue(float(spec["linewidth"] or 0.0))
+            self.tick_length_spin.setValue(float(spec["tick_length"] or 0.0))
+            self.tick_width_spin.setValue(float(spec["tick_width"] or 0.0))
+            self.tick_direction_combo.setCurrentIndex(
+                max(self.tick_direction_combo.findData(spec["tick_direction"]), 0))
             self.same_font_check.setChecked(not spec["family"])
             if spec["family"]:
                 self.font_combo.setCurrentFont(QFont(spec["family"]))
@@ -578,6 +619,8 @@ class InsetPanel(QWidget):
                        self.bold_check, self.italic_check):
             widget.setEnabled(axes_on)
         self.font_combo.setEnabled(axes_on and not self.same_font_check.isChecked())
+        for widget in (self.tick_length_spin, self.tick_width_spin, self.tick_direction_combo):
+            widget.setEnabled(self.show_axes_check.isChecked())
         lines_on = self.connectors_check.isChecked()
         for widget in (self.connector_colour, self.connector_width, self.connector_style_combo):
             widget.setEnabled(lines_on)
@@ -604,6 +647,10 @@ class InsetPanel(QWidget):
         spec["frame"] = self.frame_check.isChecked()
         spec["frame_colour"] = self.frame_colour.colour()
         spec["frame_width"] = self.frame_width.value()
+        spec["linewidth"] = self.data_width_spin.value() or None
+        spec["tick_length"] = self.tick_length_spin.value() or None
+        spec["tick_width"] = self.tick_width_spin.value() or None
+        spec["tick_direction"] = self.tick_direction_combo.currentData()
         spec["family"] = (None if self.same_font_check.isChecked()
                           else self.font_combo.currentFont().family())
         spec["fontsize"] = self.font_size_spin.value() or None

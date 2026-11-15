@@ -49,6 +49,9 @@ class ExperimentTree(QTreeWidget):
         self.itemSelectionChanged.connect(self._on_selection)
         self.itemActivated.connect(self._on_activated)
         self.itemDoubleClicked.connect(self._on_activated)
+        # A fit is opened by one click (2026-11-15: it took a click and then
+        # a double-click). A spectrum row is only selected by a click.
+        self.itemClicked.connect(self._on_clicked)
         self.itemCollapsed.connect(lambda item: self._collapsed.add(self.node(item)["key"]))
         self.itemExpanded.connect(lambda item: self._collapsed.discard(self.node(item)["key"]))
         self._collapsed: set[str] = set()
@@ -166,6 +169,23 @@ class ExperimentTree(QTreeWidget):
         if row is None or row not in rows:
             row = rows[0] if rows else -1
         self.rowsChosen.emit(rows, int(row))
+
+    #: Node kinds a single click opens (replots) rather than only selects.
+    _OPEN_ON_CLICK_KINDS = ("fit", "profile_fit")
+
+    def _on_clicked(self, item, _column=0) -> None:
+        """One plain click on a fit shows it (fit and components). Ctrl/Shift
+        clicks only select, and a click on a spectrum row only selects it."""
+        if item is None or self._syncing:
+            return
+        if QApplication.keyboardModifiers() != Qt.KeyboardModifier.NoModifier:
+            return
+        node = self.node(item)
+        if node.get("action") is None and node.get("kind") not in self._OPEN_ON_CLICK_KINDS:
+            return
+        if len(self.selectedItems()) != 1:
+            return
+        self._on_activated(item)
 
     def _on_activated(self, item, _column=0) -> None:
         if item is None:

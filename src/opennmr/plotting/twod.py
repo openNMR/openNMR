@@ -594,10 +594,11 @@ def draw_insets(parent_ax, spectra, insets, *, colours=None, factor=0.07, clevel
                 data, x, y = downsample_2d(data, x, y, max_points_x=max_x, max_points_y=max_y)
             draw_positive_contours(ax, x, y, data, levels,
                                    colour_spectra if len(spectra) == 1 else None,
-                                   default_colour=colour, linewidths=contour_linewidth)
+                                   default_colour=colour,
+                                   linewidths=spec.get("linewidth") or contour_linewidth)
             if negative is not None and len(spectra) == 1:
                 ax.contour(x, y, data, levels=sorted(negative), colors=NEGATIVE_CONTOUR_COLOUR,
-                           linewidths=contour_linewidth)
+                           linewidths=spec.get("linewidth") or contour_linewidth)
         ax.set_xlim(max(spec["xlims"]), min(spec["xlims"]))       # high ppm on the left
         lo, hi = sorted(spec["ylims"])
         if ref.is_pseudo_2d:

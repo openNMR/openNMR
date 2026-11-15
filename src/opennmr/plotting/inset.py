@@ -71,7 +71,10 @@ INSET_DEFAULTS: dict = {
     "fontsize": None,           # tick-label size in points; None = 3/4 of the plot's
     "bold": False,
     "italic": False,
-    "tick_direction": "in",
+    "tick_direction": "in",     # "in", "out" or "inout"
+    "tick_length": None,        # points; None = 3
+    "tick_width": None,         # points; None = matplotlib's own
+    "linewidth": None,          # width of the magnified data lines, points; None = the plot's
     "background": None,         # fill; None = the parent's
     "auto_ylim": False,         # fit the vertical range to the data in xlim
     "factor": None,             # 2D contour insets only: lowest contour, fraction of the maximum
@@ -96,6 +99,12 @@ def normalise(spec: dict | None = None, **overrides) -> dict:
             raise ValueError(
                 f"Unknown inset option(s) {sorted(unknown)}; allowed: {sorted(INSET_DEFAULTS)}")
         merged.update(source)
+    if merged["tick_direction"] not in ("in", "out", "inout"):
+        raise ValueError(
+            f"tick_direction must be 'in', 'out' or 'inout', not {merged['tick_direction']!r}")
+    for key in ("tick_length", "tick_width", "linewidth"):
+        if merged[key] is not None and float(merged[key]) < 0:
+            raise ValueError(f"inset {key} cannot be negative")
     if merged["corner"] not in CORNERS and merged["corner"] != "custom":
         raise ValueError(
             f"corner must be one of {list(CORNERS) + ['custom']}, not {merged['corner']!r}")
@@ -194,6 +203,29 @@ def _visible_y_range(parent_ax, xlim) -> tuple[float, float] | None:
     return low - pad, high + pad
 
 
+def tick_kwargs(spec: dict) -> dict:
+    """The ``tick_params`` keywords an inset spec's tick settings give:
+    direction, length (3 pt unless set) and, when set, width."""
+    kwargs = {"direction": spec.get("tick_direction") or "in",
+              "length": float(spec["tick_length"]) if spec.get("tick_length") is not None else 3.0}
+    if spec.get("tick_width") is not None:
+        kwargs["width"] = float(spec["tick_width"])
+    return kwargs
+
+
+def set_data_linewidth(inset_ax, width) -> int:
+    """Draw the lines copied into ``inset_ax`` at ``width`` points (``None``
+    leaves them at the width they were copied with, the plot's). Returns how
+    many lines were set."""
+    if width is None:
+        return 0
+    count = 0
+    for line in inset_ax.get_lines():
+        line.set_linewidth(float(width))
+        count += 1
+    return count
+
+
 def _text_size(parent_ax, spec: dict) -> float:
     """The inset's tick-label size: the spec's, else 3/4 of the plot's."""
     if spec.get("fontsize"):
@@ -265,8 +297,7 @@ def _style_axes(ax, parent_ax, spec: dict) -> None:
         ax.set_yticks([])
         _apply_labels(ax, parent_ax, spec)
         return
-    ax.tick_params(labelsize=_text_size(parent_ax, spec), direction=spec["tick_direction"],
-                   length=3, pad=2)
+    ax.tick_params(labelsize=_text_size(parent_ax, spec), pad=2, **tick_kwargs(spec))
     # Tick labels on the side facing into the plot, so an inset in a
     # corner does not print over the parent's own labels.
     x0, y0, w, h = inset_bounds(spec)
@@ -351,6 +382,7 @@ def add_inset(parent_ax, xlim=None, ylim=None, spec: dict | None = None, host_ax
     if not copy_artists(parent_ax, inset):
         inset.remove()
         raise ValueError("There is nothing on this plot to magnify.")
+    set_data_linewidth(inset, spec["linewidth"])
     inset.set_xlim(*xlim)
     if ylim is None or spec["auto_ylim"]:
         fitted = _visible_y_range(parent_ax, xlim)
@@ -444,6 +476,7 @@ def restyle(ax, spec: dict, parent_ax=None, bounds=None) -> None:
         ax.set_yticks([])
         _apply_labels(ax, parent_ax, spec, bounds)
         return
+    ax.tick_params(**tick_kwargs(spec))
     if spec.get("fontsize"):
         ax.tick_params(labelsize=float(spec["fontsize"]))
     weight = "bold" if spec.get("bold") else "normal"
