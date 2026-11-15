@@ -31,6 +31,45 @@ def test_the_model_stack_cannot_grow_taller_than_its_page(qapp):  # noqa: F811
     window.close()
 
 
+def test_the_page_sits_right_under_the_model_switch_in_every_model(qapp):  # noqa: F811
+    """The stack used to take the height-for-width of its tallest page (the mixed
+    model's wrapped note) and was centred in that: a ~270 px gap above the tables."""
+    window = MainWindow()
+    window.side_tabs.setCurrentIndex(
+        [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())].index("Simulate"))
+    window._solution_sim_section.setExpanded(True)
+    window.resize(1400, 1000)
+    window.show()
+    sim = window.jcoupling_sim_panel
+    for key in ("first_order", "mixed", "spin_system"):
+        sim.model_combo.setCurrentIndex(sim.model_combo.findData(key))
+        qapp.processEvents()
+        qapp.processEvents()
+        gap = sim.model_stack.geometry().y() - sim.model_combo.geometry().bottom()
+        assert 0 <= gap < 30, (key, gap)
+        assert sim.model_stack.currentIndex() == sim.model_combo.currentIndex()
+    window.close()
+
+
+def test_the_stack_shows_one_page_and_keeps_the_stack_calls(qapp):  # noqa: F811
+    from opennmr.gui.jcoupling_panels import PageSizedStack
+    from PySide6.QtWidgets import QLabel
+    stack = PageSizedStack()
+    pages = [QLabel("a"), QLabel("b"), QLabel("c")]
+    for page in pages:
+        stack.addWidget(page)
+    seen = []
+    stack.currentChanged.connect(seen.append)
+    stack.show()
+    assert stack.count() == 3 and stack.currentIndex() == 0 and stack.currentWidget() is pages[0]
+    assert [p.isVisibleTo(stack) for p in pages] == [True, False, False]
+    stack.setCurrentIndex(2)
+    assert [p.isVisibleTo(stack) for p in pages] == [False, False, True]
+    assert seen == [2] and stack.indexOf(pages[2]) == 2 and stack.widget(1) is pages[1]
+    stack.setCurrentIndex(9)                       # out of range: ignored
+    assert stack.currentIndex() == 2
+
+
 def test_no_gap_between_the_spin_tables_info_and_the_linewidth_row(qapp):  # noqa: F811
     window = MainWindow()
     sim = window.jcoupling_sim_panel

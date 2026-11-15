@@ -36,10 +36,13 @@ def test_the_model_stack_is_as_tall_as_the_page_on_show(qapp):  # noqa: F811
             page = stack.currentWidget()
             assert stack.sizeHint().height() == page.sizeHint().height()
             assert stack.minimumSizeHint().height() == page.minimumSizeHint().height()
+            # Only the page on show counts: the others are hidden, so a
+            # wrapped label on the tall mixed page no longer sets the
+            # stack's height-for-width (2026-11-15: the stack was centred in
+            # a cell that tall).
             assert stack.hasHeightForWidth() == page.hasHeightForWidth()
-            expected = (page.heightForWidth(300) if page.hasHeightForWidth()
-                        else page.sizeHint().height())
-            assert stack.heightForWidth(300) == expected
+            assert all(not other.isVisibleTo(stack) for other in
+                       (stack.widget(i) for i in range(stack.count())) if other is not page)
             heights.append(stack.sizeHint().height())
         # The pages really do differ: the tallest no longer sets them all.
         assert len(set(heights)) > 1

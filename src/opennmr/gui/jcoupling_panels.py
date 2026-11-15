@@ -630,48 +630,62 @@ class JCouplingSitesEditor(QWidget):
                 self.set_coupling_constraint(r, index.row(), bounds=b)
 
 
-class PageSizedStack(QStackedWidget):
-    """A stack as tall as the page on show, not its tallest page.
+class PageSizedStack(QWidget):
+    """Pages of which only the one on show takes any room.
 
-    A ``QStackedWidget`` takes the size of its largest page, so a short
-    page (the spin-system editor beside the taller mixed-model page) was
-    stretched, and its layout spread the spare height as gaps between its
-    tables (user report, 2026-11-14: "a huge gap between different tables"
-    in the solution NMR simulation). Telling the hidden pages to ask for
-    no height is not enough: Qt's stacked layout still counts every page
-    when one has wrapped text (height-for-width). So the size asked for
-    here is the current page's alone."""
+    A ``QStackedWidget`` takes the size of its largest page -- and, worse,
+    the *height-for-width* of its tallest (a wrapped label on the mixed-model
+    page): its parent layout then gave it a cell far taller than the page and
+    centred it, leaving a ~270 px blank gap above the spin tables
+    (user reports 2026-11-14 and 2026-11-15; no override of sizeHint or the
+    size policy can change what the stacked layout answers). So this is a
+    plain vertical layout in which the other pages are hidden -- a hidden
+    widget counts for nothing. The ``QStackedWidget`` calls the panels use
+    (``addWidget``, ``setCurrentIndex``, ``currentIndex``, ``currentWidget``,
+    ``count``, ``widget``, ``currentChanged``) are kept."""
+
+    currentChanged = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.currentChanged.connect(lambda _index: self.updateGeometry())
-        # Never taller than the page asks for. The size hint alone was not
-        # enough (the gap came back, user report 2026-11-15): a widget with a
-        # layout counts as "expanding" to its parent while its policy can
-        # grow and a table inside it can, so the parent handed it every
-        # spare pixel -- which the spin editor's trailing stretch then put
-        # between its info line and the Linewidth row. A policy that cannot
-        # grow vertically leaves the spare height below the page.
+        self._pages: list[QWidget] = []
+        self._current = -1
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        # Never taller than the page asks for: spare height stays below.
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
-    def sizeHint(self):  # noqa: N802 -- Qt override
-        page = self.currentWidget()
-        return page.sizeHint() if page is not None else super().sizeHint()
+    def addWidget(self, page: QWidget) -> int:  # noqa: N802 -- QStackedWidget's name
+        self._pages.append(page)
+        self.layout().addWidget(page)
+        page.setVisible(len(self._pages) - 1 == max(self._current, 0))
+        if self._current < 0:
+            self._current = 0
+        return len(self._pages) - 1
 
-    def minimumSizeHint(self):  # noqa: N802 -- Qt override
-        page = self.currentWidget()
-        return page.minimumSizeHint() if page is not None else super().minimumSizeHint()
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802
+        if not 0 <= index < len(self._pages) or index == self._current:
+            return
+        self._current = index
+        for k, page in enumerate(self._pages):
+            page.setVisible(k == index)
+        self.updateGeometry()
+        self.currentChanged.emit(index)
 
-    def hasHeightForWidth(self) -> bool:  # noqa: N802 -- Qt override
-        page = self.currentWidget()
-        return page.hasHeightForWidth() if page is not None else False
+    def currentIndex(self) -> int:  # noqa: N802
+        return self._current
 
-    def heightForWidth(self, width: int) -> int:  # noqa: N802 -- Qt override
-        page = self.currentWidget()
-        if page is None:
-            return -1
-        return page.heightForWidth(width) if page.hasHeightForWidth() \
-            else page.sizeHint().height()
+    def currentWidget(self):  # noqa: N802
+        return self._pages[self._current] if 0 <= self._current < len(self._pages) else None
+
+    def count(self) -> int:
+        return len(self._pages)
+
+    def widget(self, index: int):
+        return self._pages[index] if 0 <= index < len(self._pages) else None
+
+    def indexOf(self, page) -> int:  # noqa: N802
+        return self._pages.index(page) if page in self._pages else -1
 
 
 class SpinSystemEditor(QWidget):
