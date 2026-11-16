@@ -72,8 +72,9 @@ import os
 import re
 
 from PySide6.QtCore import QItemSelectionModel, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHBoxLayout, QLabel, QPushButton, QTreeWidget,
+    QAbstractItemView, QColorDialog, QHBoxLayout, QLabel, QPushButton, QTreeWidget,
     QTreeWidgetItem, QTreeWidgetItemIterator, QVBoxLayout, QWidget,
 )
 
@@ -90,6 +91,30 @@ _DESCRIBED_ROLE = Qt.ItemDataRole.UserRole + 2
 _DATE_ROLE = Qt.ItemDataRole.UserRole + 3
 #: Set on a leaf once it has been described (see _describe_children).
 _LEAF_DESCRIBED_ROLE = Qt.ItemDataRole.UserRole + 4
+
+#: An experiment's kind: ``"1d"``, ``"2d"`` or ``"pseudo2d"`` (set once it has been described).
+_KIND_ROLE = Qt.ItemDataRole.UserRole + 5
+
+#: What is coloured, and how it is named in the menu (explicit user request,
+#: 2026-11-16: make a 2D experiment's typeface differ from a 1D one's, so it
+#: is clear at a glance which is which).
+KIND_LABELS = {"1d": "1D", "2d": "2D", "pseudo2d": "Pseudo-2D"}
+#: The default typeface colours: ``""`` means the normal text colour for 1D,
+#: and "the same as 2D" for pseudo-2D. A mid blue reads on light and dark themes.
+DEFAULT_COLOURS = {"1d": "", "2d": "#3d8bfd", "pseudo2d": ""}
+
+
+def normalise_colours(colours) -> dict:
+    """``colours`` as ``{kind: "#rrggbb" or ""}`` for every kind: a saved or
+    partial dict, anything unreadable replaced by the default."""
+    out = dict(DEFAULT_COLOURS)
+    if isinstance(colours, dict):
+        for kind in DEFAULT_COLOURS:
+            value = colours.get(kind)
+            if isinstance(value, str) and (value == "" or QColor(value).isValid()):
+                out[kind] = QColor(value).name() if value else ""
+    return out
+
 
 #: The orders the tree can be sorted in: ``{key: menu text}``.
 SORT_MODES = {
@@ -140,6 +165,9 @@ class DataBrowser(QWidget):
     #: The sort order chosen from the right-click menu (a SORT_MODES key),
     #: so the window can remember it.
     sortModeChanged = Signal(str)
+    #: Right-click ▸ Colours: the typeface colours by kind (``{kind: colour}``),
+    #: so the window can remember them.
+    coloursChanged = Signal(dict)
     #: Right-click ▸ Refresh: look through the whole folder again.
     refreshRequested = Signal()
     #: Stop on the "Checking for new data…" line.
@@ -149,6 +177,7 @@ class DataBrowser(QWidget):
         super().__init__(parent)
         self._root: str | None = None
         self._sort_mode = DEFAULT_SORT
+        self._colours = dict(DEFAULT_COLOURS)
         # path -> leaf, and relative folder -> folder item, for updating
         # the tree in place (update_matches) rather than rebuilding it.
         self._leaves: dict[str, QTreeWidgetItem] = {}
@@ -197,7 +226,7 @@ class DataBrowser(QWidget):
         self._tree.setToolTip(
             "Double-click an experiment to load it. Ctrl-click (Cmd-click on "
             "macOS) or Shift-click to select several, then Open Selected or "
-            "press Return. Right-click to sort by name or date. Folders group "
+            "press Return. Right-click to sort by name or date, or to colour 1D and 2D names. Folders group "
             "experiments; only things this app can actually open are listed."
         )
         self._tree.itemSelectionChanged.connect(self._update_open_selected_button)
@@ -513,14 +542,23 @@ class DataBrowser(QWidget):
                 0, f"{path}\n\nNot downloaded yet – opening this will "
                    f"fetch {cloud.format_bytes(pending)} from the cloud.",
             )
-        summary = self._describe(path, child.data(0, _VENDOR_ROLE))
+        summary, kind = self._describe_with_kind(path, child.data(0, _VENDOR_ROLE))
         if summary:
             child.setText(0, f"{os.path.basename(path)}   {summary}")
+        child.setData(0, _KIND_ROLE, kind)
+        self._colour_leaf(child)
 
     @staticmethod
     def _describe(path: str, vendor: str) -> str:
-        """A one-line "what is this" for an experiment, or ``""`` if it
-        cannot be determined cheaply.
+        """A one-line "what is this" for an experiment (see
+        :meth:`_describe_with_kind`)."""
+        return DataBrowser._describe_with_kind(path, vendor)[0]
+
+    @staticmethod
+    def _describe_with_kind(path: str, vendor: str) -> tuple[str, str | None]:
+        """``(summary, kind)``: a one-line "what is this" for an experiment, or
+        ``""`` if it cannot be determined cheaply; and its kind (``"1d"``,
+        ``"2d"``, ``"pseudo2d"``, or ``None`` when not known without opening it).
 
         Never raises: a folder that cannot be described is still
         loadable, and a browser that refused to list it would be worse
@@ -534,11 +572,20 @@ class DataBrowser(QWidget):
         if not cloud.parameters_are_local(path):
             pending = cloud.pending_download_bytes(path)
             size = f", {cloud.format_bytes(pending)}" if pending else ""
-            return f"· in cloud{size} – double-click to download"
+            return f"· in cloud{size} – double-click to download", None
         try:
             info = io.peek(path, vendor=vendor)
         except Exception:  # noqa: BLE001 -- an undescribable experiment still lists
-            return ""
+            return "", None
+        kind = None
+        try:
+            ndim = int(info.get("ndim") or 0)
+        except (TypeError, ValueError):
+            ndim = 0
+        if ndim == 1:
+            kind = "1d"
+        elif ndim >= 2:
+            kind = "pseudo2d" if info.get("pseudo_2d") else "2d"
         bits = []
         if info.get("nucleus"):
             bits.append(str(info["nucleus"]))
@@ -558,7 +605,61 @@ class DataBrowser(QWidget):
         pulse_program = info.get("pulse_program")
         if pulse_program:
             bits.append(str(pulse_program))
-        return "· " + ", ".join(bits) if bits else ""
+        return ("· " + ", ".join(bits) if bits else ""), kind
+
+    # -- typeface colours by kind ----------------------------------------
+
+    def colours(self) -> dict:
+        """The typeface colour of each kind (``""``: the normal text colour)."""
+        return dict(self._colours)
+
+    def set_colours(self, colours, emit: bool = False) -> None:
+        """Use ``colours`` (``{kind: "#rrggbb"}``; missing or invalid kinds take
+        the default) and recolour what is listed. ``emit``: say so through
+        :attr:`coloursChanged` (the menu does; restoring a saved choice does not)."""
+        self._colours = normalise_colours(colours)
+        for leaf in self._leaves.values():
+            self._colour_leaf(leaf)
+        if emit:
+            self.coloursChanged.emit(self.colours())
+
+    def colour_for(self, kind: str | None) -> str:
+        """The colour a ``kind`` is drawn in now (``""``: normal text)."""
+        if kind == "pseudo2d":
+            return self._colours.get("pseudo2d") or self._colours.get("2d", "")
+        return self._colours.get(kind or "", "")
+
+    def _colour_leaf(self, leaf: QTreeWidgetItem) -> None:
+        colour = self.colour_for(leaf.data(0, _KIND_ROLE))
+        leaf.setForeground(0, QBrush(QColor(colour)) if colour else QBrush())
+
+    def _pick_colour(self, kind: str) -> None:
+        current = self.colour_for(kind) or self.palette().text().color().name()
+        chosen = QColorDialog.getColor(QColor(current), self,
+                                       f"Typeface colour for {KIND_LABELS[kind]} experiments")
+        if chosen.isValid():
+            colours = self.colours()
+            colours[kind] = chosen.name()
+            self.set_colours(colours, emit=True)
+
+    def _reset_colours(self) -> None:
+        self.set_colours(dict(DEFAULT_COLOURS), emit=True)
+
+    def _add_colour_menu(self, menu, chosen: dict) -> None:
+        """Right-click ▸ Colours: one entry per kind, with its colour shown."""
+        colours_menu = menu.addMenu("Typeface colours")
+        colours_menu.setToolTip("Colour the names of 1D, 2D and pseudo-2D experiments, so it is "
+                                "clear which is which.")
+        for kind, name in KIND_LABELS.items():
+            action = colours_menu.addAction(f"{name} experiments…")
+            shown = self.colour_for(kind) or self.palette().text().color().name()
+            swatch = QPixmap(14, 14)
+            swatch.fill(QColor(shown))
+            action.setIcon(QIcon(swatch))
+            chosen[action] = (lambda k=kind: self._pick_colour(k))
+        colours_menu.addSeparator()
+        reset = colours_menu.addAction("Reset Colours")
+        chosen[reset] = self._reset_colours
 
     # -- interaction ---------------------------------------------------
 
@@ -608,6 +709,8 @@ class DataBrowser(QWidget):
                 action.setChecked(mode == self._sort_mode)
                 group.addAction(action)
                 chosen[action] = (lambda m=mode: self.set_sort_mode(m, emit=True))
+        if self._tree.topLevelItemCount():
+            self._add_colour_menu(menu, chosen)
         if self._root:
             if chosen:
                 menu.addSeparator()

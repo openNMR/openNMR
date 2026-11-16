@@ -60,6 +60,7 @@ from ..notebook import referencing as nb_referencing
 from .drift_panel import DriftCorrectionPanel
 from ..notebook import periodic_table as nb_periodic_table
 from ..notebook import series_fitting as nb_series_fitting
+from ..notebook import fit_transfer as nb_fit_transfer
 from ..notebook import fit_advice as nb_fit_advice
 from ..notebook import multiplet_analysis as nb_multiplets
 from ..notebook import relaxometry as nb_relaxometry
@@ -166,6 +167,7 @@ from .multi_fit_panel import MultiFitPanel
 from .arithmetic_panel import ArithmeticPanel
 from .fit_display_panel import FitDisplayPanel
 from .fit_models_panel import FitModelsPanel
+from .copy_fit_dialog import CopyFitDialog
 from .curve_fit_plot_box import CurveFitPlotBox
 from .plot_options_dialog import PlotOptionsDialog
 from .regularisation_panel import RegularisationPanel
@@ -2735,6 +2737,8 @@ class MainWindow(QMainWindow):
         # remembered in ui_settings.json. Restored here or in
         # _build_settings_panel, whichever runs second.
         self.data_browser.sortModeChanged.connect(self._on_browser_sort_changed)
+        # Right-click ▸ Typeface colours (explicit user request, 2026-11-16).
+        self.data_browser.coloursChanged.connect(self._on_browser_colours_changed)
         # Folder scans run in the background from what was found last time
         # (explicit user request, 2026-11-13) -- see gui/folder_scan.py.
         self._folder_scanner = None
@@ -2744,6 +2748,7 @@ class MainWindow(QMainWindow):
         self.data_browser.scanCancelRequested.connect(self._on_folder_scan_stop)
         if hasattr(self, "_ui_settings"):
             self.data_browser.set_sort_mode(self._ui_settings.get("browser_sort", ""))
+            self.data_browser.set_colours(self._ui_settings.get("browser_colours"))
         browser_layout.addWidget(self.data_browser)
         layout.addWidget(browser_box, 1)
 
@@ -7409,6 +7414,13 @@ class MainWindow(QMainWindow):
         self._ui_settings["browser_sort"] = mode
         self._save_ui_settings()
 
+    def _on_browser_colours_changed(self, colours: dict) -> None:
+        """Remember the Browse panel's typeface colours for next time."""
+        if not hasattr(self, "_ui_settings"):
+            return
+        self._ui_settings["browser_colours"] = dict(colours)
+        self._save_ui_settings()
+
     def _load_ui_settings(self) -> dict:
         try:
             with open(self._UI_SETTINGS_PATH, encoding="utf-8") as handle:
@@ -7766,6 +7778,7 @@ class MainWindow(QMainWindow):
         data_directory.set_default_data_directory(self._ui_settings.get("data_folder") or "")
         if hasattr(self, "data_browser"):
             self.data_browser.set_sort_mode(self._ui_settings.get("browser_sort", ""))
+            self.data_browser.set_colours(self._ui_settings.get("browser_colours"))
         self.data_folder_edit = QLineEdit(data_directory.stored_default_data_directory())
         self.data_folder_edit.setPlaceholderText("None – dialogs start where they always did")
         self.data_folder_edit.setToolTip(
@@ -17534,6 +17547,25 @@ class MainWindow(QMainWindow):
         for key, keep in self.keep_fit_buttons.items():
             if keep is not None:
                 self.save_fit_values_buttons[key] = self._add_save_fit_values_button(keep, key)
+        # "Copy Fit To…" beside them, then each section's result buttons in one
+        # labelled group (explicit user request, 2026-11-16: the rows were
+        # getting busy).
+        self.copy_fit_buttons = {}
+        for key, keep in self.keep_fit_buttons.items():
+            if keep is not None and key != "pnmr":
+                self.copy_fit_buttons[key] = self._make_copy_fit_button(key)
+        for key, keep in self.keep_fit_buttons.items():
+            if keep is None:
+                continue
+            extra = self.copy_fit_buttons.get(key)
+            if key == "isotropic":
+                others = [self.save_fit_values_buttons.get(key), extra,
+                          self.spectral_fit_correlation_button, self.export_fit_report_button,
+                          self.export_isotropic_pseudo2d_button]
+                self._group_fit_buttons(keep, others, "This fit")
+            else:
+                self._group_fit_buttons(keep, [self.save_fit_values_buttons.get(key), extra],
+                                        "This fit", gather_row=True)
         # Any plot showing a simulation offers to keep it (explicit user
         # request: simulations in Open experiments, to compare).
         for canvas in (self.fit_canvas, self.simulation_canvas):
@@ -18895,6 +18927,84 @@ class MainWindow(QMainWindow):
         button.clicked.connect(lambda: self._keep_panel_fit(key))
         layout.insertWidget(layout.indexOf(anchor) + 1, button)
         return button
+
+    def _make_copy_fit_button(self, key: str) -> QPushButton:
+        """"Copy Fit To…" for fit section ``key``: this fit as the starting
+        point of the same fit on another spectrum."""
+        button = QPushButton("Copy Fit To…")
+        button.setToolTip(
+            "Use this fit as the starting point for another spectrum (an extracted slice, say): "
+            "its fitted values go into the same panel there, to check and refit. The other "
+            "spectrum has its own baseline and noise, so it is fitted again, not overwritten.")
+        button.clicked.connect(lambda: self._copy_panel_fit(key))
+        return button
+
+    def _copy_panel_fit(self, key: str) -> None:
+        row = self._selected_index()
+        if row is None:
+            QMessageBox.information(self, "Copy fit", "Select the spectrum the fit was made on.")
+            return
+        action = ("slice_fit",) if key == "isotropic" else ("stored_fit", key)
+        label = "Spectral fit" if key == "isotropic" else f"{self._FIT_LABELS.get(key, key)} fit"
+        self._on_copy_fit_to({"row": row, "action": action, "label": label})
+
+    def _find_layout_of(self, widget):
+        """The layout (possibly nested) that directly holds ``widget``."""
+        def holder(layout):
+            if layout is None:
+                return None
+            if layout.indexOf(widget) >= 0:
+                return layout
+            for i in range(layout.count()):
+                item = layout.itemAt(i)
+                found = holder(item.layout()) if item is not None and item.layout() else None
+                if found is not None:
+                    return found
+            return None
+        return holder(widget.parentWidget().layout() if widget.parentWidget() else None)
+
+    def _group_fit_buttons(self, first: QPushButton, others, title: str,
+                           gather_row: bool = False) -> QGroupBox | None:
+        """Put ``first`` and ``others`` (and, with ``gather_row``, every other
+        button in ``first``'s row) in one labelled group, one to a line, where
+        ``first`` was. Clearer than a long row of buttons squeezed side by side,
+        and -- unlike two to a line -- never wider than the narrowest column the
+        panel can be dragged to (the labels are long: "Save the Fitted Values…")."""
+        layout = self._find_layout_of(first)
+        if layout is None or not hasattr(layout, "insertWidget"):
+            return None
+        buttons = [first]
+        if gather_row:
+            buttons = [w for w in (layout.itemAt(i).widget() if layout.itemAt(i) else None
+                                   for i in range(layout.count()))
+                       if isinstance(w, QPushButton)] or [first]
+        buttons += [b for b in others if b is not None and b not in buttons]
+        index = min(layout.indexOf(b) for b in buttons if layout.indexOf(b) >= 0)
+        for button in buttons:
+            holder = self._find_layout_of(button)
+            if holder is not None:
+                holder.removeWidget(button)
+        box = QGroupBox(title)
+        grid = QGridLayout(box)
+        grid.setContentsMargins(6, 4, 6, 6)
+        for i, button in enumerate(buttons):
+            grid.addWidget(button, i, 0)
+        if isinstance(layout, QHBoxLayout):
+            layout.insertWidget(index, box, 1)
+        else:
+            layout.insertWidget(index, box)
+        return box
+
+    @staticmethod
+    def _step_heading(text: str, detail: str = "") -> QLabel:
+        """A short bold caption that tells a long panel's reader which step of
+        the workflow the controls below belong to."""
+        label = QLabel(f"<b>{text}</b>" + (f"<br><span style='color:gray'>{detail}</span>"
+                                           if detail else ""))
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setContentsMargins(0, 8, 0, 0)
+        return label
 
     def _add_save_fit_values_button(self, keep_button: QPushButton, key: str) -> QPushButton:
         """"Save the Fitted Values…", right after ``keep_button``."""
@@ -22033,6 +22143,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(peak_box)
         layout.addWidget(self._build_multiplet_section())
 
+        layout.addWidget(self._step_heading(
+            "Fit the peaks", "Starting values are the peak table above."))
         fit_button = QPushButton("Fit Spectrum")
         fit_button.setToolTip(
             "Step 1: fit peaks against the current selection – a plain 1D "
@@ -22052,6 +22164,8 @@ class MainWindow(QMainWindow):
         # 2026-10-06); notebook.fit_advice.advise_series.
         self.spectral_fit_advice_box = AdviceBox(on_action=self._apply_isotropic_advice)
         layout.addWidget(self.spectral_fit_advice_box)
+        layout.addWidget(self._step_heading(
+            "Read the result", "One slice at a time for a series; the fit is on the Spectral Fit view."))
 
         # "Spectrum fit"/"curve fit" (not "slice fit"/"peak fit", the
         # original names) -- explicit user feedback that the two read
@@ -22139,6 +22253,7 @@ class MainWindow(QMainWindow):
             "been run for this spectrum."
         )
         export_report_button.clicked.connect(self._on_export_fit_report_clicked)
+        self.export_fit_report_button = export_report_button
         layout.addWidget(export_report_button)
 
         # Explicit user request: fitted peaks exported to a pseudo-2D
@@ -23457,17 +23572,36 @@ class MainWindow(QMainWindow):
         # set up, run, read the result, export and keep it, then the
         # fits kept so far; slice selection, SCORE and the DOSY options
         # follow because they are used less often.
+        layout.addWidget(self._step_heading(
+            "1  Choose what to fit", "Model, delays or b-values, starting values."))
         layout.addWidget(settings_section)
+        layout.addWidget(self._step_heading("2  Fit"))
         layout.addWidget(run_widget)
+        layout.addWidget(self._step_heading(
+            "3  Read the result", "The curve fit is drawn on the Fit view."))
         layout.addWidget(self.curve_fit_summary_label)
         layout.addWidget(self.curve_fit_advice_box)
         layout.addWidget(self.relaxation_fit_params_label)
-        layout.addWidget(self.curve_fit_plot_box.keep_button)
-        layout.addWidget(self.export_curve_fit_button)
-        layout.addWidget(self.curve_fit_correlation_button)
+        self.copy_curve_fit_button = QPushButton("Copy Curve Fit To…")
+        self.copy_curve_fit_button.setToolTip(
+            "Use this curve fit (T₁, T₂…) as the starting point for another pseudo-2D series: "
+            "the same model, with the fitted values as its starting guesses, bounds and fixed "
+            "parameters. That series' own delays and values are used.")
+        self.copy_curve_fit_button.setEnabled(False)       # until there is a curve fit
+        self.copy_curve_fit_button.clicked.connect(self._on_copy_current_curve_fit)
+        result_box = QGroupBox("This curve fit")
+        result_grid = QGridLayout(result_box)
+        result_grid.setContentsMargins(6, 4, 6, 6)
+        for i, button in enumerate((self.curve_fit_plot_box.keep_button, self.copy_curve_fit_button,
+                                    self.export_curve_fit_button,
+                                    self.curve_fit_correlation_button)):
+            result_grid.addWidget(button, i, 0)
+        layout.addWidget(result_box)
         layout.addWidget(curve_plot_hint)
-        layout.addWidget(kept_section)
+        layout.addWidget(self._step_heading(
+            "More", "Kept fits, which slices are used, and the less common methods."))
         layout.addWidget(self.excluded_slice_group)
+        layout.addWidget(kept_section)
         layout.addWidget(self.dosy_results_label)
         layout.addWidget(self.dosy_variant_group)
         layout.addWidget(self.dosy_display_box)
@@ -29802,6 +29936,8 @@ class MainWindow(QMainWindow):
         clears it), so the button cannot offer to export nothing."""
         if hasattr(self, "export_curve_fit_button"):
             self.export_curve_fit_button.setEnabled(bool(self._relaxation_fit_results))
+        if hasattr(self, "copy_curve_fit_button"):
+            self.copy_curve_fit_button.setEnabled(bool(self._relaxation_fit_results))
         if hasattr(self, "curve_fit_correlation_button"):
             have = bool(self._relaxation_fit_results)
             self.curve_fit_correlation_button.setEnabled(have)
@@ -30549,6 +30685,220 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"{self._MODEL_SERIES_LABELS[kind]} model applied to {len(results)} slices.", 6000)
         return results
+
+    # ---- copy a fit to another experiment (explicit user request, 2026-11-16) ----
+
+    def _copy_fit_targets(self, kind: str, source_row: int) -> list:
+        """``[(label, row)]``: where a ``kind`` ("profile": a curve fit; "slice": a
+        panel's lineshape fit) can be copied to. A profile needs a pseudo-2D
+        series whose slices are already measured (integrated or fitted); a
+        slice fit, any 1D spectrum (e.g. an extracted slice)."""
+        targets = []
+        for row, spectrum in enumerate(self.session.spectra):
+            raw = spectrum.metadata.raw or {}
+            if row == source_row or raw.get("fit_model") or raw.get("simulation"):
+                continue
+            if kind == "profile":
+                if (spectrum.ndim == 2 and spectrum.is_pseudo_2d
+                        and raw.get("slice_fit_results")):
+                    targets.append((self.session.label(row), row))
+            elif spectrum.ndim == 1:
+                targets.append((self.session.label(row), row))
+        return targets
+
+    def _copy_fit_kind(self, node) -> tuple[str | None, str | None]:
+        """``("profile", None)`` / ``("slice", panel key)`` for a tree entry that
+        can be copied, else ``(None, None)``."""
+        action = node.get("action")
+        if not action:
+            return None, None
+        if action[0] == "curve_fit":
+            return "profile", None
+        if action[0] == "stored_fit" and action[1] != "multi" and action[1] in self._fit_panels():
+            return "slice", action[1]
+        if action[0] == "slice_fit":
+            return "slice", "isotropic"       # a spectral (peak) fit: its peaks
+        return None, None
+
+    def _on_copy_fit_to(self, node) -> bool:
+        """Open experiments ▸ right-click a fit ▸ Copy Fit To…"""
+        row = node.get("row")
+        kind, key = self._copy_fit_kind(node)
+        if row is None or kind is None:
+            QMessageBox.information(self, "Copy fit", "This kind of entry cannot be copied to "
+                                    "another experiment.")
+            return False
+        targets = self._copy_fit_targets(kind, row)
+        if not targets:
+            QMessageBox.information(
+                self, "Copy fit",
+                "There is no other pseudo-2D series with measured slices to copy this to.\n\n"
+                "Integrate (or fit) the same regions in the other series first, so each slice "
+                "has a value." if kind == "profile" else
+                "There is no other 1D spectrum open to copy this to. Open or extract it first.")
+            return False
+        if kind == "profile":
+            intro = ("The model, fitted values, bounds and fixed parameters of "
+                     f"“{node.get('label', 'this curve fit')}” are used as the starting point of the "
+                     "same model on the other series' values. Its own delays and values are "
+                     "used; nothing else is carried over.")
+            modes = [("Set up Dynamics only (check, then press Fit Curve)", "start",
+                      "Put the values in the Dynamics model and Guess table for that series."),
+                     ("Set up and fit now", "refit", "As above, then fit that series' curve.")]
+        else:
+            intro = (f"The fitted values of “{node.get('label', 'this fit')}” become the "
+                     "starting values of the same fit panel for the other spectrum. The baseline "
+                     "and noise differ between experiments, so it is refitted there, not "
+                     "overwritten.")
+            modes = [("Set up the panel only (check, then fit)", "start",
+                      "Put the fitted values in the panel as its starting values."),
+                     ("Set up and fit now", "refit", "As above, then press the panel's Fit button.")]
+        dialog = CopyFitDialog("Copy fit to another experiment", intro, targets, modes, self)
+        if dialog.exec() != CopyFitDialog.DialogCode.Accepted or dialog.target_row() is None:
+            return False
+        try:
+            if kind == "profile":
+                self._copy_curve_fit_to(row, dialog.target_row(), run=dialog.mode() == "refit")
+            else:
+                self._copy_slice_fit_to(row, key, dialog.target_row(),
+                                        run=dialog.mode() == "refit")
+        except Exception as exc:  # noqa: BLE001 -- told, not raised
+            QMessageBox.information(self, "Copy fit", f"The fit could not be copied:\n\n{exc}")
+            return False
+        return True
+
+    def _on_copy_current_curve_fit(self) -> None:
+        row = self._selected_index()
+        if row is None or not self._relaxation_fit_results:
+            QMessageBox.information(self, "Copy fit", "Run Fit Curve first.")
+            return
+        self._on_copy_fit_to({"row": row, "action": ("curve_fit",), "label": "Curve fit"})
+
+    def _log_fit_copy(self, target_row: int, kind: str, source: str, mode: str) -> None:
+        history = self._ensure_history(target_row)
+        if history is not None:
+            io_history.add_event(history, nb_fit_transfer.describe_transfer(
+                kind, source, self.session.label(target_row), mode), kind="fit_copy")
+        self._schedule_sidecar_save(target_row)
+
+    def _copy_curve_fit_to(self, source_row: int, target_row: int, run: bool = False) -> None:
+        """A curve fit (T1, T2, ...) of one profile as the starting point of
+        the same model on another: model, fitted values, bounds and fixed
+        flags into Dynamics' model box and Guess table (peak by peak)."""
+        source = self.session.spectra[source_row]
+        raw = source.metadata.raw or {}
+        results = raw.get("relaxation_fit_results")
+        starts = nb_fit_transfer.curve_fit_start(results, raw.get("relaxation_fit_context"))
+        if not starts:
+            raise ValueError("The source has no curve fit stored.")
+        model_key = starts[0]["model"]
+        target = self.session.spectra[target_row]
+        measured = target.metadata.raw.get("slice_fit_results")
+        if not measured:
+            raise ValueError("The other series' slices have not been measured yet "
+                             "(integrate or fit them first).")
+        self._select_single_row(target_row)
+        combo = self.relaxation_model_combo
+        index = combo.findData(model_key)
+        if index < 0:
+            raise ValueError(f"The model “{model_key}” (a custom model) cannot be copied; set it up "
+                             "in Dynamics first, then use Adopt Fit as Guess.")
+        combo.setCurrentIndex(index)
+        self.guess_group.setChecked(True)
+        self._guess_overrides = {}
+        self._refresh_guess_table(force=True)
+        spec = self._current_model_spec_safe()
+        names = list(spec["params"]) if spec else []
+        auto = {}
+        try:
+            t, y = self._guess_reference_series()
+            lo, hi = spec["bounds"](t, y)
+            auto = {n: (lo[i], hi[i]) for i, n in enumerate(names)}
+        except Exception:  # noqa: BLE001 -- the source's own bounds are used
+            auto = {}
+        n_peaks = max(self._peak_count_in(measured), 1)
+        # The table is for "All peaks" (the shared values); each peak then has its own.
+        self._refresh_guess_peak_combo()
+        self.guess_peak_combo.blockSignals(True)
+        self.guess_peak_combo.setCurrentIndex(0)
+        self.guess_peak_combo.blockSignals(False)
+        self._guess_editing_peak = None
+        self.clear_peak_guess_button.setEnabled(False)
+        for peak in range(n_peaks):
+            start = starts[peak] if peak < len(starts) else starts[0]
+            rows = nb_fit_transfer.guess_rows(start, names, scale=self._param_display_scale,
+                                              auto=auto)
+            self._guess_overrides[peak] = rows
+            if peak == 0:
+                self._guess_overrides[None] = rows
+        self._load_guess_rows_for(self._guess_editing_peak)
+        self._show_side_tab("Dynamics")
+        source_label = self.session.label(source_row)
+        self._log_fit_copy(target_row, "Curve fit", source_label, "refit" if run else "start")
+        if run:
+            self._run_curve_fit(measured, len(measured), target, persist_to=target)
+        self.statusBar().showMessage(
+            f"Curve fit of {source_label} copied to {self.session.label(target_row)}"
+            + (" and fitted." if run else ": check the Guess table, then press Fit Curve."), 8000)
+
+    def _copy_peak_fit_to(self, source_row: int, target_row: int, run: bool = False) -> None:
+        """A spectral (peak) fit's peaks, at their fitted values, into the
+        peak table of another spectrum."""
+        results = self.session.spectra[source_row].metadata.raw.get("slice_fit_results") or []
+        if not results or "popt" not in results[0]:
+            raise ValueError("The source has no spectral (peak) fit stored.")
+        first = results[0]
+        self._select_single_row(target_row)
+        self._update_peak_table_from_fit(first)
+        self._show_side_tab("Fit")
+        source_label = self.session.label(source_row)
+        self._log_fit_copy(target_row, "Spectral fit", source_label, "refit" if run else "start")
+        if run:
+            self._on_fit_spectrum_clicked()
+        self.statusBar().showMessage(
+            f"Peaks of {source_label} copied to the peak table of "
+            f"{self.session.label(target_row)}"
+            + (" and fitted." if run else ": check them, then press Fit Spectrum."), 8000)
+
+    def _copy_slice_fit_to(self, source_row: int, key: str, target_row: int,
+                           run: bool = False) -> None:
+        """A panel's lineshape fit (CSA, quadrupolar, Solid-state NMR, ...) of
+        one spectrum as the starting values of the same panel for another."""
+        if key == "isotropic":
+            self._copy_peak_fit_to(source_row, target_row, run)
+            return
+        panels = self._fit_panels()
+        if key not in panels or key == "multi":
+            raise ValueError("That fit cannot be copied.")
+        panel = panels[key]
+        self._select_single_row(source_row)          # brings its fit back into the panel
+        if key == "csa":
+            if not self._csa_fit_result:
+                raise ValueError("The source's CSA fit is no longer stored.")
+            self._csa_use_fitted_as_start()
+        else:
+            if not getattr(panel, "result", None):
+                raise ValueError("The source's fit is no longer stored.")
+            if not hasattr(panel, "use_fitted_as_start"):
+                raise ValueError("This kind of fit cannot be copied yet.")
+            panel.use_fitted_as_start()
+        state = copy.deepcopy(panel.get_state())
+        self._select_single_row(target_row)
+        panel.set_state(state)
+        section = getattr(panel, "fit_button", None) or (
+            self.csa_fit_button if key == "csa" else None)
+        self._show_side_tab("Fit")
+        if section is not None:
+            self._open_fit_section_of(section)
+        source_label = self.session.label(source_row)
+        self._log_fit_copy(target_row, self._FIT_LABELS.get(key, key) + " fit", source_label,
+                           "refit" if run else "start")
+        if run and section is not None:
+            section.click()
+        self.statusBar().showMessage(
+            f"{self._FIT_LABELS.get(key, key)} fit of {source_label} copied to "
+            f"{self.session.label(target_row)}"
+            + (" and refitted." if run else " as starting values: check them, then fit."), 8000)
 
     def _on_export_model_pseudo2d_clicked(self, kind: str) -> None:
         """Every slice's fitted lineshape (sites + baseline), stacked into
@@ -31486,6 +31836,9 @@ class MainWindow(QMainWindow):
         shared by browsing slices via ``view_slice_fit_spin`` and by
         ``_silo_other_canvas_tabs`` restoring a reselected
         spectrum's already-computed fit."""
+        if result.get("model_fit"):
+            self._display_model_slice_fit(result, switch_tab=switch_tab)
+            return
         title = self._slice_label_from_fit_result(result)
         self._last_spectral_fit = result
         per_peak = processing_fitting.extract_params_and_errors(
@@ -31508,6 +31861,44 @@ class MainWindow(QMainWindow):
             )
         self._fill_spectral_fit_table(result, per_peak)
         self.spectral_fit_params_label.setText(self._format_fit_summary(result))
+        if switch_tab:
+            self.canvas_tabs.setCurrentWidget(self.spectral_fit_canvas)
+
+    def _display_model_slice_fit(self, result: dict, switch_tab: bool = False) -> None:
+        """One slice of a lineshape model applied to every slice: the data,
+        the total, each site's scaled curve and the baseline, with the
+        site areas and amplitudes (it has no peak table: the shapes are
+        fixed, only the amount of each site is fitted)."""
+        labels = list(result.get("site_labels") or [])
+        model = self._MODEL_SERIES_LABELS.get(result.get("model"), "Lineshape")
+        title = f"Slice {result['index']}: {model} model applied to every slice"
+        self._last_spectral_fit = None
+        components = [np.asarray(c, dtype=float) for c in result.get("components") or []]
+        baseline = result.get("baseline")
+        if baseline is not None:
+            components.append(np.asarray(baseline, dtype=float))   # last entry is the baseline
+        button = getattr(self, "spectral_fit_correlation_button", None)
+        if button is not None:
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
+            button.setEnabled(False)       # fixed shapes: nothing to correlate
+        self.spectral_fit_canvas.show_slice_fit(
+            result["x"], result["y"], result["y_fit"], components=components or None,
+            peak_labels=labels, title=title, spectrum=result.get("slice"))
+        self.spectral_fit_table.setRowCount(0)
+        lines = []
+        for k, label in enumerate(labels):
+            area = result["integrals"][k]
+            area_err = result["integral_errors"][k]
+            amp = result["amplitudes"][k]
+            amp_err = result["amplitude_errors"][k]
+            lines.append(f"{label}: area {self._format_value_error(area, area_err)}, "
+                         f"relative amplitude {self._format_value_error(amp, amp_err)}")
+        r2 = result.get("r_squared")
+        if r2 is not None and np.isfinite(r2):
+            lines.append(f"R² = {r2:.4f}")
+        self.spectral_fit_params_label.setText("\n".join(lines))
         if switch_tab:
             self.canvas_tabs.setCurrentWidget(self.spectral_fit_canvas)
 
@@ -32324,7 +32715,8 @@ class MainWindow(QMainWindow):
             self.dosy_variant_group.setVisible(False)
 
         slice_fit_results = spectrum.metadata.raw.get("slice_fit_results")
-        if slice_fit_results and "popt" in slice_fit_results[0]:
+        if slice_fit_results and ("popt" in slice_fit_results[0]
+                                  or slice_fit_results[0].get("model_fit")):
             # matches view_slice_fit_spin resetting to 1 on reselect --
             # guarded on shape since slice_fit_results can also hold an
             # Integrate Regions result (_show_integration_results, same
@@ -32547,6 +32939,19 @@ class MainWindow(QMainWindow):
                 raise ValueError("The spectral fit is no longer stored with this spectrum.")
             self._slice_fit_results = results
             self._on_view_slice_fit_changed(self.view_slice_fit_spin.value() or 1)
+        elif what == "series_fit":
+            results = spectrum.metadata.raw.get("slice_fit_results")
+            if not results or not results[0].get("model_fit"):
+                raise ValueError("The per-slice fits are no longer stored with this spectrum "
+                                 "(a later spectral fit or integration replaced them).")
+            self._slice_fit_results = results
+            self.view_slice_fit_spin.blockSignals(True)
+            self.view_slice_fit_spin.setEnabled(True)
+            self.view_slice_fit_spin.setMaximum(max(1, len(results)))
+            self.view_slice_fit_spin.setValue(1)
+            self.view_slice_fit_spin.blockSignals(False)
+            self._display_slice_fit(results[0], switch_tab=True)
+            return
         elif what == "curve_fit":
             if not self._relaxation_fit_results:
                 raise ValueError("The curve fit is no longer stored with this spectrum.")
@@ -32586,6 +32991,13 @@ class MainWindow(QMainWindow):
         copy_action = menu.addAction("Copy Parameters")
         export_action = menu.addAction("Export Parameters to CSV…")
         menu.addSeparator()
+        copy_to = None
+        if self._copy_fit_kind(node)[0] is not None:
+            copy_to = menu.addAction("Copy Fit To…")
+            copy_to.setToolTip("Use this fit as the starting point for another experiment: a "
+                               "curve fit (T1, T2…) for another profile, or a lineshape fit for "
+                               "another spectrum or slice.")
+            menu.addSeparator()
         restore = menu.addAction("Restore")
         restore.setToolTip("Put this fit back in the panel that made it, as its current fit.")
         chosen = menu.exec(global_pos)
@@ -32603,6 +33015,8 @@ class MainWindow(QMainWindow):
                 dialog.export_csv()
         elif chosen is restore:
             self._restore_tree_fit(node)
+        elif copy_to is not None and chosen is copy_to:
+            self._on_copy_fit_to(node)
 
     # ---- a fit entry's parameters and errors ------------------------------
 
@@ -32652,6 +33066,23 @@ class MainWindow(QMainWindow):
                 result=result if isinstance(result, dict) else None,
                 report=entry.get("report") or "")
             record["fitted"] = entry.get("time", "")
+            return record
+        if what == "series_fit":
+            results = raw.get("slice_fit_results") or []
+            values = {}
+            for result in results:
+                if not result.get("model_fit"):
+                    continue
+                for k, site in enumerate(result.get("site_labels") or []):
+                    cells = values.setdefault(f"Slice {result['index']}, {site}", {})
+                    cells["Area"] = {"value": result["integrals"][k],
+                                     "error": result["integral_errors"][k]}
+                    cells["Relative amplitude"] = {"value": result["amplitudes"][k],
+                                                   "error": result["amplitude_errors"][k]}
+                    cells["R²"] = {"value": result.get("r_squared")}
+            record = nb_fit_values.values_record(
+                values, fit=node.get("label") or "Model applied to every slice",
+                spectrum=label, source=source) if values else None
             return record
         if what == "slice_fit":
             results = raw.get("slice_fit_results") or []

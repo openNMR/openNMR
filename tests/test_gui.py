@@ -8133,7 +8133,13 @@ def test_main_window_view_curve_fit_row_sits_below_fit_curve_settings(qapp):
     assert window._curve_fit_plot_dialog.isAncestorOf(window.relaxation_uncertainty_checkbox)
     keep = window.curve_fit_plot_box.keep_button
     layout = tab.layout()
-    assert layout.indexOf(fit_curve_settings_box) < layout.indexOf(keep)
+    # Keep sits in the "This curve fit" group, itself a child of the tab's layout
+    # (2026-11-16: the result buttons were gathered into one labelled group).
+    holder = keep
+    while holder is not None and layout.indexOf(holder) < 0:
+        holder = holder.parentWidget()
+    assert holder is not None
+    assert layout.indexOf(fit_curve_settings_box) < layout.indexOf(holder)
 
 
 def test_main_window_analysis_tab_labels_renamed_for_clarity(qapp):

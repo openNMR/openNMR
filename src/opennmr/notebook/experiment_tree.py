@@ -23,7 +23,7 @@ experiments row it selects: its own, or for a fit stored with a spectrum
 that spectrum's), ``entry_id`` (of that row), ``virtual`` (True when it is
 not itself a row), ``action`` (what opening it does: ``None`` to show the
 row, or ``("stored_fit", key)``, ``("slice_fit",)``, ``("curve_fit",)``,
-``("fit_model", id)``), ``tooltip``, ``key`` (stable, for remembering what
+``("fit_model", id)``, ``("series_fit", kind)``), ``tooltip``, ``key`` (stable, for remembering what
 is expanded) and ``children``.
 """
 
@@ -61,6 +61,14 @@ def entry_kind(raw: dict | None) -> str:
     return "spectrum"
 
 
+def series_fit_label(label: str, slices=None) -> str:
+    """The tree's name for a model applied to every slice: the stored
+    label ("Solid-state NMR model, every slice") read as what it is."""
+    base = _text(label, "Model").replace(", every slice", "").strip()
+    count = f", {slices} slices" if isinstance(slices, int) and slices > 1 else ""
+    return f"{base} applied to every slice{count}"
+
+
 def _stored_fit_nodes(entry) -> list[dict]:
     """The fits stored with one open experiment (not rows themselves)."""
     raw, row, eid = entry.get("raw") or {}, entry["row"], entry.get("entry_id")
@@ -72,6 +80,21 @@ def _stored_fit_nodes(entry) -> list[dict]:
             continue
         label = _text(record.get("label"), PANEL_LABELS.get(key, str(key)))
         tip = "\n".join(t for t in (_text(record.get("target")), _text(record.get("time"))) if t)
+        if str(key).startswith("series_"):
+            # A fitted lineshape model applied to every slice of a series (no
+            # panel owns it: it is shown as the per-slice fits it made).
+            kind = str(key)[len("series_"):]
+            inputs = record.get("inputs") if isinstance(record.get("inputs"), dict) else {}
+            slices = inputs.get("slices")
+            name = series_fit_label(label, slices)
+            tip = "\n".join(t for t in (
+                "The fitted lineshapes of one slice, held fixed, scaled to each slice in "
+                "turn (amplitude per site per slice). Feeds Fit Curve.",
+                _text(record.get("inputs_text")), tip) if t)
+            nodes.append(_node("fit", name, row, eid, virtual=True,
+                               action=("series_fit", kind), tooltip=tip,
+                               key=f"{eid}:fit:{key}"))
+            continue
         nodes.append(_node("fit", f"{label} fit", row, eid, virtual=True,
                            action=("stored_fit", key), tooltip=tip, key=f"{eid}:fit:{key}"))
     slices = raw.get("slice_fit_results")
