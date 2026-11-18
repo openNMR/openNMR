@@ -666,6 +666,26 @@ class CpBuildupPanel(QWidget):
                 cpb.plot_cp_buildups(series_list, fits, figure=figure)
         self._draw(draw, "profile")
 
+    def show_stored(self, results: dict) -> bool:
+        """Plot a fit kept with a spectrum (``fits["cp_buildup"]["result"]``)
+        again, on the Fit view, whatever the panel holds now. False when the
+        kept result has no usable curve."""
+        series_list, fits = cpb.series_fits_from_stored(results)
+        if not series_list:
+            return False
+        self._draw_stored(series_list, fits)
+        return True
+
+    def _draw_stored(self, series_list, fits) -> None:
+        def draw(figure):
+            style = self._style("profile")
+            if len(series_list) == 1:
+                cpb.plot_cp_buildup(series_list[0], fits.get(series_list[0]["name"]),
+                                    figure=figure, colour=style.get("trace_color") or "black")
+            else:
+                cpb.plot_cp_buildups(series_list, fits, figure=figure)
+        self._draw(draw, "profile")
+
     # ------------------------------------------------------------------
     # fit
     # ------------------------------------------------------------------

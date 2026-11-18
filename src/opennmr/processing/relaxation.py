@@ -2163,7 +2163,7 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
 #:
 #: ``"integral"`` survives as the historical name and resolves to
 #: whichever of the two the slices actually carry.
-_VALUE_SOURCES = ("integral", "region", "area", "amplitude")
+_VALUE_SOURCES = ("integral", "region", "area", "amplitude", "amplitude_raw")
 
 
 def _default_peak_label(fits, peak_index: int, value_source: str) -> str:
@@ -2314,11 +2314,16 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
         ``integrals_norm`` (percentage) rather than raw integrals. Not
         recommended for absolute T1/T2 amplitude interpretation, but
         harmless for the relaxation *time* itself.
-    value_source : {'integral', 'amplitude'}, optional
+    value_source : {'integral', 'region', 'area', 'amplitude', 'amplitude_raw'}, optional
         ``'integral'`` (default): each peak's integrated area (see
         ``normalised``) -- more robust to per-slice lineshape/linewidth
         changes than a single point estimate, since it sums over the
         whole peak rather than reading one point off it.
+        ``'amplitude_raw'``: the peak height in the spectrum's own units. For a
+        peak fit that is ``'amplitude'`` itself; for a model applied to every
+        slice (whose ``'amplitude'`` is relative to the reference slice, so it
+        reaches above 1 if that slice is not the strongest) it is that times
+        the site's reference height.
         ``'amplitude'``: the peak's own fitted pseudo-Voigt/Gaussian/
         Lorentzian amplitude instead -- simpler "peak height" reading,
         but more sensitive to a linewidth change across slices being
@@ -2378,7 +2383,7 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
     # areas and amplitudes like a peak fit, under its own keys.
     model_fit = bool(fits[0].get("model_fit"))
     fitted_slices = "popt" in fits[0] or model_fit
-    if value_source in ("area", "amplitude") and not fitted_slices:
+    if value_source in ("area", "amplitude", "amplitude_raw") and not fitted_slices:
         raise ValueError(
             f"value_source={value_source!r} needs peaks fitted with NMR2D_fit_slices – "
             f"these slices came from NMR2D_integrate_slices, which measures a region "
@@ -2400,12 +2405,23 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
     t = _get_delays(fits, vdlist)
     order = np.argsort(t)
 
-    if value_source == "amplitude" and model_fit:
+    if value_source == "amplitude_raw" and model_fit:
+        if any(fit.get("raw_amplitudes") is None for fit in fits):
+            raise ValueError(
+                "These per-slice fits were made before raw amplitudes were kept with them. "
+                "Fit every slice again, then choose the raw amplitude.")
+        per_fit_amplitudes = [list(fit["raw_amplitudes"]) for fit in fits]
+        per_fit_amplitude_errors = [list(fit.get("raw_amplitude_errors")
+                                         or [None] * len(fit["raw_amplitudes"]))
+                                    for fit in fits]
+        n_peaks = max(len(v) for v in per_fit_amplitudes)
+    elif value_source == "amplitude" and model_fit:
         per_fit_amplitudes = [list(fit["amplitudes"]) for fit in fits]
         per_fit_amplitude_errors = [list(fit.get("amplitude_errors") or [None] * len(fit["amplitudes"]))
                                     for fit in fits]
         n_peaks = max(len(v) for v in per_fit_amplitudes)
-    elif value_source == "amplitude":
+    elif value_source in ("amplitude", "amplitude_raw"):
+        # A peak fit's own amplitude is already the height in the data's units.
         per_fit_amplitudes = []
         per_fit_amplitude_errors = []
         for fit in fits:
@@ -2426,7 +2442,7 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
 
     for peak_i in range(n_peaks):
 
-        if value_source == "amplitude":
+        if value_source in ("amplitude", "amplitude_raw"):
             y = np.array([vals[peak_i] if len(vals) > peak_i else np.nan
                           for vals in per_fit_amplitudes])[order]
         else:
@@ -2436,7 +2452,7 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
 
         y_err = None
         if use_errors:
-            if value_source == "amplitude":
+            if value_source in ("amplitude", "amplitude_raw"):
                 errs = [errs_i[peak_i] if len(errs_i) > peak_i else None
                         for errs_i in per_fit_amplitude_errors]
             else:

@@ -138,7 +138,7 @@ from .fit_values_dialog import FitValuesDialog
 from ..notebook import experiment_tree as nb_experiment_tree
 from . import style as style_module
 from .style import apply_theme, remember_system_theme
-from .widgets.canvas import MplCanvas
+from .widgets.canvas import MplCanvas, SeriesStyle
 from .widgets.drag_control import DragHandle
 from .widgets.relative_spinbox import RelativeDoubleSpinBox
 from .widgets.data_browser import DataBrowser
@@ -6421,6 +6421,8 @@ class MainWindow(QMainWindow):
         canvas = self._series_target_canvas()
         if canvas is None:
             return
+        if canvas is self.compare_canvas and canvas._active_series_view() == "compare":
+            self._forget_compare_colours_shown()
         canvas.reset_series_colours()
         self._refresh_slice_colour_rows()
 
@@ -9021,6 +9023,64 @@ class MainWindow(QMainWindow):
             return base
         return f"{base} · {self._slice_label(self.session.spectra[session_index], slice_index)}"
 
+    # ---- Compare colours, kept with the experiment (explicit user request,
+    # 2026-11-17: an openNMR state remembers the colour of each dataset in
+    # Compare). The colour a series was given by hand lives in the canvas's
+    # series list, keyed by the entry's session row -- which a state cannot
+    # keep -- so it is also kept in the experiment's own session bookkeeping
+    # (``info["compare_colours"]``: ``{"spectrum" | "slice N": "#rrggbb"}``),
+    # which moves with the experiment and is what the state saves.
+
+    @staticmethod
+    def _compare_colour_slot(entry) -> str:
+        return "spectrum" if entry[1] is None else f"slice {entry[1]}"
+
+    def _sync_compare_colours_from_canvas(self) -> None:
+        """Take every colour set by hand on the Compare plot into the
+        experiments' bookkeeping, so it outlives the redraw, an unticked
+        box, and a saved state."""
+        for style in self.compare_canvas._series.get("compare", []):
+            if not style.colour_overridden:
+                continue
+            entry = self._compare_series_entries.get(style.key)
+            if entry is None or not (0 <= entry[0] < len(self.session)):
+                continue
+            info = self._history_info(entry[0])
+            if isinstance(info, dict):
+                info.setdefault("compare_colours", {})[self._compare_colour_slot(entry)] = style.colour
+
+    def _prepare_compare_series(self, keys, entries) -> None:
+        """Before a Compare draw: keep the colours set on the plot so far,
+        name what is about to be drawn, and hand each entry its remembered
+        colour (the canvas keeps a colour it already holds as set by hand)."""
+        self._sync_compare_colours_from_canvas()
+        self._compare_series_entries = dict(zip(keys, (tuple(e) for e in entries)))
+        series = self.compare_canvas._series.setdefault("compare", [])
+        held = {style.key: style for style in series}
+        for key, entry in self._compare_series_entries.items():
+            if not (0 <= entry[0] < len(self.session)):
+                continue
+            info = self._history_info(entry[0])
+            colour = (info.get("compare_colours") or {}).get(
+                self._compare_colour_slot(entry)) if isinstance(info, dict) else None
+            if not colour:
+                continue
+            style = held.get(key)
+            if style is None:
+                series.append(SeriesStyle(key=key, label="", colour=colour, can_rename=False,
+                                          colour_overridden=True))
+            elif not style.colour_overridden:
+                style.colour, style.colour_overridden = colour, True
+
+    def _forget_compare_colours_shown(self) -> None:
+        """Reset Colours on the Compare plot: the remembered colours of what
+        it shows go too, or the next draw would bring them back."""
+        for entry in self._compare_series_entries.values():
+            if 0 <= entry[0] < len(self.session):
+                info = self._history_info(entry[0])
+                if isinstance(info, dict):
+                    (info.get("compare_colours") or {}).pop(self._compare_colour_slot(entry), None)
+
     def _resolve_compare_entry(self, entry: tuple[int, int | None]):
         """The actual 1D ``NMRSpectrum`` a Compare-list entry refers
         to -- either a whole (already-1D) spectrum, or one extracted
@@ -9394,7 +9454,7 @@ class MainWindow(QMainWindow):
             entries = [self.compare_list.item(row).data(Qt.ItemDataRole.UserRole)
                        for row in plot_rows]
             keys = [repr(tuple(entry)) for entry in entries]
-            self._compare_series_entries = dict(zip(keys, (tuple(e) for e in entries)))
+            self._prepare_compare_series(keys, entries)
             self.compare_canvas.show_compare(
                 plot_spectra, mode=mode, normalize=(norm_mode == "max"),
                 shared_scale=self.compare_common_scale_check.isChecked(),
@@ -9495,7 +9555,7 @@ class MainWindow(QMainWindow):
         options_2d = dict(self.compare_2d_controls.plot_options())
         options_2d["show_projections"] = self.compare_2d_controls.projections_check.isChecked()
         try:
-            self._compare_series_entries = dict(zip(keys, (tuple(e) for e in entries)))
+            self._prepare_compare_series(keys, entries)
             self.compare_canvas.show_compare_panels(
                 spectra, groups, layout=layout, ncols=controls.columns(),
                 linked=controls.linked(), link_y=controls.linked_y(),
@@ -9534,7 +9594,7 @@ class MainWindow(QMainWindow):
         controls.set_panel_count(len(groups))
         self.compare_label_controls.set_panel_count(len(groups))
         try:
-            self._compare_series_entries = dict(zip(keys, (tuple(e) for e in entries)))
+            self._prepare_compare_series(keys, entries)
             self.compare_canvas.show_compare_panels(
                 spectra, groups, layout=layout, ncols=controls.columns(),
                 linked=controls.linked(), link_y=controls.linked_y(),
@@ -12882,6 +12942,7 @@ class MainWindow(QMainWindow):
         (and ``slices`` of 2Ds) -- shared by Save openNMR State and the
         autosave."""
         entries = []
+        self._sync_compare_colours_from_canvas()
         for index in indices:
             self._flush_pending_state(index)
             spectrum = self.session.spectra[index]
@@ -12900,6 +12961,7 @@ class MainWindow(QMainWindow):
             prefer_copy = (kind == "experiment" and spectrum.ndim == 2
                            and not self._fid_reprocessable(spectrum))
             entries.append({"label": self.session.label(index), "kind": kind, "spectrum": spectrum,
+                            "compare_colours": dict(info.get("compare_colours") or {}),
                             "state": self._history_state(index), "source": source,
                             "origin": info.get("origin"), "prefer_copy": prefer_copy,
                             "copy": (kind != "experiment" or spectrum.ndim == 1 or copy_2d
@@ -13124,6 +13186,10 @@ class MainWindow(QMainWindow):
                                     "opened the saved processed copy (not reprocessable).")
                 else:
                     messages.append(f"{label}: opened from the saved copy.")
+            colours = entry.get("compare_colours")
+            if isinstance(colours, dict) and colours:
+                self._history_info(index)["compare_colours"] = {
+                    str(k): str(v) for k, v in colours.items() if v}
             history = self._ensure_history(index)
             if history is not None:
                 io_history.add_event(history, f"Opened from openNMR state “{info['name']}” "
@@ -22540,6 +22606,9 @@ class MainWindow(QMainWindow):
         self.value_source_combo.addItem("Fitted peak area", "area")
         self.value_source_combo.addItem("Fitted peak amplitude", "amplitude")
         self.value_source_combo.addItem("Integrated region (no fit)", "region")
+        # Last, so a saved state's index keeps meaning what it did
+        # (explicit user request, 2026-11-17).
+        self.value_source_combo.addItem("Fitted peak amplitude (raw)", "amplitude_raw")
         self._narrow_combo(self.value_source_combo)
         self.value_source_combo.setToolTip(
             "What each slice's per-peak value is, for the curve fit.\n\n"
@@ -22549,6 +22618,11 @@ class MainWindow(QMainWindow):
             "Fitted peak amplitude — the fitted peak's height alone. Simpler, "
             "but a linewidth change then mimics an intensity change. Also "
             "needs Fit Spectrum.\n\n"
+            "Fitted peak amplitude (raw) — the peak height in the spectrum's own "
+            "units, not normalised. For a peak fit it is the same as Fitted peak amplitude. "
+            "For a model applied to every slice (Fit Every Slice), where Fitted peak amplitude "
+            "is relative to the slice the lineshapes came from (1 there, above 1 in any "
+            "stronger slice), this is that times the site's height on that slice.\n\n"
             "Integrated region (no fit) — the raw sum over each region from "
             "Integrate Regions, with no lineshape fitted to it at all. Use "
             "this when the peaks are too overlapped or too odd-shaped to fit, "
@@ -28435,6 +28509,12 @@ class MainWindow(QMainWindow):
         # of number that gets copied into a paper, and by the time it
         # is being read the Values row is no longer on screen.
         note = getattr(self, "_values_note", None)
+        # Relative amplitudes above 1: the lineshapes came from a slice that is
+        # not the strongest (explicit user request, 2026-11-17).
+        if self.value_source_combo.currentData() == "amplitude":
+            reference_note = nb_series_fitting.reference_slice_note(slice_results)
+            if reference_note:
+                note = f"{note}\n{reference_note}" if note else reference_note
         if note:
             summary = f"⚠ {note}\n\n{summary}"
         provenance = getattr(self, "_values_provenance", None)
@@ -29964,7 +30044,8 @@ class MainWindow(QMainWindow):
         # position, which may have moved since.
         plot_label, scale = self._fit_plot_axis()
         x_label = plot_label.replace("s/m²", "s/m^2").lower()
-        value_label = "amplitude" if self.value_source_combo.currentData() == "amplitude" else "integral"
+        value_label = ("amplitude" if self.value_source_combo.currentData() in ("amplitude", "amplitude_raw")
+                       else "integral")
 
         default = f"curve_fit_{value_label}.csv"
         path, _selected = QFileDialog.getSaveFileName(
@@ -30666,12 +30747,16 @@ class MainWindow(QMainWindow):
                 f"{len(labels)} site(s) ({', '.join(labels)}), shapes from "
                 + (f"slice {row}" if row else "the fitted slice")
                 + (f" ({source_label})" if plan["source"] != parent_index else "") + ". "
-                "Ready for Dynamics ▸ Fit Curve (Value source: Area, or Amplitude for the "
-                "intensity relative to that slice).")
+                "Ready for Dynamics ▸ Fit Curve (Value source: Area; Amplitude for the intensity "
+                "relative to that slice; or Amplitude (raw) for the height in the spectrum's "
+                "own units).")
         if low:
             text += (f" R² < 0.9 in slice(s) {', '.join(map(str, low[:12]))}"
                      f"{'…' if len(low) > 12 else ''} — expected once the signal has decayed; "
                      "otherwise the lineshape may be changing.")
+        reference_note = nb_series_fitting.reference_slice_note(results)
+        if reference_note:
+            text += f" ⚠ {reference_note}"
         if mismatch:
             text += (f" ⚠ The extracted slice no longer matches row {row} of the 2D (phased or "
                      "processed on its own?) — use “Apply Phase to Source 2D” first, or the "
@@ -32394,6 +32479,27 @@ class MainWindow(QMainWindow):
             self.compare_list.item(i).data(Qt.ItemDataRole.UserRole) == (row, i + 1) for i in range(n)
         )
 
+    def _release_view_limits_of_other_spectrum(self, spectrum, row: int | None = None) -> None:
+        """Typed axis limits (Plot Style ▸ Axis limits) belong to the
+        experiment they were typed for: a different experiment opens on its
+        own automatic range (user reports 2026-11-15 and 2026-11-17: they
+        "got stuck" from one experiment to another). Each spectrum canvas
+        remembers whose limits it holds -- the experiment's session
+        bookkeeping dict, which stays with it through reprocessing -- and
+        lets them go when another is drawn. The same experiment again keeps
+        them."""
+        if row is None or not (0 <= row < len(self.session)):
+            row = self._row_of_spectrum(spectrum)
+        if row is None or not (0 <= row < len(self.session)):
+            return
+        info = self._history_info(row)
+        if info is None:
+            return
+        for canvas in (self.canvas, self.processing_preview_canvas):
+            if getattr(canvas, "_view_limits_owner", None) is not info:
+                canvas.forget_view_limits()
+                canvas._view_limits_owner = info
+
     def _draw_selected_spectrum(self, spectrum, row: int | None = None) -> None:
         """The actual draw step behind a selection change -- also used
         standalone (e.g. by the pseudo-2D view combo) when the
@@ -32405,6 +32511,9 @@ class MainWindow(QMainWindow):
         relevant right after a real selection change)."""
         # Insets belong to the spectrum they were drawn on.
         self.canvas.set_inset_context(id(spectrum))
+        # So do typed axis limits -- whichever way the spectrum came to be
+        # drawn (selection, load, a tree click, removal of the one before).
+        self._release_view_limits_of_other_spectrum(spectrum, row)
         # Set only across _load's select-then-apply-sidecar window, where
         # a second draw is guaranteed to follow (see _load). Never a way
         # to leave the canvas stale: nothing else sets it, and _load
@@ -32962,6 +33071,19 @@ class MainWindow(QMainWindow):
                 if not self._csa_fit_result:
                     raise ValueError("The CSA fit is no longer stored with this spectrum.")
                 self._draw_csa_fit()
+            elif key == "cp_buildup":
+                entry = (spectrum.metadata.raw.get("fits") or {}).get(key) or {}
+                try:
+                    stored = io_serialize.decode(copy.deepcopy(entry.get("result")))
+                except Exception:  # noqa: BLE001 -- told below
+                    stored = None
+                if not isinstance(stored, dict) or not self.cp_buildup_panel.show_stored(stored):
+                    raise ValueError("The CP build-up curve is no longer stored with this "
+                                     "spectrum.")
+            elif key not in self._fit_panels() and key != "multi":
+                # A kept result no panel redraws (DNP and the like): its report.
+                entry = (spectrum.metadata.raw.get("fits") or {}).get(key) or {}
+                raise ValueError(entry.get("report") or "That result has no plot to show.")
             else:
                 panel = self._fit_panels().get(key) if key != "multi" else self.multi_fit_panel
                 if panel is None or not getattr(panel, "result", None):

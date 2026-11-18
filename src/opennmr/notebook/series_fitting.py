@@ -26,7 +26,10 @@ the covariance ``s^2 (A^T A)^-1``.
 For each slice and site it reports:
 
 ``amplitudes`` : ``a_k`` -- the site's intensity relative to the
-    reference slice (1 there, up to noise and baseline).
+    reference slice (1 there, up to noise and baseline). Above 1 wherever
+    a slice is stronger than the reference (see :func:`reference_slice_note`).
+``raw_amplitudes`` : ``a_k`` times the site's height on the reference
+    curve -- the peak height in the spectrum's own units, not normalised.
 ``integrals`` : ``a_k`` times the area of site k's reference curve --
     the site's fitted area in this slice, in the spectrum's intensity
     units x ppm. The natural T1/T2 quantity.
@@ -188,6 +191,10 @@ def fit_series_with_lineshapes(spectrum, x_components, components, labels=None, 
     # Signed: an inverted reference slice (early in inversion recovery)
     # has negative site curves, and the area must keep that sign.
     areas = np.array([float(_trapezoid(c, xc)) for c in comps])
+    # Each site's height on the reference (the value at its largest |value|,
+    # so the sign of an inverted reference is kept): what turns a relative
+    # amplitude into a peak height in the spectrum's own units.
+    heights = np.array([float(c[int(np.argmax(np.abs(c)))]) if c.size else 0.0 for c in comps])
 
     results = []
     for index, trace in _as_rows(spectrum, rows):
@@ -246,6 +253,11 @@ def fit_series_with_lineshapes(spectrum, x_components, components, labels=None, 
             "fit_mask": native(mask),
             "amplitudes": [float(v) for v in amps],
             "amplitude_errors": [float(v) for v in amp_err],
+            # The same amplitudes in the spectrum's own units (a_k times the
+            # site's reference height): what a peak fit's own amplitude is.
+            "raw_amplitudes": [float(v) for v in amps * heights],
+            "raw_amplitude_errors": [float(v) for v in amp_err * np.abs(heights)],
+            "reference_heights": [float(v) for v in heights],
             "integrals": [float(v) for v in amps * areas],
             "integral_errors": [float(v) for v in amp_err * areas],
             "site_labels": labels, "reference_areas": [float(v) for v in areas],
@@ -255,6 +267,46 @@ def fit_series_with_lineshapes(spectrum, x_components, components, labels=None, 
             "baseline_mode": baseline, "fit_regions": fit_regions,
         })
     return results
+
+
+def reference_slice_note(results) -> str | None:
+    """A warning when the relative amplitudes of a model fitted to every slice
+    exceed 1, or ``None``.
+
+    ``amplitudes`` are relative to the slice the lineshapes came from (1
+    there). If that is not the slice with the most signal, the stronger slices
+    read above 1 and a relaxation curve drawn from them runs above 1 too --
+    correct, but easy to mistake for an error. Says which slice is the
+    strongest, and what to do."""
+    if not results or not results[0].get("model_fit"):
+        return None
+    amps = [r.get("amplitudes") for r in results]
+    if any(a is None for a in amps):
+        return None
+    n_sites = min(len(a) for a in amps)
+    if not n_sites:
+        return None
+    table = np.abs(np.array([list(a)[:n_sites] for a in amps], float))
+    labels = list(results[0].get("site_labels") or [])
+    high = []
+    for k in range(n_sites):
+        column = table[:, k]
+        if not np.any(np.isfinite(column)):
+            continue
+        i = int(np.nanargmax(column))
+        if column[i] > 1.05:
+            high.append((labels[k] if k < len(labels) else f"Site {k + 1}",
+                         float(column[i]), int(results[i]["index"])))
+    if not high:
+        return None
+    reference = results[0].get("reference_row")
+    where = f"slice {reference}" if reference else "the reference slice"
+    reached = "; ".join(f"{name} {value:.2f} (slice {index})" for name, value, index in high[:4])
+    strongest = high[0][2]
+    return (f"The lineshapes were taken from {where}, which is not the strongest slice: "
+            f"relative amplitudes reach {reached}, so the curve goes above 1. Take the "
+            f"lineshapes from slice {strongest} to have 1 at the maximum, or choose Value "
+            "source ▸ Fitted peak amplitude (raw) for values in the spectrum's own units.")
 
 
 def series_fit_report(results) -> str:

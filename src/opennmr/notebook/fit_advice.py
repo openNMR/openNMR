@@ -1080,6 +1080,11 @@ def advise_series(results):
                     "tells", "warn",
                     f"{label} is within the noise in every slice: no relaxation curve can be "
                     "measured from it."))
+    if is_model:
+        from .series_fitting import reference_slice_note
+        note = reference_slice_note(results)
+        if note:
+            items.append(_item("tells", "warn", note))
     # Isotropic fits' own limits.
     hits = [r["index"] for r in results if any("bound" in str(w) for w in r.get("warnings") or [])]
     if hits:

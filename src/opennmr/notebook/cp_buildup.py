@@ -433,6 +433,41 @@ def cp_report(fit: dict, series: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+def series_fits_from_stored(results: dict):
+    """Rebuild ``(series_list, fits)`` -- as :func:`cp_series_regions` and
+    :func:`fit_cp_buildup` made them -- from the ``result`` the CP build-up
+    panel keeps with each spectrum (``{region name: {model, region_ppm,
+    params, errors, fixed, t_us, y, y_err, ...}}``), so a kept fit can be
+    plotted again without the panel having made it in this session."""
+    series_list, fits = [], {}
+    for name, rec in (results or {}).items():
+        if not isinstance(rec, dict) or rec.get("t_us") is None or rec.get("model") not in MODELS:
+            continue
+        t = np.asarray(rec["t_us"], float)
+        y = np.asarray(rec["y"], float)
+        e = rec.get("y_err")
+        e = np.asarray(e, float) if e is not None else None
+        lo, hi = rec.get("region_ppm") or (0.0, 0.0)
+        series_list.append({"name": name, "t_us": t, "y": y, "y_err": e, "region": (lo, hi),
+                            "unit": "integral (a.u.)", "labels": [], "raw": [], "notes": [],
+                            "baseline": None, "divide_rg": False})
+        model = rec["model"]
+        names = list(MODELS[model]["params"])
+        params = {k: float(v) for k, v in (rec.get("params") or {}).items()}
+        if any(n not in params for n in names):
+            continue
+        t_hi = max(float(np.max(t)) * 1.1, 1.0) if t.size else 1.0
+        curve_t = np.linspace(0.0, t_hi, 600)
+        func = MODELS[model]["func"]
+        curve_y = func(curve_t, *[params[n] for n in names])
+        fits[name] = {"model": model, "model_name": MODELS[model]["name"], "params": params,
+                      "errors": dict(rec.get("errors") or {}), "fixed": dict(rec.get("fixed") or {}),
+                      "t": t, "y": y, "curve_t": curve_t, "curve_y": curve_y,
+                      "r_squared": rec.get("r_squared"), "t_max_us": rec.get("t_max_us"),
+                      "equation": MODELS[model]["equation"], "reference": REFERENCE}
+    return series_list, fits
+
+
 def plot_cp_buildup(series: dict, fit: dict | None = None, ax=None, time_unit: str = "auto",
                     colour=None, label: str | None = None, figure=None, fit_colour=None):
     """The build-up curve: points (with their integral errors) against

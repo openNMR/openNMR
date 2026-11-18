@@ -25,7 +25,7 @@ from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QSizePolicy, QToolButton, QWidget
 
 #: Window width (px) below which the box folds to a button.
-COMPACT_BELOW = 1180
+COMPACT_BELOW = 1240
 
 
 class SearchBox(QWidget):
@@ -49,8 +49,9 @@ class SearchBox(QWidget):
             "Where is…? Type part of what you want – baseline, export, T1, line "
             "broadening – and choose a result to go straight to it. ↑/↓ to choose, "
             "Enter to go, Esc to close. Show or hide this box with View ▸ Show Search Box.")
-        self.edit.setMinimumWidth(170)
-        self.edit.setMaximumWidth(280)
+        # Marginally wider than first made (explicit user request, 2026-11-17).
+        self.edit.setMinimumWidth(230)
+        self.edit.setMaximumWidth(360)
         self.edit.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.edit.setProperty("palette_exclude", True)
         self.edit.textEdited.connect(self._on_text)
@@ -59,6 +60,9 @@ class SearchBox(QWidget):
 
         self.button = QToolButton()
         self.button.setText("🔍")
+        # Slightly larger magnifier (explicit user request, 2026-11-17).
+        self.button.setMinimumSize(40, 34)
+        self.button.setStyleSheet("QToolButton { font-size: 18px; }")
         self.button.setToolTip("Search (Ctrl+H): find any action, panel or control and go to it.")
         self.button.setProperty("palette_exclude", True)
         self.button.clicked.connect(lambda _c=False: self._window.show_command_palette())

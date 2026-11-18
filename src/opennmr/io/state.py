@@ -163,7 +163,8 @@ def save_state(folder: str, name: str, entries: list[dict], notes: str = "",
     ``spectrum`` (the :class:`NMRSpectrum` as it is now), ``state`` (its
     tracked processing state; default: read from the spectrum),
     ``source`` (``{"path", "vendor", "load_kwargs"}`` for an experiment,
-    else None), ``origin`` (optional) and ``copy`` (keep a copy of the
+    else None), ``origin`` (optional), ``compare_colours`` (optional: the colours given
+    by hand in Compare, ``{"spectrum" | "slice N": "#rrggbb"}``) and ``copy`` (keep a copy of the
     data; forced on for anything without a ``source``).
 
     Refuses to write into an existing folder unless ``overwrite`` (then
@@ -195,6 +196,9 @@ def save_state(folder: str, name: str, entries: list[dict], notes: str = "",
         record = {"label": str(entry["label"]), "kind": kind, "source": _json_safe(source),
                   "origin": entry.get("origin"), "state": state, "folder": None,
                   "prefer_copy": bool(entry.get("prefer_copy", False)) and copy,
+                  # Colours given by hand in Compare ({"spectrum" | "slice N": "#rrggbb"}).
+                  "compare_colours": {str(k): str(v) for k, v in
+                                      (entry.get("compare_colours") or {}).items() if v},
                   "shape": list(getattr(spectrum.data, "shape", ())),
                   "nucleus": spectrum.metadata.nucleus}
         if copy:
