@@ -30,7 +30,7 @@ WORK_TYPES = {
     "solution": ("Solution-state only",
                  "Liquids: 1D/2D, integration, J-coupling, relaxation and diffusion.",
                  ("solid", "pnmr", "dnp", "czjzek", "cp_buildup", "offset_tracker",
-                  "batch_pseudo2d", "bpp", "exchange", "advanced")),
+                  "batch_pseudo2d", "bpp", "exchange", "motion", "advanced")),
     "solid": ("Solid-state only (CSA, quadrupolar, J-coupling)",
               "Powders and MAS: tensors, quadrupolar lineshapes, Czjzek, CP build-up.",
               ("solution", "pnmr", "dnp", "enmr", "imaging")),
@@ -88,7 +88,11 @@ class WelcomeWizard(QDialog):
         self.window_ = window
         self.applied = False
         self.setWindowTitle("Welcome to openNMR")
-        self.resize(620, 520)
+        # Never taller or wider than the screen (notes 8.6): each page scrolls
+        # instead of the window growing to the tallest page, which pushed Next
+        # and Skip off the bottom of a small laptop screen.
+        width, height = self._fitted_size(620, 520)
+        self.resize(width, height)
 
         outer = QVBoxLayout(self)
         self.stack = QStackedWidget()
@@ -117,9 +121,30 @@ class WelcomeWizard(QDialog):
 
         for build in (self._welcome_page, self._work_type_page, self._appearance_page, self._plots_page,
                       self._layout_page, self._data_page, self._done_page):
-            self.stack.addWidget(build())
+            self.stack.addWidget(self._scrolling(build()))
         self._initial_sections = {k: b.isChecked() for k, b in self.section_checks.items()}
         self._update_buttons()
+
+    def _fitted_size(self, width: int, height: int) -> tuple[int, int]:
+        """``width`` x ``height`` limited to 90 % of the available screen."""
+        from PySide6.QtGui import QGuiApplication
+        screen = (self.screen() if self.windowHandle() is not None else None) \
+            or QGuiApplication.primaryScreen()
+        if screen is None:
+            return width, height
+        area = screen.availableGeometry()
+        return min(width, int(area.width() * 0.9)), min(height, int(area.height() * 0.9))
+
+    @staticmethod
+    def _scrolling(page: QWidget) -> QScrollArea:
+        """``page`` in a frameless scroll area, so its height no longer sets the
+        window's minimum height."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        return scroll
 
     # ---- pages -----------------------------------------------------------
     def _welcome_page(self) -> QWidget:

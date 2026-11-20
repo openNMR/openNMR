@@ -567,6 +567,15 @@ UNCERTAINTY_KINDS = {
             "(absolute_sigma=True). Independent of how well the model happens to fit."
         ),
     },
+    "measured_inflated": {
+        "short": "1σ (measured errors × √χ²red)",
+        "long": (
+            "1σ, the measured per-point errors scaled by sqrt(max(1, reduced chi-squared)) – the "
+            "Birge-ratio / PDG scale-factor convention. Use it when the point errors (e.g. from "
+            "the spectral noise alone) understate the scatter about the fitted curve; "
+            "see opennmr.notebook.inflated_errors."
+        ),
+    },
     "scatter": {
         "short": "1σ (from residual scatter)",
         "long": (
@@ -840,7 +849,8 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
     }
     # Multi-exponential models: fastest component first, whatever order
     # the optimiser left them in (see relaxometry.sort_components).
-    return _relaxometry.sort_components(result, spec.get("components"))
+    return _relaxometry.sort_components(result, spec.get("components"),
+                                        descending=bool(spec.get("sort_descending")))
 
 
 def decay_fraction(y) -> float:
@@ -1373,7 +1383,8 @@ def attenuation_band(t_fine, y_fine, y_band, i0: float, mode: str = "ln"):
     return t_fine, centre, half
 
 
-def fit_curve_uncertainty(fit_result: dict, n_points: int = 200, sigma: float = 3.0):
+def fit_curve_uncertainty(fit_result: dict, n_points: int = 200, sigma: float = 3.0,
+                          scale_by_chi2: bool = False):
     """A smooth model curve over ``fit_result``'s own delay range, plus
     a linearized (delta-method) uncertainty band at ``sigma`` standard
     deviations -- the same idea as ``lmfit``'s ``eval_uncertainty``
@@ -1388,6 +1399,11 @@ def fit_curve_uncertainty(fit_result: dict, n_points: int = 200, sigma: float = 
     (var(f) = J @ pcov @ J.T), valid near the fitted optimum the same
     way the covariance-derived parameter errors already reported by
     :func:`fit_relaxation` are.
+
+    ``scale_by_chi2`` multiplies the covariance by the reduced chi-squared (when above 1), so
+    the band matches lmfit's ``eval_uncertainty`` default; the fit result's own ``pcov`` is
+    used as it is otherwise. Works directly on a ``fit_relaxation(..., custom_model=...)``
+    result (it carries its ``spec`` and ``free_names``).
 
     Returns ``(t_fine, y_fine, y_band)`` -- plot the shaded region as
     ``y_fine - y_band`` to ``y_fine + y_band``.
@@ -1418,6 +1434,8 @@ def fit_curve_uncertainty(fit_result: dict, n_points: int = 200, sigma: float = 
         p_minus[i] -= step
         jac[:, i] = (curve(p_plus) - curve(p_minus)) / (2 * step)
 
+    if scale_by_chi2:
+        pcov = pcov * max(1.0, float(fit_result.get("fit_quality", {}).get("reduced_chi2", 1.0)))
     variance = np.einsum("ij,jk,ik->i", jac, pcov, jac)
     y_band = sigma * np.sqrt(np.clip(variance, 0.0, None))
 
@@ -1992,7 +2010,8 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
                             normalize=False, x_unit='ppm',
                             subtract_baseline=True, baseline_regions=None,
                             baseline_sigma=2.5, baseline_max_iter=10,
-                            noise_region=None, method: str = "trapezoid") -> dict:
+                            noise_region=None, method: str = "trapezoid",
+                            zero_fill: float = 1.0) -> dict:
     """
     Integrate one or more extracted 2D NMR slices (rows and/or
     columns) over user-specified x-axis regions -- a peak-fitting-free
@@ -2036,6 +2055,10 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
         propagated analytically through the trapezoidal rule (exact
         for independent per-point Gaussian noise), not just assumed
         constant across regions of different widths.
+    zero_fill : float, optional
+        The zero-fill factor of the spectra (1 = none). Zero-filled points are correlated, so
+        the per-point noise propagation understates the integral error by about
+        ``sqrt(zero_fill)``; this factor corrects it (default 1: unchanged).
     method : {'trapezoid', 'simpson'}, optional
         The integration rule (see
         :func:`opennmr.processing.relaxometry.integration_weights`).
@@ -2119,7 +2142,8 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
             # being linear, its noise exactly: I = sum(w_i y_i), so
             # Var(I) = noise^2 sum(w_i^2) for i.i.d. Gaussian noise, for
             # any spacing (relaxometry.integration_weights).
-            integral, error = _relaxometry.integrate(x_r, y_r, method=method, noise=noise)
+            integral, error = _relaxometry.integrate(x_r, y_r, method=method, noise=noise,
+                                                     zero_fill=zero_fill)
 
             integrals.append(integral)
             errors.append(error)

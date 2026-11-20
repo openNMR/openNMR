@@ -103,6 +103,21 @@ from .exchange import (
     exchange_spectrum, exchange_spectra_vs_temperature, fit_exchange_spectra,
     plot_exchange_stack, plot_exchange_fit, coalescence_temperature,
 )
+# Motional lineshapes of anisotropic interactions (tensor reorientation, hops between
+# sites, motionally averaged tensors) -- Dynamics ▸ Anisotropic motion in the GUI.
+from . import motion
+from . import motion_fit
+from .motion import (
+    MotionSite, MotionModel, ring_jump, flip as two_site_flip, ring_diffusion, random_reorientation,
+    custom_mode, cone_jump, motion_spectrum, motion_rate_series, averaged_tensors,
+    effective_site, averaged_spectrum, limit_spectra, plot_motion_series,
+    mode_from_spec, model_from_spec, motion_axis_limits, motion_overlay, motion_overlay_series,
+    plot_motion_overlay, plot_motion_overlay_stack, plot_motion_limits,
+)
+from .motion_fit import (
+    fit_motion, fit_motion_rates, arrhenius_regression, fit_parameter_list as motion_fit_parameters,
+    plot_motion_fit, plot_motion_rates,
+)
 # Tikhonov regularisation: T1/T2/D distributions and T1-T2, T2-T2, D-T2
 # maps (a port of the MATLAB_RELAX_ALGORITHM scripts) -- Dynamics ▸
 # Regularisation in the GUI.
@@ -120,6 +135,8 @@ from .referencing import transfer_sr, transfer_sr_between
 # Phase each slice of a pseudo-2D on its own -- Process ▸ Phase ▸ "Autophase each
 # slice independently" in the GUI.
 from .slice_phase import autophase_slices
+from ..processing.ft import compare_phase_methods
+from . import results_table
 from .drift_correction import (
     correct_bruker_dataset, concatenate_nus_datasets, measure_drift_hz, drift_profile,
     correct_pseudo_2d_fids,
@@ -319,6 +336,14 @@ from .jcoupling_fitting import (
 # re-export -- same object either way, just naming the canonical source here.
 
 from .diffusion import recorded_b_values, recorded_pfg_params
+from .pfg_selection import (
+    select_diffusion_model, format_model_selection, inflated_errors, component_weights_with_errors,
+    parameter_ratio, combine_measurements, free_water_D, water_temperature_from_D,
+    residual_d2o_limit, tail_residual,
+)
+from .pfg_lineshapes import fit_series_shared_shapes, flag_crosstalk, shared_shapes_slice_results
+from .pfg_score_check import (align_rows, check_score_result, score_with_check,
+                              integral_fit_for_check, format_check)
 from .bms_spectrum import generate_bms_spectrum_dict
 from .bms.io_utils import make_particle
 
@@ -391,7 +416,10 @@ from .offset_tracker import (
 # Typefaces for figures (2026-10-17).
 from . import fonts
 from .fonts import available_fonts, font_samples, plot_font_samples, use_font
-from ..plotting.vector_export import save_vector_safe
+from ..plotting.vector_export import save_vector_safe, set_svg_text, get_svg_text
+# Multiply a spectrum by a constant, and name the constant (2026-11-19).
+from . import scaling
+from .scaling import parse_factor, format_factor, scale_spectrum
 
 pt = periodic_table
 pf = pnmr_fit
@@ -404,6 +432,7 @@ from .experiment_notebook import (
 )
 
 __all__ = [
+    "compare_phase_methods", "results_table",
     "add_inset", "remove_insets", "insets_of", "INSET_DEFAULTS", "INSET_CORNERS",
     "integral_labels", "add_integral_labels", "remove_integral_labels", "normalised_integrals",
     "integral_reference_region", "attenuation", "attenuation_values", "ATTENUATION_MODES",
@@ -584,6 +613,22 @@ __all__ = [
     "plot_vs_temperature", "plot_hendrickson_bray", "fit_vt_regions", "plot_arrhenius_regions",
     "exchange_spectrum", "exchange_spectra_vs_temperature", "fit_exchange_spectra",
     "plot_exchange_stack", "plot_exchange_fit", "coalescence_temperature",
+    # dynamics: motional lineshapes of anisotropic interactions
+    "select_diffusion_model", "format_model_selection", "inflated_errors",
+    "component_weights_with_errors", "parameter_ratio", "combine_measurements", "free_water_D",
+    "water_temperature_from_D", "residual_d2o_limit", "tail_residual",
+    "fit_series_shared_shapes", "flag_crosstalk", "shared_shapes_slice_results",
+    "integral_fit_for_check", "format_check", "align_rows", "check_score_result",
+    "score_with_check",
+    "motion", "MotionSite", "MotionModel", "ring_jump", "two_site_flip", "ring_diffusion",
+    "random_reorientation", "custom_mode", "cone_jump", "motion_spectrum",
+    "motion_rate_series", "averaged_tensors", "effective_site", "averaged_spectrum",
+    "limit_spectra", "plot_motion_series",
+    "mode_from_spec", "model_from_spec", "motion_axis_limits", "motion_overlay",
+    "motion_overlay_series", "plot_motion_overlay", "plot_motion_overlay_stack",
+    "plot_motion_limits",
+    "motion_fit", "fit_motion", "fit_motion_rates", "arrhenius_regression",
+    "motion_fit_parameters", "plot_motion_fit", "plot_motion_rates",
     # dynamics: Tikhonov regularisation (distributions and 2D maps)
     "regularisation", "regularise", "regularise_2d", "plot_regularisation",
     "plot_regularisation_2d", "static_gradient_b", "regularisation_subsample",
@@ -613,7 +658,9 @@ __all__ = [
     "offset_series_regions", "plot_offset_series_regions",
     # typefaces and Illustrator-safe vector saves
     "fonts", "available_fonts", "font_samples", "plot_font_samples", "use_font",
-    "save_vector_safe",
+    "save_vector_safe", "set_svg_text", "get_svg_text",
+    # scaling a spectrum by a constant
+    "scaling", "parse_factor", "format_factor", "scale_spectrum",
     # one experiment as a Jupyter notebook
     "experiment_notebook", "write_experiment_notebook", "export_experiment_notebook",
 ]

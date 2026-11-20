@@ -51,12 +51,13 @@ class SearchBox(QWidget):
             "Enter to go, Esc to close. Show or hide this box with View ▸ Show Search Box.")
         # Marginally wider than first made (explicit user request, 2026-11-17).
         self.edit.setMinimumWidth(230)
-        self.edit.setMaximumWidth(360)
-        self.edit.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        # Scales with the window (user report, 2026-11-19): expanding, with a generous cap.
+        self.edit.setMaximumWidth(720)
+        self.edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.edit.setProperty("palette_exclude", True)
         self.edit.textEdited.connect(self._on_text)
         self.edit.installEventFilter(self)
-        layout.addWidget(self.edit)
+        layout.addWidget(self.edit, 1)
 
         self.button = QToolButton()
         self.button.setText("🔍")

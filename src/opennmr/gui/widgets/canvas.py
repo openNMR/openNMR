@@ -996,6 +996,9 @@ class MplCanvas(QWidget):
     insetsChanged = Signal()
     #: The user asked for the inset options (right-click on the Inset button).
     insetOptionsRequested = Signal()
+    #: The toolbar's × button was pressed: the owner asks for a factor and
+    #: makes the scaled copy (see MainWindow._on_scale_spectrum_requested).
+    scaleRequested = Signal()
     #: An inset could not be added (the reason).
     insetFailed = Signal(str)
     #: Click-to-pick / drag-to-select switched on or off -- including
@@ -1165,6 +1168,19 @@ class MplCanvas(QWidget):
         self._inset_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._inset_button.customContextMenuRequested.connect(
             lambda _pos: self.insetOptionsRequested.emit())
+
+        # Multiply the spectrum on show by a factor of one's own choosing (user
+        # request, 2026-11-19). A push button, not a mode: it asks, then acts.
+        self._scale_button = QToolButton(self.toolbar)
+        self._scale_button.setText("× Scale")
+        self._scale_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._scale_button.setToolTip(
+            "Multiply this spectrum by a factor you choose (2, 0.5, 1/3, -1 …). A new spectrum is "
+            "added to the list and the original is left as it was. To scale one trace in a "
+            "comparison, right-click it in the Compare list.")
+        self._scale_button.clicked.connect(lambda _checked=False: self.scaleRequested.emit())
+        self._scale_button_action = self.toolbar.addWidget(self._scale_button)
+        self._scale_button_action.setVisible(False)
 
         # "Showing:" -- which stored result this canvas is displaying,
         # when its owner has several to choose between (a curve fit, a
@@ -1628,6 +1644,10 @@ class MplCanvas(QWidget):
         # show_* rebuild) invalidates it, so it's reset to None
         # wherever that happens (see _apply_view_options).
         self._pivot_line = None
+        # A faint y = 0 line, shown while phasing / checking a baseline (user
+        # request, 2026-11-19); see set_zero_line.
+        self._zero_line = None
+        self._zero_line_wanted = False
         # Which axes (if any) the pivot marker above should draw on --
         # None wherever a pivot marker doesn't make sense (a 2D
         # contour, FID, Compare, fit view). Set explicitly by
@@ -1846,6 +1866,10 @@ class MplCanvas(QWidget):
         if self.toolbar.mode:
             self._release_other_modes(keep="nav")
         self._refresh_cursor()
+
+    def set_scale_button_visible(self, visible: bool) -> None:
+        """Show the × Scale button (only the canvas that shows a session spectrum has it)."""
+        self._scale_button_action.setVisible(bool(visible))
 
     def _add_toolbar_toggle(self, text: str, tooltip: str, slot, checked: bool) -> QToolButton:
         """A checkable text-only button on this canvas's own matplotlib
@@ -2597,6 +2621,16 @@ class MplCanvas(QWidget):
         still when it sat exactly on that edge -- a baseline at 1 with the
         view starting at 0 rose on every scroll (user report). Falls back
         to the pinned bottom if no line can be read."""
+        tagged = [ln for ln in ax.lines if getattr(ln, "_opennmr_baseline", None) is not None]
+        if tagged:
+            # Stacked traces (anisotropic-motion plots) share one axes, so rescaling
+            # the y-limits would also change the spacing between the spectra (user
+            # report). Scale each trace about its own baseline instead.
+            g = 1.0 / float(factor)
+            for ln in tagged:
+                b = float(ln._opennmr_baseline)
+                ln.set_ydata(b + (np.asarray(ln.get_ydata(), dtype=float) - b) * g)
+            return
         ymin, ymax = ax.get_ylim()
         anchor = self.baseline_anchor(ax)
         if anchor is None or not np.isfinite(anchor):
@@ -7505,6 +7539,7 @@ class MplCanvas(QWidget):
         # (set_pivot_marker would otherwise try to move a Line2D no
         # longer attached to any axes).
         self._pivot_line = None
+        self._zero_line = None
         self._pivot_marker_ax = None
         self._peak_marker_lines = []
         self._refresh_trace_names(restyle=False)
@@ -7544,6 +7579,7 @@ class MplCanvas(QWidget):
         or Compare view, or the Processing-preview's own FID panel)."""
         if self._pivot_marker_ax is None:
             return
+        self._sync_zero_line()
         if ppm is None:
             if self._pivot_line is not None:
                 self._pivot_line.remove()
@@ -7557,6 +7593,33 @@ class MplCanvas(QWidget):
         else:
             self._pivot_line.set_xdata([ppm, ppm])
         self.canvas.draw_idle()
+
+    def set_zero_line(self, on: bool) -> None:
+        """Show or hide a thin y = 0 line across the spectrum -- the reference
+        for judging a phase or a baseline. Not an ``axhline``: that is data, and
+        would put 0 into the autoscale; this is pinned across the axes and
+        added as an artist (the crosshair's guides are drawn the same way)."""
+        self._zero_line_wanted = bool(on)
+        self._sync_zero_line()
+
+    def _sync_zero_line(self) -> None:
+        from matplotlib.lines import Line2D
+        ax = self._pivot_marker_ax
+        wanted = self._zero_line_wanted and ax is not None
+        if self._zero_line is not None and (not wanted or self._zero_line.axes is not ax):
+            try:
+                self._zero_line.remove()
+            except (ValueError, NotImplementedError):
+                pass
+            self._zero_line = None
+            self.canvas.draw_idle()
+        if wanted and self._zero_line is None:
+            line = Line2D([0.0, 1.0], [0.0, 0.0], transform=ax.get_yaxis_transform(),
+                          color="0.45", linewidth=0.8, linestyle=(0, (4, 3)), zorder=1.5,
+                          gid="opennmr_zero_line")
+            ax.add_artist(line)
+            self._zero_line = line
+            self.canvas.draw_idle()
 
     def baseline_preview_source(self):
         """``(ppm, real data)`` of the 1D trace this canvas is
@@ -7711,6 +7774,7 @@ class MplCanvas(QWidget):
         # set_peak_markers call would try to .remove() an object no
         # longer attached to any axes.
         self._pivot_line = None
+        self._zero_line = None
         self._pivot_marker_ax = None
         self._peak_marker_lines = []
         self._contour_spectrum = None
@@ -8361,8 +8425,11 @@ class MplCanvas(QWidget):
                             legend_labels: list | None = None, axis_labels: str = "auto",
                             axis_styles=None, twod_options: dict | None = None,
                             pulse_panels: dict | None = None,
-                            panel_labels: dict | None = None) -> None:
-        """Compare spectra as separate panels. ``groups`` says which of
+                            panel_labels: dict | None = None,
+                            renameable: list | None = None) -> None:
+        """Compare spectra as separate panels. ``renameable``: per spectrum, whether
+        its legend name may be typed over on the plot (a slice of a pseudo-2D has no
+        experiment of its own to rename; a whole spectrum is renamed in the list). ``groups`` says which of
         ``spectra`` (indices) share a panel: ``[[0, 1], [2]]`` is two panels,
         the first holding two superimposed spectra. Names and colours come
         from the series entries, so Plot Style and Rename reach every panel;
@@ -8387,7 +8454,7 @@ class MplCanvas(QWidget):
                   "normalize": normalize, "series_keys": series_keys, "legend_labels": legend_labels,
                   "axis_labels": axis_labels, "axis_styles": axis_styles,
                   "twod_options": twod_options, "pulse_panels": pulse_panels,
-                  "panel_labels": panel_labels}
+                  "panel_labels": panel_labels, "renameable": renameable}
         self._enter_plot_kind("compare")
         self._contour_spectrum = None
         self._contour_factor = None
@@ -8415,7 +8482,7 @@ class MplCanvas(QWidget):
         entries = self._assign_series("compare", [
             ((series_keys[i] if series_keys and i < len(series_keys) else str(i)),
              (legend_labels[i] if legend_labels and i < len(legend_labels) else f"Trace {i + 1}"),
-             False)
+             bool(renameable[i]) if renameable and i < len(renameable) else False)
             for i in range(len(spectra))
         ])
         panels = []

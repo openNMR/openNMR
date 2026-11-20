@@ -163,7 +163,8 @@ def save_state(folder: str, name: str, entries: list[dict], notes: str = "",
     ``spectrum`` (the :class:`NMRSpectrum` as it is now), ``state`` (its
     tracked processing state; default: read from the spectrum),
     ``source`` (``{"path", "vendor", "load_kwargs"}`` for an experiment,
-    else None), ``origin`` (optional), ``compare_colours`` (optional: the colours given
+    else None), ``origin`` (optional), ``link`` (optional, for a slice: ``{"parent_entry", "axis", "index", "parent_path"}``),
+    ``compare_colours`` (optional: the colours given
     by hand in Compare, ``{"spectrum" | "slice N": "#rrggbb"}``) and ``copy`` (keep a copy of the
     data; forced on for anything without a ``source``).
 
@@ -199,6 +200,14 @@ def save_state(folder: str, name: str, entries: list[dict], notes: str = "",
                   # Colours given by hand in Compare ({"spectrum" | "slice N": "#rrggbb"}).
                   "compare_colours": {str(k): str(v) for k, v in
                                       (entry.get("compare_colours") or {}).items() if v},
+                  # A slice's link to the 2D it was cut from (``parent_entry``: 0-based
+                  # position in this state's entries; ``axis``, ``index`` (1-based row),
+                  # ``parent_path``). Without it a reopened slice could only be matched
+                  # to its 2D by comparing data, which fails once the 2D is re-read.
+                  # Per-trace factors for Compare ({"spectrum" | "slice N": factor}).
+                  "compare_factors": {str(k): float(v) for k, v in
+                                      (entry.get("compare_factors") or {}).items() if v},
+                  "link": _json_safe(entry.get("link")) if entry.get("link") else None,
                   "shape": list(getattr(spectrum.data, "shape", ())),
                   "nucleus": spectrum.metadata.nucleus}
         if copy:

@@ -1090,6 +1090,33 @@ def normalize_bound(b, param_name, idx):
     return (low, high)
 
 
+def peak_defs_in_fit_units(peak_defs, scale: float):
+    """Copies of ``peak_defs`` with every amplitude the user gave -- ``A_init`` and
+    the ``amplitude``/``A`` bounds -- divided by ``scale``.
+
+    A normalised fit (``use_normalised=True``) works on ``y / scale``, so an
+    amplitude typed or bounded in the spectrum's own units must be brought into
+    the fit's units before it is used as a start or a limit. Left unscaled, a
+    start of 5 on a spectrum whose tallest point is 5000 would be a start of 5
+    against data that peak at 1."""
+    if not scale or scale == 1.0:
+        return peak_defs
+    out = []
+    for peak in peak_defs:
+        q = dict(peak)
+        if q.get("A_init") is not None:
+            q["A_init"] = float(q["A_init"]) / scale
+        bounds = q.get("bounds")
+        if bounds:
+            bounds = dict(bounds)
+            for key in ("amplitude", "A"):
+                if key in bounds and bounds[key] is not None:
+                    bounds[key] = tuple(float(v) / scale for v in bounds[key])
+            q["bounds"] = bounds
+        out.append(q)
+    return out
+
+
 def build_bounds(peak_defs, positive_intensity=True, allow_negative_intensity=False):
     """
     Construct lower/upper parameter bounds for ``scipy.optimize.curve_fit``.
@@ -1108,7 +1135,10 @@ def build_bounds(peak_defs, positive_intensity=True, allow_negative_intensity=Fa
             b.get("amplitude", b.get("A", (-np.inf, np.inf))), "amplitude", i,
         )
 
-        amp_lower = 0.0 if (positive_intensity and not allow_negative_intensity) else amp_bounds[0]
+        # A positive-intensity fit floors the amplitude at 0, but a lower bound the
+        # user set above 0 is tighter and must stay (it used to be replaced by 0).
+        amp_lower = (max(amp_bounds[0], 0.0) if (positive_intensity and not allow_negative_intensity)
+                     else amp_bounds[0])
         amp_upper = amp_bounds[1]
 
         shift_b = normalize_bound(b.get("shift", (-np.inf, np.inf)), "shift", i)
@@ -1314,8 +1344,10 @@ def fit_spectrum(spectrum: NMRSpectrum, peak_defs, fit_regions=None, use_normali
         sigma=baseline_sigma, max_iter=baseline_max_iter, x_ref=x_ref,
     )
 
+    # Amplitudes the user supplied are in the spectrum's units; the fit's are in y/scale.
+    fit_defs = peak_defs_in_fit_units(peak_defs, scale if use_normalised else 1.0)
     p0, is_free = initialize_params_with_map(
-        x, y, peak_defs, b0_init, b1_init,
+        x, y, fit_defs, b0_init, b1_init,
         positive_intensity=positive_intensity,
         allow_negative_intensity=allow_negative_intensity,
     )
@@ -1324,7 +1356,7 @@ def fit_spectrum(spectrum: NMRSpectrum, peak_defs, fit_regions=None, use_normali
     # fixed during peak fitting.
     is_free[-2:] = False
 
-    lower, upper = build_bounds(peak_defs, positive_intensity=positive_intensity,
+    lower, upper = build_bounds(fit_defs, positive_intensity=positive_intensity,
                                  allow_negative_intensity=allow_negative_intensity)
     # A width with no upper limit of its own is capped at twice the whole
     # spectrum's span: no lineshape is broader than that, and without a

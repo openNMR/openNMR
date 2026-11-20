@@ -188,6 +188,75 @@ def _guess_raw_2d_shape(dic: dict, ser_path: str) -> tuple[int, int]:
     return n_rows, per_row_words // 2
 
 
+EMPTY_ACQUISITION_MARKER = "no data were acquired"
+
+
+class EmptyAcquisitionError(ValueError):
+    """The experiment's ``fid``/``ser`` file exists but holds no data (an
+    acquisition that was started and stopped before anything was written).
+    A ``ValueError`` so existing handlers still catch it; the GUI treats it
+    as "skip this one with a message", not as a reason to abort a batch."""
+
+
+def _check_not_empty(binary_path: str) -> None:
+    """Raise :class:`EmptyAcquisitionError` for a zero-byte ``fid``/``ser``."""
+    if os.path.isfile(binary_path) and os.path.getsize(binary_path) == 0:
+        raise EmptyAcquisitionError(
+            f"{os.path.basename(binary_path)} in {os.path.dirname(binary_path)} is empty - "
+            f"{EMPTY_ACQUISITION_MARKER} (the experiment was stopped before the first scan "
+            "was written). Skipped.")
+
+
+def _has_processed_data(path: str) -> bool:
+    """Whether TopSpin left any processed spectrum (``1r``/``2rr``) under ``pdata``."""
+    import glob
+    return any(glob.glob(os.path.join(path, "pdata", "*", name)) for name in ("1r", "2rr"))
+
+
+def _drop_trailing_zero_rows(data: np.ndarray, expected_rows: int | None) -> np.ndarray:
+    """Cut an under-acquired ``ser`` back to its last row that holds data.
+
+    Only applies when fewer rows than ``TD1`` are present: the acquisition was
+    stopped and the unwritten remainder of the block reads as exact zeros, which
+    is not a measurement (a zero row in a pseudo-2D series is a fit against
+    nothing). A row of real data is never exactly all-zero."""
+    if not expected_rows or data.ndim != 2 or data.shape[0] >= expected_rows:
+        return data
+    nonzero = np.flatnonzero(np.any(data != 0, axis=1))
+    last = int(nonzero[-1]) + 1 if nonzero.size else 0
+    return data[:last]
+
+
+def acquisition_extent(dic: dict, ser_path: str, rows_present: int) -> dict:
+    """How much of the planned acquisition is on disk, for the log and for
+    trimming the value lists that pair with the rows (notes 8.11).
+
+    ``rows_expected`` is ``acqu2s`` ``TD``; ``rows_acquired`` is what the file
+    actually holds (``rows_present``). ``td_disagrees`` is set when the *file*
+    holds fewer rows than ``TD`` says - the file wins, because it is what was
+    measured. ``note`` is a ready sentence, or ``""`` when all is as expected."""
+    td1 = int(float(dic.get("acqu2s", {}).get("TD", 0) or 0)) or None
+    info = {"rows_acquired": int(rows_present), "rows_expected": td1,
+            "complete": td1 is None or rows_present >= td1, "td_disagrees": False,
+            "partial_bytes": 0, "note": ""}
+    try:
+        acqus = dic["acqus"]
+        dtypa = int(float(acqus.get("DTYPA", 0)))
+        word_bytes, block = (8, 128) if dtypa == 2 else (4, 256)
+        row_bytes = -(-int(float(acqus["TD"])) // block) * block * word_bytes
+        info["partial_bytes"] = int(os.path.getsize(ser_path) % row_bytes)
+    except (KeyError, OSError, ValueError, ZeroDivisionError):
+        pass
+    if not info["complete"]:
+        info["td_disagrees"] = True
+        info["note"] = (
+            f"Incomplete acquisition: {rows_present} of {td1} planned rows are in the file "
+            f"(the experiment was stopped early). The {rows_present} acquired rows are used; "
+            "the file, not the TD in acqu2s, decides what was measured."
+            + (" A partly written last row was dropped." if info["partial_bytes"] else ""))
+    return info
+
+
 def _read_raw_2d_data(path: str, dic: dict) -> np.ndarray:
     """Read the raw ``ser`` file into a complex ``(n_rows,
     n_complex_per_row)`` array, via ``nmrglue.bruker.read`` itself
@@ -223,8 +292,11 @@ def _read_raw_2d_data(path: str, dic: dict) -> np.ndarray:
     out to be unreliable signals for this specific pulse sequence
     family."""
     ser_path = os.path.join(path, "ser")
+    _check_not_empty(ser_path)
     n_rows, n_complex_per_row = _guess_raw_2d_shape(dic, ser_path)
-    return _read_bruker_binary(ser_path, dic, (n_rows, n_complex_per_row))
+    data = _read_bruker_binary(ser_path, dic, (n_rows, n_complex_per_row))
+    td1 = int(float(dic.get("acqu2s", {}).get("TD", 0) or 0)) or None
+    return _drop_trailing_zero_rows(data, td1)
 
 
 def _read_bruker_binary(binary_path: str, dic: dict, shape: tuple[int, int] | None = None) -> np.ndarray:
@@ -842,6 +914,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     # here too so both paths read their binary the same single way
     # rather than splitting into two conventions that could drift.
     dic = read_acqus_files(path)
+    _check_not_empty(os.path.join(path, "fid"))
     data = _read_bruker_binary(os.path.join(path, "fid"), dic)
     procs = _read_procs(path, procno)
     fid = _remove_digital_filter(dic, data).astype(np.complex128)
@@ -1583,6 +1656,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # committed choice from, without double-applying the one
             # already baked into "fid").
             "fid_raw": fid_raw,
+            "acquisition": acquisition_extent(dic, os.path.join(path, "ser"), fid_raw.shape[0]),
             **({"fid_raw_uncorrected": fid_raw_uncorrected, "drift_correction": drift_record}
                if drift_record is not None else {}),
             **({"window_unsupported": window_unsupported_note} if window_unsupported_note else {}),
@@ -2452,6 +2526,16 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
         return spectrum
     has_ser = os.path.exists(os.path.join(path, "ser"))
     has_fid = os.path.exists(os.path.join(path, "fid"))
+    # A zero-byte fid/ser is an acquisition that never wrote anything: use
+    # the processed data if TopSpin has any, otherwise say so clearly.
+    for raw_name in ("ser", "fid"):
+        raw_path = os.path.join(path, raw_name)
+        if os.path.isfile(raw_path) and os.path.getsize(raw_path) == 0:
+            if _has_processed_data(path):
+                has_ser = has_ser and raw_name != "ser"
+                has_fid = has_fid and raw_name != "fid"
+            else:
+                _check_not_empty(raw_path)
     # A 1D proc number of a 2D -- a row, column or projection TopSpin
     # wrote there (rser, rsc, proj): it has procs but no proc2s, so the
     # 2D read below would fail on the missing proc2s (explicit user

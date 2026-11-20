@@ -181,10 +181,12 @@ def test_a_width_without_its_own_limit_is_capped_at_twice_the_span():
                            metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0))
     peaks = [{"type": "gaussian", "shift": 5.0, "fwhm": 0.2,
               "bounds": {"amplitude": (0.0, 0.8)}}]
-    # Normalised, as the GUI fits (the bound is in those units).
-    peaks[0]["bounds"]["amplitude"] = (0.0, 0.4)
+    # The bound is in the spectrum's own units, like the Amplitude the user
+    # sees; the fit works on y / y.max() (the grid misses the apex by a hair, so
+    # that is a little under 2.0), so it is held at 0.8 / y.max() in the fit's
+    # units (notes 8.7: a bound is no longer compared unscaled).
     popt, *_ = fitting.fit_spectrum(spectrum, peaks, fit_regions=[(4.95, 5.05)])
-    assert popt[2] == pytest.approx(0.4, rel=1e-6)       # held at the cap
+    assert popt[2] == pytest.approx(0.8 / y.max(), rel=1e-6)       # held at the cap
     assert popt[1] <= 2 * 4.0 + 1e-9                     # width stopped at the cap
 
 

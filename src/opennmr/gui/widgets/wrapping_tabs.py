@@ -215,6 +215,32 @@ class WrappingTabWidget(QWidget):
     #: sizes actually tested (28/40/48/56).
     _ICON_SIZE = QSize(48, 48)
 
+    #: The compact toolbar (notes 8.5): a small laptop screen is helped by shorter,
+    #: narrower buttons, not by shrinking every piece of text in the program. The
+    #: label keeps the interface font; only the icon, the padding and the gap
+    #: between buttons shrink.
+    _COMPACT_ICON_SIZE = QSize(24, 24)
+    _COMPACT_STYLE = "QToolButton { padding: 2px 5px; }"
+    _COMPACT_SPACING = 2
+    _NORMAL_SPACING = 4
+
+    def isCompact(self) -> bool:  # noqa: N802
+        return bool(getattr(self, "_compact", False))
+
+    def setCompact(self, compact: bool) -> None:  # noqa: N802
+        """Shrink (or restore) the buttons' icons and padding, leaving the font alone."""
+        self._compact = bool(compact)
+        self._bar_layout.setSpacing(self._COMPACT_SPACING if self._compact else self._NORMAL_SPACING)
+        for button in self._buttons:
+            self._style_button(button)
+        self._bar_layout.invalidate()
+        self._bar.updateGeometry()
+
+    def _style_button(self, button: QToolButton) -> None:
+        if not button.icon().isNull():
+            button.setIconSize(self._COMPACT_ICON_SIZE if self.isCompact() else self._ICON_SIZE)
+        button.setStyleSheet(self._COMPACT_STYLE if self.isCompact() else "")
+
     def addTab(self, widget: QWidget, label: str, icon: QIcon | None = None) -> int:  # noqa: N802
         index = self._stack.addWidget(widget)
         button = QToolButton(self._bar)
@@ -229,6 +255,8 @@ class WrappingTabWidget(QWidget):
             button.setIcon(icon)
             button.setIconSize(self._ICON_SIZE)
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        if self.isCompact():
+            self._style_button(button)
         button.clicked.connect(lambda _checked, w=widget: self.setCurrentWidget(w))
         self._group.addButton(button)
         self._bar_layout.addWidget(button)

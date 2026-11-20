@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWidgets import QColorDialog, QLayout
 from . import report_format
+from .screen_fit import install_screen_fit
 from .widgets.report_label import ReportLabel, palette_colours
 from .widgets.notes_editor import ExperimentNotesEditor
 from .widgets.advice_box import AdviceBox
@@ -56,10 +57,14 @@ from .widgets.spacing_slider import SpacingSlider
 from ..core import thread_io
 from ..notebook import peak_integral_labels as integral_labels_module
 from ..notebook import notes as nb_notes
+from ..notebook import scaling as nb_scaling
 from ..notebook import referencing as nb_referencing
 from .drift_panel import DriftCorrectionPanel
 from ..notebook import periodic_table as nb_periodic_table
 from ..notebook import series_fitting as nb_series_fitting
+from ..notebook import pfg_score_check as nb_pfg_score_check
+from ..notebook import pfg_lineshapes as nb_pfg_lineshapes
+from ..notebook import pfg_selection as nb_pfg_selection
 from ..notebook import fit_transfer as nb_fit_transfer
 from ..notebook import fit_advice as nb_fit_advice
 from ..notebook import multiplet_analysis as nb_multiplets
@@ -85,6 +90,7 @@ def _is_dark_colour(colour) -> bool:
 from .. import io
 from .. import plotting
 from ..plotting import accessibility as plot_accessibility
+from ..plotting import vector_export
 # The notebook package's CSA fitter, reached through its own bridge --
 # see opennmr.notebook.bridge for why a conversion rather than a
 # re-read from disk.
@@ -144,6 +150,7 @@ from .widgets.relative_spinbox import RelativeDoubleSpinBox
 from .widgets.data_browser import DataBrowser
 from .widgets.message_dialog import show_message
 from .widgets.wrapping_tabs import WrappingTabWidget
+from .widgets.view_selector import MirroredSpinBar
 from .widgets.collapsible_section import CollapsibleSection, toggle_once_on_double_click
 from .widgets.sim_sites import SimSiteList
 from .widgets.reflow import make_reflowable
@@ -153,6 +160,8 @@ from .simpson_panel import SimpsonPanel
 from .simpson_fit_panel import SimpsonFitPanel
 from .export_dialog import ExportDialog
 from .dynamics_panels import ExchangeLineshapePanel, VTRelaxationPanel
+from .motion_fit_panel import MotionFitPanel
+from .motion_panel import AnisotropicMotionPanel
 from .jcoupling_panels import (JCouplingFitPanel, JCouplingSimulationPanel, lock_to_spin_system,
                                seed_spins_from_peaks, SOLUTION_STRONG_BLURB, SOLUTION_SIM_BLURB,
                                STRONG_COUPLING_BLURB)
@@ -177,6 +186,7 @@ from ..core import fit_progress as core_fit_progress
 from ..notebook import fit_models as nb_fit_models
 from ..notebook import stored_integrals as nb_stored_integrals
 from ..notebook import fit_values as nb_fit_values
+from ..notebook import results_table as nb_results_table
 
 #: Written into a saved openNMR state when "Save the fitted values too" is ticked.
 FIT_VALUES_FILE = "fitted_values.json"
@@ -522,6 +532,31 @@ _ZERO_FILL_SIZES = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
 _NO_ZERO_FILL = 0
 
 
+def trim_values_to_rows(values, n_rows: int):
+    """``(values, note)`` with a list longer than ``n_rows`` cut to its first
+    ``n_rows`` entries (dicts such as a vdlist have every equally long array cut).
+    ``note`` says what was cut, or is ``""`` when nothing was."""
+    def cut(arr):
+        a = np.asarray(arr)
+        return a[:n_rows] if a.ndim == 1 and a.size > n_rows else arr
+
+    if isinstance(values, dict):
+        lengths = {np.asarray(v).size for v in values.values()
+                   if isinstance(v, (np.ndarray, list, tuple)) and np.ndim(v) == 1}
+        longest = max(lengths) if lengths else 0
+        if longest <= n_rows:
+            return values, ""
+        out = {k: (cut(v) if isinstance(v, (np.ndarray, list, tuple)) and np.asarray(v).size == longest
+                   else v) for k, v in values.items()}
+        return out, (f"the value list has {longest} entries but only {n_rows} rows were acquired: "
+                     f"the first {n_rows} are used")
+    arr = np.asarray(values)
+    if arr.ndim == 1 and arr.size > n_rows > 0:
+        return arr[:n_rows], (f"the value list has {arr.size} entries but only {n_rows} rows were "
+                             f"acquired: the first {n_rows} are used")
+    return values, ""
+
+
 class MainWindow(QMainWindow):
     # Rows kept for later follow their experiment (session.TrackedRow): a
     # row removed or reordered meanwhile cannot make them mean another
@@ -537,6 +572,8 @@ class MainWindow(QMainWindow):
         # computer's regional settings (numeric_locale).
         use_decimal_point()
         super().__init__()
+        # Long pop-ups (update notes, install logs) stay on the screen and scroll.
+        install_screen_fit()
         # Compare entries the user dragged in from Open experiments --
         # kept through selection-driven rebuilds of the Compare list.
         self._compare_pinned_entries: list[tuple[int, int | None]] = []
@@ -938,6 +975,8 @@ class MainWindow(QMainWindow):
                 "inset", "Inset…", lambda c=_canvas: self._on_open_inset_dialog(c),
                 "The zoomed insets on this plot: their region, position, axes, typeface and "
                 "the lines joining them to the region they magnify.")
+        self.canvas.set_scale_button_visible(True)
+        self.canvas.scaleRequested.connect(self._on_scale_spectrum_requested)
         self.canvas.pickModeChanged.connect(self._on_canvas_pick_mode_changed)
         self.canvas.regionSelectModeChanged.connect(self._on_canvas_region_select_mode_changed)
 
@@ -2947,6 +2986,29 @@ class MainWindow(QMainWindow):
         self.compare_list.setMaximumHeight(10 * self._compare_list_row_height())
         layout.addWidget(self.compare_list)
 
+        # A visible way to multiply one trace (user report, 2026-11-19: "right-clicking is
+        # not immediately obvious"); the right-click menu does the same.
+        multiply_row = QHBoxLayout()
+        multiply_row.addWidget(QLabel("Multiply highlighted trace by:"))
+        self.compare_factor_edit = QLineEdit()
+        self.compare_factor_edit.setPlaceholderText("2, 0.5, 1/3 …")
+        self.compare_factor_edit.setMaximumWidth(90)
+        self.compare_factor_edit.setToolTip(
+            "Type a factor (an integer, a fraction such as 1/3, or a decimal) and press Enter or "
+            "Apply. Only the highlighted trace is multiplied, on this plot only; the legend then "
+            "shows × factor. Reset returns it to 1.")
+        self.compare_factor_apply_button = QPushButton("Apply")
+        self.compare_factor_reset_button = QPushButton("Reset ×")
+        self.compare_factor_apply_button.clicked.connect(self._on_compare_factor_apply)
+        self.compare_factor_edit.returnPressed.connect(self._on_compare_factor_apply)
+        self.compare_factor_reset_button.clicked.connect(self._on_compare_factor_reset)
+        for w in (self.compare_factor_edit, self.compare_factor_apply_button,
+                  self.compare_factor_reset_button):
+            multiply_row.addWidget(w)
+        multiply_row.addStretch(1)
+        layout.addLayout(multiply_row)
+        self.compare_list.currentRowChanged.connect(lambda _r: self._sync_compare_factor_edit())
+
         # Checking a long list one row at a time is the slow path
         # everything downstream depends on (Fit Curve, VOCS Sum, the
         # plot itself) -- explicit user request while combining a VOCS
@@ -3813,6 +3875,12 @@ class MainWindow(QMainWindow):
         if not self._pending_loads:
             self.statusBar().clearMessage()
         self._hide_load_progress()
+        if io_bruker.EMPTY_ACQUISITION_MARKER in message:
+            # The loader only carries the text across threads: an empty
+            # acquisition is skipped quietly so the rest of a batch loads.
+            self._skipped_loads = getattr(self, "_skipped_loads", []) + [(path, message)]
+            self.statusBar().showMessage(message, 15000)
+            return
         QMessageBox.critical(self, "Failed to load spectrum", message)
 
     #: Saved-processing keys that map onto a reader parameter, so the
@@ -4027,9 +4095,19 @@ class MainWindow(QMainWindow):
                 spectrum = self.session.adopt(path, vendor, add_kwargs, preloaded)
             else:
                 spectrum = self.session.add(path, vendor=vendor, **add_kwargs)
+        except io_bruker.EmptyAcquisitionError as exc:
+            # Nothing was acquired: say so without a modal box, so a folder of
+            # many experiments keeps loading (notes 8.11).
+            self._skipped_loads = getattr(self, "_skipped_loads", []) + [(path, str(exc))]
+            self.statusBar().showMessage(str(exc), 15000)
+            return
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to load spectrum", str(exc))
             return
+
+        acquisition = spectrum.metadata.raw.get("acquisition")
+        if acquisition and acquisition.get("note"):
+            self.statusBar().showMessage(acquisition["note"], 15000)
 
         # Recorded so _read_already_applied_saved_processing can tell
         # "read already in its saved state" from "read with defaults"
@@ -6052,6 +6130,22 @@ class MainWindow(QMainWindow):
         self.output_dpi_spin.valueChanged.connect(self._on_output_export_settings_changed)
         export_form.addRow("DPI:", self.output_dpi_spin)
 
+        # SVG text: matplotlib's own default writes every glyph as an outline, which
+        # cannot be edited afterwards (user request, 2026-11-19).
+        self.output_svg_text_combo = QComboBox()
+        self.output_svg_text_combo.addItem("Editable text", "text")
+        self.output_svg_text_combo.addItem("Outlines (shapes)", "path")
+        self.output_svg_text_combo.setToolTip(
+            "How text is saved in an SVG. Editable text keeps <text> elements, so labels can be "
+            "changed in Inkscape or Illustrator (the font must be installed where it is opened). "
+            "Outlines draw every letter as a shape: identical everywhere, but not editable. "
+            "PDF and EPS always keep text as text.")
+        _saved_mode = (self._load_ui_settings() or {}).get("svg_text", "text")
+        self.output_svg_text_combo.setCurrentIndex(max(0, self.output_svg_text_combo.findData(_saved_mode)))
+        vector_export.set_svg_text(self.output_svg_text_combo.currentData())
+        self.output_svg_text_combo.currentIndexChanged.connect(self._on_svg_text_changed)
+        export_form.addRow("SVG text:", self.output_svg_text_combo)
+
         # The canvas's own export default (8x8, or 7.5x10 once a 2D is
         # showing extracted slices), not the live embedded figure's
         # size -- that is whatever Qt's layout happened to give the
@@ -6604,6 +6698,12 @@ class MainWindow(QMainWindow):
         self.output_dpi_spin.setValue(int(round(dpi)))
         self.output_fig_width_spin.setValue(float(width))
         self.output_fig_height_spin.setValue(float(height))
+
+    def _on_svg_text_changed(self, *_args) -> None:
+        mode = vector_export.set_svg_text(self.output_svg_text_combo.currentData())
+        if hasattr(self, "_ui_settings"):
+            self._ui_settings["svg_text"] = mode
+            self._save_ui_settings()
 
     def _on_output_export_settings_changed(self, *_args) -> None:
         kwargs = self._current_output_export_kwargs()
@@ -7498,6 +7598,31 @@ class MainWindow(QMainWindow):
         self.contour_scroll_up_more_checkbox.setChecked(_up_more)
         self.contour_scroll_up_more_checkbox.toggled.connect(self._on_contour_scroll_direction_toggled)
         interface_form.addRow("2D contours:", self.contour_scroll_up_more_checkbox)
+
+        # Compact toolbar (notes 8.5): for a small laptop screen, shrink the top
+        # buttons -- icon, padding, gaps -- and leave every font as it is.
+        self.compact_toolbar_checkbox = QCheckBox("Compact toolbar")
+        self.compact_toolbar_checkbox.setToolTip(
+            "Smaller icons and tighter padding on the buttons along the top, so they take "
+            "less of a small screen.\n\nThe text is not made smaller – that is the Menu "
+            "font size above.")
+        self.compact_toolbar_checkbox.toggled.connect(self._on_compact_toolbar_toggled)
+        interface_form.addRow("Top buttons:", self.compact_toolbar_checkbox)
+
+        # Pseudo-2D phasing default (notes 8.8): each slice on its own, from the start.
+        self.phase_independent_default_checkbox = QCheckBox("Phase pseudo-2D slices independently")
+        self.phase_independent_default_checkbox.setToolTip(
+            "Off (default): a newly opened pseudo-2D is phased with one phase for every slice "
+            "(a shared phase is right for most relaxation and diffusion series).\n"
+            "On: every new pseudo-2D starts with “Apply to every slice” off and “Each slice "
+            "independently” on, so Autophase finds a phase for each slice – what a series of "
+            "broad or changing lines (a diffusion profile, an inversion recovery) usually needs.\n\n"
+            "Each dataset remembers the choice made for it, and it is stored with the dataset; "
+            "this only sets the starting point for datasets that have none yet.")
+        self.phase_independent_default_checkbox.setChecked(
+            bool(self._ui_settings.get("phase_slices_independently", False)))
+        self.phase_independent_default_checkbox.toggled.connect(self._on_phase_independent_default_toggled)
+        interface_form.addRow("Pseudo-2D phasing:", self.phase_independent_default_checkbox)
         for _canvas in self._all_canvases():
             _canvas.set_contour_scroll_up_shows_more(_up_more)
             _canvas.contourScrollDirectionChanged.connect(self._on_contour_scroll_direction_toggled)
@@ -8080,6 +8205,8 @@ class MainWindow(QMainWindow):
             blocked = self.ui_font_size_spin.blockSignals(True)
             self.ui_font_size_spin.setValue(int(size))
             self.ui_font_size_spin.blockSignals(blocked)
+        if self._ui_settings.get("compact_toolbar"):
+            self._set_compact_toolbar(True, save=False)
         # The theme and font themselves are installed by _apply_startup_ui
         # at the end of __init__ (startup time -- see there).
 
@@ -8164,6 +8291,7 @@ class MainWindow(QMainWindow):
                            ("_batch_relaxation_section",)),
         "bpp": ("Relaxation vs Temperature (BPP) (Dynamics)", ("_vt_relaxation_section",)),
         "exchange": ("Exchange lineshape (Dynamics)", ("_exchange_section",)),
+        "motion": ("Anisotropic motion: rotating tensors (Dynamics)", ("_motion_section", "_motion_fit_section")),
         # A whole launcher tile: "tab:<its label>" -- the tile, its page
         # and its Window-menu entry go together, never an empty tile.
         "advanced": ("Advanced Processing (the whole Adv. Proc. tile)", ("tab:Adv. Proc.",)),
@@ -8639,6 +8767,23 @@ class MainWindow(QMainWindow):
         if save:
             self._ui_settings["drag_mode"] = mode
             self._save_ui_settings()
+
+    def _set_compact_toolbar(self, compact: bool, save: bool = True) -> None:
+        """Shrink or restore the top buttons (icon size, padding, gaps; never the font)."""
+        compact = bool(compact)
+        self.side_tabs.setCompact(compact)
+        if self.compact_toolbar_checkbox.isChecked() != compact:
+            blocked = self.compact_toolbar_checkbox.blockSignals(True)
+            self.compact_toolbar_checkbox.setChecked(compact)
+            self.compact_toolbar_checkbox.blockSignals(blocked)
+        if hasattr(self, "tile_bar"):     # not yet built while the saved settings are applied
+            self.tile_bar.updateGeometry()
+        if save:
+            self._ui_settings["compact_toolbar"] = compact
+            self._save_ui_settings()
+
+    def _on_compact_toolbar_toggled(self, checked: bool) -> None:
+        self._set_compact_toolbar(checked)
 
     def _on_contour_scroll_direction_toggled(self, checked: bool) -> None:
         """Settings' checkbox or a contour's right-click item: one
@@ -9173,6 +9318,15 @@ class MainWindow(QMainWindow):
             # colours and residual, set by right-clicking it.
             fit_view_action = menu.addAction("Fit Display…")
             menu.addSeparator()
+        scale_action = unscale_action = None
+        if clicked_entry is not None and 0 <= clicked_entry[0] < len(self.session):
+            current_factor = self._compare_factor_for(clicked_entry)
+            scale_action = menu.addAction(
+                "Multiply on this plot…" if current_factor == 1.0
+                else f"Multiply on this plot… (now × {nb_scaling.format_factor(current_factor)})")
+            if current_factor != 1.0:
+                unscale_action = menu.addAction("Remove multiplier")
+            menu.addSeparator()
         if has_checked:
             plot_action = menu.addAction("Plot")
             fit_curve_action = menu.addAction("Fit Curve (relaxation/diffusion)…")
@@ -9187,12 +9341,111 @@ class MainWindow(QMainWindow):
             return
         if chosen is plot_action:
             self._refresh_compare_view()
+        elif scale_action is not None and chosen is scale_action:
+            self._on_compare_multiply_requested(clicked_entry)
+        elif unscale_action is not None and chosen is unscale_action:
+            self._set_compare_factor(clicked_entry, 1.0)
         elif fit_view_action is not None and chosen is fit_view_action:
             self._open_fit_view_dialog(clicked_entry[0])
         elif chosen is fit_curve_action:
             self._on_fit_curve_compare_stack_action()
         elif chosen is remove_action:
             self._remove_compare_entry(clicked.data(Qt.ItemDataRole.UserRole))
+
+    def _current_compare_entry(self):
+        item = self.compare_list.currentItem()
+        return None if item is None else item.data(Qt.ItemDataRole.UserRole)
+
+    def _sync_compare_factor_edit(self) -> None:
+        entry = self._current_compare_entry()
+        factor = self._compare_factor_for(entry) if entry is not None else 1.0
+        self.compare_factor_edit.setText("" if factor == 1.0 else nb_scaling.format_factor(factor))
+
+    def _on_compare_factor_apply(self) -> None:
+        entry = self._current_compare_entry()
+        if entry is None:
+            QMessageBox.information(self, "Multiply", "Click a trace in the list first.")
+            return
+        text = self.compare_factor_edit.text().strip()
+        if not text:
+            self._set_compare_factor(entry, 1.0)
+            return
+        self._on_compare_multiply_requested(entry, text)
+
+    def _on_compare_factor_reset(self) -> None:
+        entry = self._current_compare_entry()
+        if entry is not None:
+            self._set_compare_factor(entry, 1.0)
+            self.compare_factor_edit.clear()
+
+    def _compare_factor_for(self, entry) -> float:
+        """The factor one Compare entry is drawn multiplied by (1 = none). Kept
+        with the experiment, like its colour, so it outlives a redraw and is
+        saved in a state; it changes the drawing only, never the data."""
+        if entry is None or not (0 <= entry[0] < len(self.session)):
+            return 1.0
+        info = self._history_info(entry[0])
+        factors = info.get("compare_factors") if isinstance(info, dict) else None
+        try:
+            return float((factors or {}).get(self._compare_colour_slot(entry), 1.0)) or 1.0
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _set_compare_factor(self, entry, factor: float) -> None:
+        info = self._history_info(entry[0])
+        if not isinstance(info, dict):
+            return
+        factors = info.setdefault("compare_factors", {})
+        slot = self._compare_colour_slot(entry)
+        if factor == 1.0:
+            factors.pop(slot, None)
+        else:
+            factors[slot] = float(factor)
+        self._refresh_compare_view_if_active(switch_tab=False)
+
+    def _on_compare_multiply_requested(self, entry, factor=None) -> None:
+        """Compare list ▸ Multiply on this plot…: draw one trace times a factor
+        (the legend then says ``× 2``, ``× 1/3`` or ``× 0.25``)."""
+        if factor is None:
+            current = self._compare_factor_for(entry)
+            text, ok = QInputDialog.getText(
+                self, "Multiply on this plot",
+                "Draw this trace multiplied by (e.g. 2, 0.5, 1/3, -1; 1 removes it):",
+                text=nb_scaling.format_factor(current))
+            if not ok:
+                return
+            factor = text
+        try:
+            value = nb_scaling.parse_factor(factor)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Multiply", str(exc))
+            return
+        self._set_compare_factor(entry, value)
+
+    def _compare_legend_name(self, row: int) -> str:
+        """A Compare row's legend text: its name, and ``× factor`` when it is drawn scaled."""
+        name = self.compare_list.item(row).text()
+        factor = self._compare_factor_for(self.compare_list.item(row).data(Qt.ItemDataRole.UserRole))
+        return name if factor == 1.0 else f"{name} × {nb_scaling.format_factor(factor)}"
+
+    def _apply_compare_factors(self, rows, spectra, norm_mode: str):
+        """``(spectra, norm_mode)`` with each trace multiplied by its Compare
+        factor. Normalising to the tallest peak would cancel a factor, so then
+        the traces are normalised here first and drawn unnormalised."""
+        factors = [self._compare_factor_for(self.compare_list.item(r).data(Qt.ItemDataRole.UserRole))
+                   for r in rows]
+        if all(f == 1.0 for f in factors):
+            return spectra, norm_mode
+        out = []
+        for spectrum, factor in zip(spectra, factors):
+            if norm_mode == "max":
+                peak = float(np.max(np.abs(spectrum.data))) if np.size(spectrum.data) else 0.0
+                if peak:
+                    spectrum = nb_scaling.scale_spectrum(spectrum, 1.0 / peak)
+            if factor != 1.0:
+                spectrum = nb_scaling.scale_spectrum(spectrum, factor)
+            out.append(spectrum)
+        return out, ("none" if norm_mode == "max" else norm_mode)
 
     def _remove_compare_entry(self, entry) -> None:
         """Drop one entry from the Compare list (and its pin)."""
@@ -9392,6 +9645,8 @@ class MainWindow(QMainWindow):
         plot_spectra = list(scaled["spectra"])
         skipped_mass = [rows_and_1d[i][1] for i, _why in scaled["skipped"]]
         self._compare_scaling_notes = list(scaled["notes"])
+        # A factor given to one trace on this plot (Compare list ▸ Multiply…).
+        plot_spectra, norm_mode = self._apply_compare_factors(plot_rows, plot_spectra, norm_mode)
 
         # compare_list's own row index -> position among what's actually
         # plotted (checked rows only, minus anything just filtered out
@@ -9458,7 +9713,7 @@ class MainWindow(QMainWindow):
             self.compare_canvas.show_compare(
                 plot_spectra, mode=mode, normalize=(norm_mode == "max"),
                 shared_scale=self.compare_common_scale_check.isChecked(),
-                legend_labels=[self.compare_list.item(row).text() for row in plot_rows],
+                legend_labels=[self._compare_legend_name(row) for row in plot_rows],
                 series_keys=keys, series_renameable=True)
             if switch_tab:
                 self.canvas_tabs.setCurrentWidget(self.compare_canvas)
@@ -9562,7 +9817,8 @@ class MainWindow(QMainWindow):
                 normalize=(norm_mode == "max"), series_keys=keys, legend_labels=names,
                 axis_labels=controls.axis_labels(), axis_styles=controls.axis_styles(),
                 twod_options=options_2d, pulse_panels=pulse_panels,
-                panel_labels=self.compare_label_controls.args())
+                panel_labels=self.compare_label_controls.args(),
+                renameable=[tuple(e)[1] is not None for e in entries])
         except ValueError as exc:
             self.compare_status_label.setText(str(exc))
             self.compare_canvas.clear()
@@ -9588,7 +9844,7 @@ class MainWindow(QMainWindow):
         controls = self.compare_panels_controls
         entries = [self.compare_list.item(row).data(Qt.ItemDataRole.UserRole) for row in rows]
         keys = [repr(tuple(entry)) for entry in entries]
-        names = [self.compare_list.item(row).text() for row in rows]
+        names = [self._compare_legend_name(row) for row in rows]
         controls.set_spectra(keys, names)
         groups = controls.groups()
         controls.set_panel_count(len(groups))
@@ -9600,7 +9856,8 @@ class MainWindow(QMainWindow):
                 linked=controls.linked(), link_y=controls.linked_y(),
                 normalize=(norm_mode == "max"), series_keys=keys, legend_labels=names,
                 axis_labels=controls.axis_labels(), axis_styles=controls.axis_styles(),
-                panel_labels=self.compare_label_controls.args())
+                panel_labels=self.compare_label_controls.args(),
+                renameable=[tuple(e)[1] is not None for e in entries])
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot comparison", str(exc))
             return
@@ -11689,6 +11946,9 @@ class MainWindow(QMainWindow):
             self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.simulation_canvas), False)
         selected = self._selected_index()
         spectrum = self.session.spectra[selected] if selected is not None else None
+        # A y = 0 line while phasing or checking a baseline (Process tile only).
+        for _canvas in (self.canvas, self.processing_preview_canvas):
+            _canvas.set_zero_line(index == self._processing_tab_index)
         if index != self._processing_tab_index:
             self.canvas.set_pivot_marker(None)
             self.processing_preview_canvas.set_pivot_marker(None)
@@ -12044,6 +12304,9 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         if not self._fid_reprocessable(spectrum):
             return
+        # Moving time zero (FID shift, Align Echo and its nudge) puts a phase ramp
+        # on the spectrum; carry the phase over so it does not swing about.
+        self._compensate_phase_for_fid_roll(spectrum)
         self._persist_fid_processing_controls_to_metadata(spectrum)
 
         if self._phase_mode == "1d":
@@ -12060,6 +12323,44 @@ class MainWindow(QMainWindow):
         # recomputed after windowing etc.", and it fired on every
         # keystroke into any of those boxes.
         self._refresh_processing_preview_if_active(preserve_view=True)
+
+    def _compensate_phase_for_fid_roll(self, spectrum) -> bool:
+        """Predict the new phase from the existing phase when FID shift or Align
+        Echo changes where time zero is (user request, 2026-11-19: "when doing FID
+        shift the spectra changes a lot -- a new phase should be predicted from the
+        existing phase"). A roll of the FID is a linear phase across the spectrum
+        (:func:`opennmr.processing.ft.roll_phase_compensation`); adding it to the
+        stored phase leaves the spectrum looking as it did. Returns whether
+        anything was added."""
+        raw = spectrum.metadata.raw
+        fid_raw, dt = raw.get("fid_raw"), raw.get("fid_dt")
+        if fid_raw is None or not dt:
+            return False
+        before = (float(raw.get("live_fid_shift", 0.0) or 0.0), bool(raw.get("live_align_echo", False)),
+                  float(raw.get("live_echo_offset", 0.0) or 0.0))
+        now = (float(self.fid_shift_spin.value()), bool(self.align_echo_button.isChecked()),
+               float(self.echo_offset_spin.value()))
+        if before == now:
+            return False
+        row = np.asarray(fid_raw)
+        if row.ndim == 2:
+            index = (min(max(self.slice_spin.value() - 1, 0), row.shape[0] - 1)
+                     if spectrum.is_pseudo_2d else 0)
+            row = row[index]
+        try:
+            delta = (processing_ft.net_fid_roll(row.astype(complex), *now)
+                     - processing_ft.net_fid_roll(row.astype(complex), *before))
+            n_points = np.shape(spectrum.data)[-1]
+            ppm = next((np.asarray(a.ppm) for a in spectrum.axes if len(a.ppm) == n_points), None)
+            if ppm is None or not delta:
+                return False
+            phase0, phase1 = processing_ft.roll_phase_compensation(
+                delta, float(dt), ppm, float(spectrum.metadata.sfo1 or 0.0), self.pivot_spin.value())
+        except Exception:  # noqa: BLE001 -- a prediction must never break a control
+            return False
+        raw["phase0"] = float(raw.get("phase0", 0.0)) + phase0
+        raw["phase1"] = float(raw.get("phase1", 0.0)) + phase1
+        return True
 
     def _schedule_sidecar_save(self, index: int | None = None) -> None:
         """(Re)start the debounce timer for writing spectrum
@@ -12120,7 +12421,9 @@ class MainWindow(QMainWindow):
                           "czjzek": "Czjzek distribution",
                           "combined": "Solid-state NMR", "diffusion": "Diffusion (PFG)",
                           "bloch": "Shaped pulse (Bloch)", "pnmr": "pNMR (CIF)",
-                          "simpson": "SIMPSON import", "bms": "BMS shifts"}
+                          "simpson": "SIMPSON import", "bms": "BMS shifts",
+                          "motion": "Anisotropic motion",
+                          "motion_fit": "Anisotropic motion fit"}
 
     def _fit_panels(self) -> dict:
         """Each fit, as an object with get_state/set_state/result_state/
@@ -12255,6 +12558,17 @@ class MainWindow(QMainWindow):
                             rerun=self._rerun_bms,
                             summary=self.paramagnetic_panel.bms_summary,
                             anchor=lambda: self.paramagnetic_panel),
+            # Dynamics ▸ Anisotropic motion: re-runs what was run last (seconds).
+            "motion": _Section(get_state=self.motion_panel.get_state,
+                               set_state=self.motion_panel.set_state,
+                               rerun=self.motion_panel.rerun,
+                               summary=panel_summary(self.motion_panel),
+                               anchor=lambda: self.motion_panel),
+            # A fit can take minutes: restoring puts the inputs back and leaves it one click away.
+            "motion_fit": _Section(get_state=self.motion_fit_panel.get_state,
+                                   set_state=self.motion_fit_panel.set_state,
+                                   rerun=None, summary=panel_summary(self.motion_fit_panel),
+                                   anchor=lambda: self.motion_fit_panel),
             # Reading files is not a simulation run: nothing to re-run.
             "simpson": _Section(get_state=self.simpson_panel.get_state,
                                 set_state=self.simpson_panel.set_state,
@@ -12462,7 +12776,10 @@ class MainWindow(QMainWindow):
             self._show_spin_system_model("simulate")
         elif key == "combined":
             self.combined_sim_model.show_model("peaks")
-        self._show_side_tab("Simulate")
+        if key in ("motion", "motion_fit"):
+            for name in ("_motion_section", "_motion_fit_section"):
+                getattr(self, name).setVisible(True)   # an optional section may be hidden
+        self._show_side_tab("Dynamics" if key in ("motion", "motion_fit") else "Simulate")
         anchor = section.anchor()
         parent = anchor
         while parent is not None:
@@ -12942,7 +13259,12 @@ class MainWindow(QMainWindow):
         (and ``slices`` of 2Ds) -- shared by Save openNMR State and the
         autosave."""
         entries = []
+        entry_of: dict[int, int] = {}
         self._sync_compare_colours_from_canvas()
+        indices = list(indices)
+        # Each spectrum's place in the state, so a slice can point at its 2D
+        # wherever in the list that is.
+        entry_of.update({index: position for position, index in enumerate(indices)})
         for index in indices:
             self._flush_pending_state(index)
             spectrum = self.session.spectra[index]
@@ -12960,8 +13282,17 @@ class MainWindow(QMainWindow):
             # from it, exactly as it is now.
             prefer_copy = (kind == "experiment" and spectrum.ndim == 2
                            and not self._fid_reprocessable(spectrum))
+            link = None
+            raw = spectrum.metadata.raw or {}
+            if kind == "slice" and raw.get("slice_axis") in ("f1", "f2"):
+                parent_index = self._slice_parent_index(spectrum)
+                link = {"parent_entry": entry_of.get(parent_index), "axis": raw.get("slice_axis"),
+                        "index": raw.get("slice_index"),
+                        "parent_path": raw.get("slice_parent_path")}
             entries.append({"label": self.session.label(index), "kind": kind, "spectrum": spectrum,
+                            "link": link,
                             "compare_colours": dict(info.get("compare_colours") or {}),
+                            "compare_factors": dict(info.get("compare_factors") or {}),
                             "state": self._history_state(index), "source": source,
                             "origin": info.get("origin"), "prefer_copy": prefer_copy,
                             "copy": (kind != "experiment" or spectrum.ndim == 1 or copy_2d
@@ -12975,6 +13306,9 @@ class MainWindow(QMainWindow):
                 entries.append({"label": f"{self.session.label(index)} ▸ slice {row}",
                                 "kind": "slice", "spectrum": trace, "state": state,
                                 "source": None, "copy": True,
+                                "link": {"parent_entry": entry_of.get(index), "axis": "f1",
+                                         "index": int(row),
+                                         "parent_path": parent.metadata.source_path},
                                 "origin": parent.metadata.source_path})
         return entries
 
@@ -13142,7 +13476,8 @@ class MainWindow(QMainWindow):
         messages)`` -- the messages say what came from where."""
         info = io_state.load_state(folder)
         opened, messages = [], []
-        for entry in info["entries"]:
+        session_of: dict[int, int] = {}
+        for position, entry in enumerate(info["entries"]):
             label = entry["label"]
             processing, metadata = io_history.split_state(entry.get("state") or {})
             source = entry.get("source") or {}
@@ -13190,14 +13525,45 @@ class MainWindow(QMainWindow):
             if isinstance(colours, dict) and colours:
                 self._history_info(index)["compare_colours"] = {
                     str(k): str(v) for k, v in colours.items() if v}
+            factors = entry.get("compare_factors")
+            if isinstance(factors, dict) and factors:
+                self._history_info(index)["compare_factors"] = {
+                    str(k): float(v) for k, v in factors.items() if v}
             history = self._ensure_history(index)
             if history is not None:
                 io_history.add_event(history, f"Opened from openNMR state “{info['name']}” "
                                               f"({info['folder']})", kind="opened")
             opened.append(index)
+            session_of[position] = index
+        for position, entry in enumerate(info["entries"]):
+            if position in session_of and entry.get("link"):
+                self._restore_slice_link(session_of[position], entry["link"], session_of)
         if opened:
             self._select_single_row(opened[0])
+        self._refresh_model_series_buttons()
         return opened, messages
+
+    def _restore_slice_link(self, index: int, link: dict, session_of: dict) -> bool:
+        """Re-attach a reopened slice to the 2D it was cut from (the link is
+        not part of the processing sidecar: it holds a live object). Uses the
+        2D's place in the state, else its folder when that is unambiguous."""
+        spectrum = self.session.spectra[index]
+        parent_index = session_of.get(link.get("parent_entry"))
+        if parent_index is None:
+            parent_index = self._parent_index_by_path(link.get("parent_path"))
+        if parent_index is None or parent_index == index:
+            return False
+        parent = self.session.spectra[parent_index]
+        if parent.ndim != 2:
+            return False
+        raw = spectrum.metadata.raw
+        raw["slice_parent"] = parent
+        raw["slice_parent_info"] = self.session.info(parent_index)
+        raw["slice_parent_path"] = link.get("parent_path") or getattr(
+            parent.metadata, "source_path", None)
+        raw["slice_axis"] = link.get("axis") or "f1"
+        raw["slice_index"] = link.get("index")
+        return True
 
     def _on_open_state_clicked(self, folder: str | None = None) -> None:
         if not folder:
@@ -14236,6 +14602,7 @@ class MainWindow(QMainWindow):
             "Notebook: opennmr.notebook.autophase_slices(spectrum)."
         )
         self.autophase_each_slice_checkbox.setVisible(False)    # shown for a pseudo-2D
+        self.autophase_each_slice_checkbox.toggled.connect(lambda _on: self._remember_phase_independence())
         autophase_row.addWidget(self.autophase_each_slice_checkbox)
         self.autophase_keep_sign_checkbox = QCheckBox("Keep slice signs")
         self.autophase_keep_sign_checkbox.setToolTip(
@@ -14246,6 +14613,33 @@ class MainWindow(QMainWindow):
         self.autophase_keep_sign_checkbox.setVisible(False)
         autophase_row.addWidget(self.autophase_keep_sign_checkbox)
         form.addRow(autophase_row)
+
+        # Opt-in scoring options. The defaults (the magnitude score, the whole
+        # spectrum) are the benchmarked ones; these are for a line shape they
+        # misjudge, such as a broad line on a rolling background.
+        score_row = QHBoxLayout()
+        self.autophase_score_combo = QComboBox()
+        for label, key in (("Magnitude (default)", "magnitude"), ("Negative area", "negarea"),
+                           ("Entropy", "entropy"), ("ACME", "acme")):
+            self.autophase_score_combo.addItem(label, key)
+        self.autophase_score_combo.setToolTip(
+            "What Autophase minimises. Magnitude (the default) was the most accurate on "
+            "simulated lines from 5 to 200 Hz wide; try another only where the result "
+            "looks wrong, and check it by eye.\n\n"
+            "Notebook: opennmr.notebook.compare_phase_methods(spectrum_row, ppm) runs "
+            "them all and says whether they agree.")
+        score_row.addWidget(QLabel("Score:"))
+        score_row.addWidget(self.autophase_score_combo)
+        self.autophase_visible_only_checkbox = QCheckBox("Judge on visible range")
+        self.autophase_visible_only_checkbox.setToolTip(
+            "Autophase judges the phase on the part of the spectrum currently on screen "
+            "instead of all of it, so a distant broad hump or spinning sidebands cannot "
+            "pull it. The correction is still applied to the whole spectrum. Zoom onto "
+            "the line first.\n\n"
+            "Notebook: opennmr.notebook.autophase_slices(spectrum, region=[(low, high)]).")
+        score_row.addWidget(self.autophase_visible_only_checkbox)
+        score_row.addStretch(1)
+        form.addRow(score_row)
 
         self.revert_autophase_button = QPushButton("Revert Autophase")
         self.revert_autophase_button.setToolTip(
@@ -15201,9 +15595,10 @@ class MainWindow(QMainWindow):
         span = freq_ppm.max() - freq_ppm.min()
         pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
         if self.autophase_joint_checkbox.isChecked():
-            phase0, phase1 = processing_ft.autophase01(target, freq_ppm, pivot_frac=pivot_frac)
+            phase0, phase1 = processing_ft.autophase01(
+                target, freq_ppm, pivot_frac=pivot_frac, **self._autophase_scoring())
         else:
-            phase0 = processing_ft.apc0(target, freq_ppm)
+            phase0 = processing_ft.apc0(target, freq_ppm, **self._autophase_scoring())
             phase1 = 0.0
 
         self._last_autophase_revert = (self.phase0_spin.value(), self.phase1_spin.value())
@@ -16449,7 +16844,35 @@ class MainWindow(QMainWindow):
         if limits:
             self.processing_preview_canvas.restore_processing_preview_limits(limits)
 
+    def _slices_phased_independently(self) -> bool:
+        """The two Process-tab boxes read as one choice: each slice on its own."""
+        return (not self.apply_all_slices_checkbox.isChecked()
+                and self.autophase_each_slice_checkbox.isChecked())
+
+    def _set_slices_phased_independently(self, independent: bool) -> None:
+        """Set both boxes together, without firing their handlers."""
+        for box, value in ((self.apply_all_slices_checkbox, not independent),
+                           (self.autophase_each_slice_checkbox, independent)):
+            blocked = box.blockSignals(True)
+            box.setChecked(value)
+            box.blockSignals(blocked)
+
+    def _remember_phase_independence(self) -> None:
+        """Store the current choice with the selected pseudo-2D, so it comes back with the
+        dataset (next to its slice_phase0/slice_phase1)."""
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim == 2 and spectrum.is_pseudo_2d:
+            spectrum.metadata.raw["phase_slices_independently"] = self._slices_phased_independently()
+
+    def _on_phase_independent_default_toggled(self, checked: bool) -> None:
+        self._ui_settings["phase_slices_independently"] = bool(checked)
+        self._save_ui_settings()
+
     def _on_apply_all_slices_toggled(self, _state: int) -> None:
+        self._remember_phase_independence()
         # Doesn't change *what* the reference is (still the untouched
         # full-2D snapshot), only how the next preview uses it -- no
         # recapture, just re-render with the checkbox's new meaning.
@@ -16496,7 +16919,8 @@ class MainWindow(QMainWindow):
         found = slice_phase.autophase_slices(
             spectrum, joint=self.autophase_joint_checkbox.isChecked(),
             pivot_ppm=self.pivot_spin.value(),
-            window=90.0 if self.autophase_keep_sign_checkbox.isChecked() else None)
+            window=90.0 if self.autophase_keep_sign_checkbox.isChecked() else None,
+            **self._autophase_scoring())
         weak = sum(found["inherited"])
         self.statusBar().showMessage(
             f"Autophased {len(found['phase0'])} slices from slice {found['reference'] + 1}'s phase"
@@ -17342,12 +17766,28 @@ class MainWindow(QMainWindow):
                 self.side_tabs.setCurrentIndex(index)
                 return
 
+    def _autophase_scoring(self) -> dict:
+        """The ``penalty``/``region`` keywords the Autophase panel asks for.
+
+        Empty-handed defaults (magnitude, whole spectrum) give ``{}``-equivalent
+        behaviour; a region is the x-range on screen, which is refused when it
+        holds too few points to judge a phase by."""
+        kwargs = {"penalty": self.autophase_score_combo.currentData() or "magnitude"}
+        if self.autophase_visible_only_checkbox.isChecked():
+            try:
+                lo, hi = sorted(self.processing_preview_canvas._pivot_marker_ax.get_xlim())
+            except Exception:  # noqa: BLE001 -- no axes yet: the whole spectrum
+                return kwargs
+            kwargs["region"] = [(lo, hi)]
+        return kwargs
+
     def _set_processing_enabled(self, enabled: bool, status: str | None = None) -> None:
         for widget in (
             self.phase0_handle, self.phase0_spin, self.phase0_current_display,
             self.phase1_handle, self.phase1_spin, self.phase1_current_display,
             self.pivot_spin, self.pivot_slider, self.autophase_joint_checkbox,
             self.autophase_each_slice_checkbox, self.autophase_keep_sign_checkbox,
+            self.autophase_score_combo, self.autophase_visible_only_checkbox,
             self.baseline_correct_button, self.baseline_method_combo, self.baseline_smoothing_spin,
             self.baseline_points_spin, self.baseline_manual_box,
         ):
@@ -17367,7 +17807,10 @@ class MainWindow(QMainWindow):
     # defined in each one, then fit a relaxation curve to each peak's
     # per-slice amplitude series.
 
-    _PEAK_TABLE_COLUMNS = ("Shift (ppm)", "FWHM (ppm)", "Eta", "Fixed", "Multiplet", "J (Hz)")
+    _PEAK_TABLE_COLUMNS = ("Shift (ppm)", "FWHM (ppm)", "Eta", "Fixed", "Multiplet", "J (Hz)",
+                           "Amplitude")
+    #: The Amplitude column (an optional starting value; blank = read it off the data).
+    _PEAK_AMPLITUDE_COL = 6
     _REGION_TABLE_COLUMNS = ("Low (ppm)", "High (ppm)")
     #: Spectral-fit results table (ported from upstream, Leo 14a6fd3):
     #: the peak table's own Shift/FWHM/Eta columns, then the outputs.
@@ -21239,6 +21682,25 @@ class MainWindow(QMainWindow):
         self._exchange_section = CollapsibleSection(
             "Exchange Lineshape (Ion Hopping)", content=self.exchange_panel)
         layout.addWidget(self._exchange_section)
+        # Rotations of CSA / quadrupolar / dipolar tensors as well as hops, with Simulate as
+        # the source of the interactions (explicit user request, 2026-11-18); maths
+        # notebook.motion, drawn on the Fit view.
+        self.motion_panel = AnisotropicMotionPanel(
+            canvas=self.fit_canvas, show_view=self._raise_fit_canvas,
+            get_spectra=self._exchange_fit_spectra,
+            get_simulate_sites=self._motion_simulate_sites,
+            get_simulate_settings=lambda: self.combined_sim_panel.settings(),
+            on_run=lambda: self._journal_simulation("motion"))
+        self._motion_section = CollapsibleSection(
+            "Anisotropic Motion 1: Describe the Rotation", content=self.motion_panel)
+        layout.addWidget(self._motion_section)
+        # Fitting it (rate per spectrum + Arrhenius line, or a global fit); notebook.motion_fit.
+        self.motion_fit_panel = MotionFitPanel(
+            self.motion_panel, canvas=self.fit_canvas, show_view=self._raise_fit_canvas,
+            on_run=lambda: self._journal_simulation("motion_fit"))
+        self._motion_fit_section = CollapsibleSection(
+            "Anisotropic Motion 2: Fit Rates and Barriers to Spectra", content=self.motion_fit_panel)
+        layout.addWidget(self._motion_fit_section)
         # Tikhonov regularisation, its own section (explicit user request,
         # 2026-10-16: the MATLAB_RELAX_ALGORITHM scripts); maths
         # notebook.regularisation, drawn on the Fit view.
@@ -21420,6 +21882,16 @@ class MainWindow(QMainWindow):
                          "error": float(result.get("errors", {}).get(rate_param, float("nan"))),
                          "larmor_MHz": larmor, "quantity": quantity})
         return rows
+
+    def _motion_simulate_sites(self) -> list:
+        """Simulate ▸ Solid-state NMR's sites of the observed nucleus, for Dynamics ▸
+        Anisotropic motion."""
+        panel = self.combined_sim_panel
+        observed = panel.observed()
+        sites = [s for s in panel.build_sites() if s.nucleus == observed]
+        if not sites:
+            raise ValueError(f"Simulate has no {observed} sites.")
+        return sites
 
     def _exchange_fit_spectra(self) -> list[dict]:
         """The 1D spectra selected in Open experiments, for Dynamics >
@@ -21917,7 +22389,12 @@ class MainWindow(QMainWindow):
             "x (sextet), h (septet) – 'dt' is a doublet of triplets. J (Hz) "
             "then holds the starting coupling for each letter, separated by "
             "commas (a blank gets 7 Hz); the fit refines them. Shift is the "
-            "multiplet's centre and FWHM the width of each line."
+            "multiplet's centre and FWHM the width of each line.\n\n"
+            "Amplitude: leave empty to start from the spectrum's height at the peak. "
+            "Type a value (in the spectrum's own units) to start the fit there – or to hold "
+            "it, together with Fixed or Set Custom Bounds ▸ Amplitude ▸ Fixed, e.g. a weak "
+            "overlapped peak at a known intensity. It is a starting value for every slice "
+            "of a series, so a fixed one stays the same in all of them."
         )
         self.peak_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.peak_table.customContextMenuRequested.connect(self._on_peak_table_context_menu)
@@ -22322,6 +22799,24 @@ class MainWindow(QMainWindow):
         self.export_fit_report_button = export_report_button
         layout.addWidget(export_report_button)
 
+        # One table for every kind of fit (notes 8.4): the same columns,
+        # parameter names, units and error labels whether the numbers came
+        # from a peak fit, a curve fit, SCORE or a CSA/quadrupolar fit, so
+        # results from different routes can be concatenated and plotted
+        # with one script.
+        export_results_button = QPushButton("Export Results Table…")
+        export_results_button.setToolTip(
+            "Save every fit result held for this spectrum – peak fits (per slice), the "
+            "curve fit, resolved components and stored fits – as ONE CSV with one row "
+            "per parameter: fit type, group, slice, parameter, value, error, what kind "
+            "of error it is, unit, fixed, shared, and the fit quality.\n\n"
+            "Every fit type uses the same columns and names, so files from different "
+            "spectra or routes can be joined and plotted by one script.\n\n"
+            "Notebook: opennmr.notebook.results_table.")
+        export_results_button.clicked.connect(self._on_export_results_table_clicked)
+        self.export_results_table_button = export_results_button
+        layout.addWidget(export_results_button)
+
         # Explicit user request: fitted peaks exported to a pseudo-2D
         # dataset, so the fitted series can be viewed/compared exactly
         # like the raw data it came from. Starts disabled -- enabled
@@ -22582,6 +23077,43 @@ class MainWindow(QMainWindow):
         )
         self.diffusion_stretched_check.toggled.connect(self._on_fit_model_shape_changed)
         relax_form.addRow("", self.diffusion_stretched_check)
+
+        # PFG notes §1: a constant that does not decay.
+        self.diffusion_offset_check = QCheckBox("Constant offset C (signal that does not decay)")
+        self.diffusion_offset_check.setToolTip(
+            "Add a constant C ≥ 0 to the decay: I(b) = Σ Iᵢ exp(−Dᵢ b) + C.\n\n"
+            "Many samples keep a small plateau at high b (0.1–0.4 % of I₀ in the PEGDA "
+            "membranes: polymer network, resin, baseline). Without C the slowest component "
+            "fits that plateau instead of the species behind it, biasing its D, sometimes "
+            "losing it altogether. Component fractions are then quoted relative to ΣIᵢ + C.\n\n"
+            "Not offered for SCORE (its components carry no offset).")
+        self.diffusion_offset_check.toggled.connect(self._on_fit_model_shape_changed)
+        relax_form.addRow("", self.diffusion_offset_check)
+
+        # PFG notes §2: let the data say how many components (and whether C) it supports.
+        self.diffusion_select_button = QPushButton("Suggest components (AICc)…")
+        self.diffusion_select_button.setToolTip(
+            "Fit 1–3 components, each with and without a constant offset, to every fitted "
+            "peak's decay, and rank them by AICc (small-sample corrected). A fit can only be "
+            "chosen if every amplitude is above 2σ and 0.1 % of I₀, every D is determined "
+            "to better than 50 %, neighbouring D differ by more than 1.5×, no D sits at a "
+            "bound and C (if present) is significant; a component is added only when AICc "
+            "improves by more than 10.\n\nRun Fit Curve first: this reads its curves.")
+        self.diffusion_select_button.clicked.connect(self._on_select_diffusion_components_clicked)
+        relax_form.addRow(self.diffusion_select_button)
+        self.diffusion_apply_selection_button = QPushButton("Use the suggestion")
+        self.diffusion_apply_selection_button.setEnabled(False)
+        self.diffusion_apply_selection_button.setToolTip(
+            "Set Components and the offset to the suggestion for the first peak, then press "
+            "Fit Curve.")
+        self.diffusion_apply_selection_button.clicked.connect(self._on_apply_diffusion_selection)
+        relax_form.addRow(self.diffusion_apply_selection_button)
+        self.diffusion_select_label = QLabel("")
+        self.diffusion_select_label.setWordWrap(True)
+        self.diffusion_select_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        relax_form.addRow(self.diffusion_select_label)
+        self._diffusion_selection = None
 
         self.custom_p0_row_label = QLabel("Initial guesses:")
         self.custom_p0_edit = QLineEdit()
@@ -23287,6 +23819,49 @@ class MainWindow(QMainWindow):
         score_row.addWidget(self.export_components_button)
         relax_form.addRow(score_row)
 
+        # PFG notes §4: SCORE next to the integral decay fit, as a cross-check.
+        self.score_auto_check = QCheckBox("Also resolve 2 and 3 components after a diffusion Fit Curve")
+        self.score_auto_check.setChecked(True)
+        self.score_auto_check.setToolTip(
+            "After a diffusion curve fit, also run SCORE with 2 and 3 components on the same "
+            "slices and b-values, and compare its water-like D with the fit's. A disagreement "
+            "(over 5 %), or one line split into two components, is flagged below.\n\n"
+            "SCORE needs no peak picking, so it is an independent check on the integral fit; "
+            "it can fail where the FIDs are truncated or the line drifts between rows.")
+        relax_form.addRow(self.score_auto_check)
+        self.score_align_check = QCheckBox("Align rows before resolving")
+        self.score_align_check.setChecked(False)
+        self.score_align_check.setToolTip(
+            "Shift each row onto the first by cross-correlation before SCORE, removing a "
+            "frequency drift between gradient levels (which otherwise looks like an extra "
+            "component). Off by default: it also moves genuinely shifting lines.")
+        relax_form.addRow(self.score_align_check)
+        self.score_check_label = QLabel("")
+        self.score_check_label.setWordWrap(True)
+        self.score_check_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        relax_form.addRow(self.score_check_label)
+
+        # PFG notes §5: one set of peak shapes for every row, amplitudes >= 0.
+        self.shared_shape_button = QPushButton("Fit peak table to every slice (shared shapes)")
+        self.shared_shape_button.setToolTip(
+            "Fit the peaks in the peak table to every slice at once: positions, widths and "
+            "lineshapes are shared by all slices and only the amplitudes differ, held "
+            "non-negative, with a linear baseline per slice. Stages the areas for Fit Curve "
+            "(Value source: Area). For a diffusion series, a peak whose decay contains another "
+            "peak's D (cross-talk) is flagged.")
+        self.shared_shape_button.clicked.connect(self._on_shared_shape_fit_clicked)
+        relax_form.addRow(self.shared_shape_button)
+        self.shared_shape_anchor_check = QCheckBox("Hold later peaks at or downfield of the first")
+        self.shared_shape_anchor_check.setToolTip(
+            "Stops a weaker peak sliding to the other side of a stronger one (e.g. a membrane "
+            "line must stay downfield of the bulk water line).")
+        relax_form.addRow(self.shared_shape_anchor_check)
+        self.shared_shape_status_label = QLabel("")
+        self.shared_shape_status_label.setWordWrap(True)
+        self.shared_shape_status_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        relax_form.addRow(self.shared_shape_status_label)
+
         self._populate_fit_model_combo()
         self._on_fit_type_changed(self.fit_type_combo.currentIndex())
         self._on_delay_source_changed(0)
@@ -23334,8 +23909,21 @@ class MainWindow(QMainWindow):
         self.relaxation_peak_prev_button.setToolTip("Previous peak's curve fit")
         self.relaxation_peak_next_button.setToolTip("Next peak's curve fit")
         relax_fit_row.addLayout(peak_spin_row)
-        self.canvas_tabs.setCornerWidget(self.curve_peak_bar)
+        # One selector position for every slice-browsing view (notes 8.2): the
+        # top right of the plot area holds the slice selector -- mirroring the
+        # Process panel's spin on the FID/Processing Preview views and the
+        # Fitting panel's on the Spectral Fit view -- next to the peak
+        # selector of a curve fit.
+        self.view_slice_bar = MirroredSpinBar()
+        self.view_selector_bar = QWidget()
+        selector_layout = QHBoxLayout(self.view_selector_bar)
+        selector_layout.setContentsMargins(0, 0, 0, 0)
+        selector_layout.setSpacing(8)
+        selector_layout.addWidget(self.view_slice_bar)
+        selector_layout.addWidget(self.curve_peak_bar)
+        self.canvas_tabs.setCornerWidget(self.view_selector_bar)
         self.curve_peak_bar.setVisible(False)
+        self.view_slice_bar.setVisible(False)
         # Re-checked once the new plot is drawn (a parented timer: it dies
         # with the window, never firing into a deleted one).
         self._curve_peak_bar_timer = QTimer(self)
@@ -24582,6 +25170,35 @@ class MainWindow(QMainWindow):
         else:
             self.imaging_gradient_status_label.setText("Set a max gradient to enable the mm axis.")
 
+    def _on_scale_spectrum_requested(self, factor=None) -> int | None:
+        """The plot toolbar's × Scale: multiply the selected spectrum by a factor
+        asked for (``factor`` skips the question -- a notebook-style call). The
+        result is a new spectrum, "<name> × <factor>"; the original is untouched.
+        Returns its index, or None."""
+        index = self._selected_index()
+        if index is None:
+            QMessageBox.information(self, "Scale", "Select a spectrum first.")
+            return None
+        if factor is None:
+            text, ok = QInputDialog.getText(
+                self, "Multiply spectrum",
+                f"Multiply {self.session.label(index)} by (e.g. 2, 0.5, 1/3, -1):", text="2")
+            if not ok:
+                return None
+            factor = text
+        try:
+            value = nb_scaling.parse_factor(factor)
+            scaled = nb_scaling.scale_spectrum(self.session.spectra[index], value)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Scale", str(exc))
+            return None
+        shown = nb_scaling.format_factor(value)
+        new_index = self._add_derived_spectrum(scaled, f"{self.session.label(index)} × {shown}")
+        self.statusBar().showMessage(
+            f"{self.session.label(index)} multiplied by {shown} → new spectrum "
+            f"“{self.session.label(new_index)}”.", 8000)
+        return new_index
+
     def _add_derived_spectrum(self, spectrum: NMRSpectrum, label: str) -> int:
         """Append a spectrum computed from already-loaded data (not
         read from a file) into the session and the Data tab's own
@@ -24698,6 +25315,14 @@ class MainWindow(QMainWindow):
             "this tab; untick to remove them.")
         self.integral_labels_check.toggled.connect(lambda _on: self._sync_integral_labels())
         label_row.addWidget(self.integral_labels_check)
+        # The label options appear only once the labels are switched on (user request,
+        # 2026-11-19).
+        label_row.addStretch(1)
+        region_layout.addLayout(label_row)
+        self.integral_labels_options = QWidget()
+        options_layout = QVBoxLayout(self.integral_labels_options)
+        options_layout.setContentsMargins(0, 0, 0, 0)
+        label_row = QHBoxLayout()
         label_row.addWidget(QLabel("Decimals"))
         self.integral_labels_decimals_spin = TypedSpinBox()
         self.integral_labels_decimals_spin.setRange(0, 4)
@@ -24713,7 +25338,7 @@ class MainWindow(QMainWindow):
         self.integral_labels_symbol_check.toggled.connect(lambda _on: self._sync_integral_labels())
         label_row.addWidget(self.integral_labels_symbol_check)
         label_row.addStretch(1)
-        region_layout.addLayout(label_row)
+        options_layout.addLayout(label_row)
 
         # How the label text looks: size, colour, typeface, weight, slant,
         # height and angle (explicit user request, 2026-10-24).
@@ -24783,7 +25408,10 @@ class MainWindow(QMainWindow):
         self.integral_labels_angle_spin.valueChanged.connect(
             lambda _v: self._sync_integral_labels())
         style_form.addRow("Label angle:", self.integral_labels_angle_spin)
-        region_layout.addLayout(style_form)
+        options_layout.addLayout(style_form)
+        region_layout.addWidget(self.integral_labels_options)
+        self.integral_labels_options.setVisible(self.integral_labels_check.isChecked())
+        self.integral_labels_check.toggled.connect(self.integral_labels_options.setVisible)
 
         self.region_table = QTableWidget(0, len(self._REGION_TABLE_COLUMNS))
         self.region_table.setHorizontalHeaderLabels(self._REGION_TABLE_COLUMNS)
@@ -24879,6 +25507,18 @@ class MainWindow(QMainWindow):
             "error bar is propagated through the rule's own weights.")
         rule_row.addWidget(self.integration_method_combo, 1)
         region_layout.addLayout(rule_row)
+
+        # PFG notes §7: a constant offset in each row (first-point / DC) that scales with the
+        # row's signal biases every integral. Subtracted per row, by default.
+        self.integration_baseline_check = QCheckBox("Subtract a baseline from every slice")
+        self.integration_baseline_check.setChecked(True)
+        self.integration_baseline_check.setToolTip(
+            "Estimate a robust linear baseline from the signal-free parts of each slice and "
+            "subtract it before integrating. On by default: diffusion rows often carry a "
+            "constant offset proportional to the row's own signal, which would otherwise add "
+            "an offset to every integral (and look like a non-decaying component). Untick only "
+            "for already baseline-corrected data or when every region spans the whole spectrum.")
+        region_layout.addWidget(self.integration_baseline_check)
 
         # Keeping integrals (explicit user request, 2026-10-20): tick the
         # regions (the box beside each Low value), store them in the
@@ -25426,7 +26066,8 @@ class MainWindow(QMainWindow):
             prepared = [self._ensure_slice_info(s, i + 1) for i, s in enumerate(entries)]
             integrated = processing_relaxation.NMR2D_integrate_slices(
                 {"rows": prepared}, regions, mode="rows",
-                method=self.integration_method_combo.currentData())
+                method=self.integration_method_combo.currentData(),
+                subtract_baseline=self.integration_baseline_check.isChecked())
             results = integrated["rows"]
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             problem("Integrate failed", f"Integration failed: {exc}", critical=True)
@@ -25437,7 +26078,7 @@ class MainWindow(QMainWindow):
     def _add_peak_row(self, shift: float = 0.0, fwhm: float = 1.0, eta: float = 0.5,
                        fixed: bool = False, bounds: dict | None = None,
                        per_param_fixed: dict | None = None, multiplet: str = "",
-                       couplings: str = "") -> None:
+                       couplings: str = "", amplitude: float | None = None) -> None:
         row = self.peak_table.rowCount()
         self.peak_table.blockSignals(True)
         self.peak_table.insertRow(row)
@@ -25446,6 +26087,8 @@ class MainWindow(QMainWindow):
         self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
         self.peak_table.setItem(row, 4, QTableWidgetItem(multiplet))
         self.peak_table.setItem(row, 5, QTableWidgetItem(couplings))
+        self.peak_table.setItem(row, self._PEAK_AMPLITUDE_COL, QTableWidgetItem(
+            "" if amplitude is None else self._format_peak_value(amplitude)))
         self.peak_table.blockSignals(False)
         if bounds:
             self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, bounds)
@@ -26589,6 +27232,22 @@ class MainWindow(QMainWindow):
         if unit != "ppm":
             self.canvas.set_axis_unit(unit)
 
+    def _peak_amplitude_start(self, row: int) -> float | None:
+        """The Amplitude cell of peak ``row`` as a number, or ``None`` when it is blank
+        (the fit then starts from the spectrum's height at the peak)."""
+        item = self.peak_table.item(row, self._PEAK_AMPLITUDE_COL)
+        text = item.text().strip() if item is not None else ""
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError as exc:
+            raise ValueError(f"Peak row {row + 1}: the Amplitude must be a number or empty "
+                             f"(got {text!r}).") from exc
+        if not np.isfinite(value):
+            raise ValueError(f"Peak row {row + 1}: the Amplitude must be a finite number.")
+        return value
+
     def _read_peak_defs(self) -> list[dict]:
         tolerance = self.position_tolerance_spin.value()
         peak_defs = []
@@ -26600,6 +27259,9 @@ class MainWindow(QMainWindow):
             except (AttributeError, ValueError) as exc:
                 raise ValueError(f"Peak row {row + 1}: shift/FWHM/eta must all be numbers.") from exc
             peak_def = {"type": "pseudo_voigt", "shift": shift, "fwhm": fwhm, "eta": eta}
+            amplitude = self._peak_amplitude_start(row)
+            if amplitude is not None:
+                peak_def["A_init"] = amplitude
             multiplet_item = self.peak_table.item(row, 4)
             j_item = self.peak_table.item(row, 5)
             try:
@@ -26637,6 +27299,12 @@ class MainWindow(QMainWindow):
             custom_bounds = self.peak_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
             if custom_bounds:
                 peak_def["bounds"] = {**peak_def["bounds"], **custom_bounds}
+            if amplitude is not None and not peak_def.get("fixed", {}).get("A"):
+                low, high = peak_def["bounds"].get("amplitude", peak_def["bounds"].get("A", (-np.inf, np.inf)))
+                if not (low <= amplitude <= high):
+                    raise ValueError(
+                        f"Peak row {row + 1}: the Amplitude {amplitude:g} is outside its bounds "
+                        f"({low:g}, {high:g}). Change one or the other.")
             peak_defs.append(peak_def)
         return peak_defs
 
@@ -26706,9 +27374,78 @@ class MainWindow(QMainWindow):
         for widget in (self.diffusion_components_row_label, self.diffusion_components_spin,
                         self.diffusion_stretched_check):
             widget.setVisible(is_generalised)
+        diffusion = self._is_diffusion_fit()
+        self.diffusion_offset_check.setVisible(
+            diffusion and (is_generalised or key in self._OFFSET_BASE))
+        for widget in (self.diffusion_select_button, self.diffusion_apply_selection_button,
+                       self.diffusion_select_label):
+            widget.setVisible(diffusion)
         if is_custom:
             self._on_custom_equation_changed(self.custom_equation_edit.text())
         self._refresh_guess_table(force=True)
+
+    def _on_select_diffusion_components_clicked(self) -> None:
+        """PFG notes §2: rank 1-3 components, each with and without C, by AICc for every fitted
+        peak's decay, and show why a rejected fit was rejected."""
+        results = self._relaxation_fit_results
+        if not results:
+            QMessageBox.information(self, "Suggest components",
+                                    "Run Fit Curve first: the suggestion reads its decay curves.")
+            return
+        series = []
+        for fit in results:
+            t, y = fit.get("t"), fit.get("y")
+            if t is None or y is None or len(t) < 6:
+                continue
+            series.append((np.asarray(t, dtype=float), np.asarray(y, dtype=float),
+                           None if fit.get("y_err") is None else np.asarray(fit["y_err"], float),
+                           fit.get("peak_label") or fit.get("label")))
+
+        def compute():
+            return [nb_pfg_selection.select_diffusion_model(t, y, e, n_max=3,
+                                                            offsets=(False, True))
+                    for t, y, e, _label in series]
+
+        def done(selections, _early):
+            lines, first = [], None
+            for k, ((_t, _y, _e, label), sel) in enumerate(zip(series, selections), start=1):
+                row = sel["selected"]
+                name = label or f"Peak {k}"
+                if row is None:
+                    lines.append(f"{name}: no fit passed the validity checks.")
+                    continue
+                lines.append(f"{name}: {row['n_components']} component(s)"
+                             + (" + constant offset C" if row["offset"] else ""))
+                if first is None:
+                    first = (row["n_components"], bool(row["offset"]), sel)
+            text = "\n".join(lines)
+            if series and selections:
+                text += "\n\n" + nb_pfg_selection.format_model_selection(selections[0])
+            self.diffusion_select_label.setText(text)
+            self._diffusion_selection = None if first is None else {"n": first[0], "offset": first[1]}
+            self.diffusion_apply_selection_button.setEnabled(first is not None)
+
+        if not series:
+            QMessageBox.information(self, "Suggest components",
+                                    "The fitted curves are too short to rank models.")
+            return
+        jobs.submit(self, jobs.Job("Choosing components", compute, done,
+                                   fail=lambda exc: QMessageBox.critical(
+                                       self, "Suggest components", str(exc)),
+                                   spectrum_index=self._selected_index(), watched=False))
+
+    def _on_apply_diffusion_selection(self) -> None:
+        """Put the suggestion's component count and offset into the model controls."""
+        pick = self._diffusion_selection
+        if not pick:
+            return
+        combo = self.relaxation_model_combo
+        combo.setCurrentIndex(max(0, combo.findData("diffusion_n")))
+        self.diffusion_components_spin.setValue(int(pick["n"]))
+        self.diffusion_offset_check.setChecked(bool(pick["offset"]))
+        self.statusBar().showMessage(
+            f"Set to {pick['n']} component(s)" + (" + C" if pick["offset"] else "")
+            + ": press Fit Curve.", 6000)
 
     def _on_fit_model_shape_changed(self, _value=None) -> None:
         """The N-component spin box / stretched checkbox changed, so the
@@ -26811,7 +27548,18 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 -- a half-typed equation is not an error to report here
             return None
 
-    def _current_model_spec(self) -> dict:
+    #: Registry diffusion models that become a built model (same shape, plus C) when the
+    #: offset is ticked: ``key -> (components, stretched)``.
+    _OFFSET_BASE = {"stejskal_tanner": (1, False), "stejskal_tanner_stretched": (1, True),
+                    "stejskal_tanner_biexponential": (2, False)}
+
+    def _builds_model_spec(self, key) -> bool:
+        """Whether the fit must pass a built spec rather than a registry name."""
+        return (key in ("custom", "diffusion_n")
+                or (self._is_diffusion_fit() and key in self._OFFSET_BASE
+                    and self.diffusion_offset_check.isChecked()))
+
+    def _current_model_spec(self, include_offset: bool = True) -> dict:
         """The spec dict for whatever the model combo currently names --
         a :data:`RELAXATION_MODELS` entry, a generalised N-component
         diffusion model, or a custom equation. One place that knows how
@@ -26826,7 +27574,13 @@ class MainWindow(QMainWindow):
                 self.diffusion_components_spin.value(),
                 stretched=self.diffusion_stretched_check.isChecked(),
                 expected_D=self._expected_d_from_guess_table(),
+                offset=include_offset and self.diffusion_offset_check.isChecked(),
             )
+        if include_offset and self._builds_model_spec(key):
+            n, stretched = self._OFFSET_BASE[key]
+            return processing_diffusion.build_diffusion_model(
+                n, stretched=stretched, expected_D=self._expected_d_from_guess_table(),
+                offset=True)
         return processing_relaxation.RELAXATION_MODELS[key]
 
     def _expected_d_from_guess_table(self):
@@ -28243,6 +28997,47 @@ class MainWindow(QMainWindow):
         # honest from.
         self._refresh_staged_measurement_label()
 
+    @staticmethod
+    def _slice_results_kind(results) -> str | None:
+        """``"peaks"`` for fitted-lineshape results, ``"regions"`` for plain region integrals,
+        ``None`` for nothing (or something unrecognised)."""
+        if not results:
+            return None
+        first = results[0]
+        if not isinstance(first, dict):
+            return None
+        if "popt" in first or "r_squared" in first:
+            return "peaks"
+        return "regions" if "regions" in first else None
+
+    def _sync_value_source_availability(self, results=None, coerce: bool = True) -> None:
+        """Grey out the Value-source options the stored per-slice results cannot supply, so
+        "Integrated region" is not offered while only peak fits exist (and the reverse), and
+        move off one that has become unavailable instead of failing in Fit Curve (user report,
+        2026-11-19: switching from a peak fit back to region integrals raised an error)."""
+        combo = getattr(self, "value_source_combo", None)
+        if combo is None:
+            return
+        if results is None:
+            results = getattr(self, "_slice_fit_results", None)
+        kind = self._slice_results_kind(results)
+        ok = {"peaks": {"area", "amplitude", "amplitude_raw"}, "regions": {"region"}}.get(kind)
+        model = combo.model()
+        for i in range(combo.count()):
+            item = model.item(i) if hasattr(model, "item") else None
+            if item is None:
+                continue
+            key = combo.itemData(i)
+            enabled = ok is None or key in ok
+            item.setEnabled(enabled)
+            item.setToolTip("" if enabled else (
+                "Needs integrated regions: run Integrate first." if key == "region"
+                else "Needs a peak fit: run Fit Spectrum first."))
+        if coerce and ok is not None and combo.currentData() not in ok:
+            target = combo.findData("region" if kind == "regions" else "area")
+            if target >= 0:
+                combo.setCurrentIndex(target)
+
     def _apply_isotropic_advice(self, action: dict) -> str | None:
         if action.get("type") == "add_peak":
             self._add_peak_row(shift=float(action["delta_iso"]),
@@ -28263,6 +29058,7 @@ class MainWindow(QMainWindow):
         self.view_slice_fit_spin.setMaximum(max(1, len(results)))
         self.view_slice_fit_spin.setValue(1)
         self.view_slice_fit_spin.blockSignals(False)
+        self._sync_view_slice_bar()
         # The mirror of _show_integration_results' own steer: fitting
         # peaks produces fitted areas and amplitudes, so leave the
         # Value source on one of those rather than on the region
@@ -28271,6 +29067,7 @@ class MainWindow(QMainWindow):
             area_index = self.value_source_combo.findData("area")
             if area_index >= 0:
                 self.value_source_combo.setCurrentIndex(area_index)
+        self._sync_value_source_availability()
         self._on_view_slice_fit_changed(1)  # show immediately, not just once the spinner is touched
 
     def _show_integration_results(self, spectrum, results: list[dict], n_regions: int) -> None:
@@ -28294,12 +29091,16 @@ class MainWindow(QMainWindow):
         self.view_slice_fit_spin.blockSignals(True)
         self.view_slice_fit_spin.setEnabled(False)
         self.view_slice_fit_spin.blockSignals(False)
+        self._sync_view_slice_bar()
         self._clear_spectral_fit_report()
         rule = self.integration_method_combo.currentText()
         found = getattr(self, "_auto_regions_note", "")
         self.integration_results_label.setText(
             f"Integrated {len(results)} slice(s) across {n_regions} region(s) by the "
-            f"{rule.lower()} rule – ready for Fit Curve (Value source: Integrated region)."
+            f"{rule.lower()} rule"
+            + (", per-slice baseline subtracted" if self.integration_baseline_check.isChecked()
+               else ", no baseline subtracted")
+            + " – ready for Fit Curve (Value source: Integrated region)."
             + "".join("\n" + line for line in self._integration_summary_lines(results))
             + (f"\nRegions found automatically: {found}" if found else "")
         )
@@ -28309,6 +29110,7 @@ class MainWindow(QMainWindow):
         region_index = self.value_source_combo.findData("region")
         if region_index >= 0:
             self.value_source_combo.setCurrentIndex(region_index)
+        self._sync_value_source_availability()
 
     def _integration_summary_lines(self, results: list[dict]) -> list[str]:
         """One line per region: its integral (± its error) and share, for a
@@ -28443,6 +29245,7 @@ class MainWindow(QMainWindow):
         tab's own existing "no per-spectrum persistence" character).
         """
         is_diffusion = self._is_diffusion_fit()
+        self._sync_value_source_availability(slice_results)   # never ask for results that don't exist
         try:
             independent_values = self._resolve_independent_values(reference_spectrum, is_diffusion, n_slices=n_slices)
             # **Excluded slices, filtered by index, after the values
@@ -28461,7 +29264,7 @@ class MainWindow(QMainWindow):
             # says "stejskal_tanner", not "custom"); a generalised or
             # typed one is built here and passed as a spec.
             custom_model = None
-            if model_key in ("custom", "diffusion_n"):
+            if self._builds_model_spec(model_key):
                 custom_model = self._current_model_spec()
             spec = custom_model or processing_relaxation.RELAXATION_MODELS[model_key]
             n_peaks = self._peak_count_in(slice_results)
@@ -28572,6 +29375,7 @@ class MainWindow(QMainWindow):
             # callable, and io.persistence already skips anything that
             # won't json.dumps.
             persist_to.metadata.raw["relaxation_fit_context"] = fit_context
+            self._auto_score_beside_fit(persist_to, results)
             self._claim_fit_view(persist_to, "relaxation")
 
     def _refresh_excluded_slice_list(self, spectrum=None) -> None:
@@ -29583,7 +30387,7 @@ class MainWindow(QMainWindow):
         SCORE all get their model from that one method, so they cannot
         disagree about what is being fitted.
         """
-        spec = self._current_model_spec()
+        spec = self._current_model_spec(include_offset=False)
         key = self.relaxation_model_combo.currentData()
         # A registry model is passed by name so the result says
         # "stejskal_tanner" rather than "custom"; anything built here
@@ -29600,6 +30404,136 @@ class MainWindow(QMainWindow):
             model, kind="diffusion" if self._is_diffusion_fit() else "relaxation")
         self._score_model_note = chosen["note"]
         return chosen["model"]
+
+    def _integral_fit_for(self, spectrum):
+        """The stored diffusion curve fit of ``spectrum`` SCORE is checked against, or None."""
+        if self._relaxation_fit_results and self._relaxation_fit_spectrum is spectrum:
+            return nb_pfg_score_check.integral_fit_for_check(self._relaxation_fit_results)
+        return None
+
+    def _pfg_series_inputs(self, spectrum):
+        """``(b_values, data, rows)`` of the rows the fits use, or None when there are no real
+        b-values (never raises: for the automatic paths that must stay quiet)."""
+        try:
+            n_slices = self._fit_slice_count(spectrum)
+            x = self._resolve_independent_values(spectrum, True, n_slices=n_slices)
+            x = np.asarray(x["seconds"] if isinstance(x, dict) else x, dtype=float)
+            # A list longer than the rows (an acquisition stopped early, the full
+            # difflist still on disk) is cut to the rows acquired; notes 8.11.
+            x, _cut = trim_values_to_rows(x, n_slices)
+            if x.size != n_slices or np.allclose(x, np.arange(1, n_slices + 1)):
+                return None
+            rows = self._included_rows(spectrum, n_slices)
+            if len(rows) < 4:
+                return None
+            return x[rows], np.real(spectrum.data)[:n_slices][rows], rows
+        except Exception:  # noqa: BLE001 -- an automatic extra: stay silent
+            return None
+
+    def _auto_score_beside_fit(self, spectrum, results) -> None:
+        """PFG notes §4: after a diffusion curve fit, resolve 2 and 3 components and check
+        them against it. Quiet unless there is something to show."""
+        if not self.score_auto_check.isChecked() or not self._is_diffusion_fit():
+            return
+        if not (spectrum is not None and spectrum.ndim == 2 and spectrum.is_pseudo_2d):
+            return
+        inputs = self._pfg_series_inputs(spectrum)
+        if inputs is None:
+            return
+        b, data, rows = inputs
+        try:
+            model = self._score_model()
+        except Exception:  # noqa: BLE001
+            return
+        note = getattr(self, "_score_model_note", "")
+        integral = nb_pfg_score_check.integral_fit_for_check(results)
+        n_fit = 0
+        if integral is not None:
+            names = integral["param_names"]
+            n_fit = 1 if "D" in names else sum(n.startswith("D") for n in names)
+        ppm = spectrum.axes[1].values("ppm") if self.score_align_check.isChecked() else None
+
+        def compute():
+            return nb_pfg_score_check.score_with_check(
+                b, data, integral, ks=(2, 3), align_ppm=ppm, model=model)
+
+        def done(entries, _early):
+            if not entries or self._relaxation_fit_spectrum is not spectrum:
+                return
+            pick = next((e for e in entries if e["k"] == n_fit), entries[0])
+            result = pick["result"]
+            result["check"] = nb_pfg_score_check.compact_check(pick["check"], pick["k"])
+            result["beside_fit"] = [nb_pfg_score_check.compact_check(e["check"], e["k"])
+                                    for e in entries]
+            if pick["shifts_ppm"] is not None:
+                result["alignment_shifts_ppm"] = [float(v) for v in pick["shifts_ppm"]]
+            self._show_score_result(spectrum, result, rows, note, claim=False, warn=False)
+            self.statusBar().showMessage(
+                "SCORE cross-check of the diffusion fit: "
+                + ("consistent." if all(e["check"]["ok"] for e in entries) else "see the flags in "
+                   "Resolve components."), 8000)
+
+        jobs.submit(self, jobs.Job("SCORE cross-check", compute, done, fail=lambda exc: None,
+                                   spectrum_index=next(i for i, sp in enumerate(self.session.spectra) if sp is spectrum),
+                                   watched=False))
+
+    def _on_shared_shape_fit_clicked(self) -> None:
+        """PFG notes §5: fit the peak table to every slice with shared shapes (>= 0
+        amplitudes) and stage the areas for Fit Curve."""
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d):
+            QMessageBox.information(self, "Not supported",
+                                    "Select a pseudo-2D series (one row per gradient level).")
+            return
+        try:
+            defs = self._read_peak_defs()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Peak table", str(exc))
+            return
+        if not defs:
+            QMessageBox.information(self, "Peak table",
+                                    "Add peaks to the peak table first (Fitting ▸ Peak picking).")
+            return
+        peaks = [{"position": d["shift"], "fwhm": d["fwhm"], "eta": d["eta"],
+                  "label": f"Peak {k + 1}"} for k, d in enumerate(defs)]
+        anchors = ({k: 0 for k in range(1, len(peaks))}
+                   if self.shared_shape_anchor_check.isChecked() and len(peaks) > 1 else None)
+        n_slices = self._fit_slice_count(spectrum)
+        rows = self._included_rows(spectrum, n_slices)
+        ppm = spectrum.axes[1].values("ppm")
+        span = max(d["fwhm"] for d in defs)
+        window = (min(p["position"] for p in peaks) - 6 * span,
+                  max(p["position"] for p in peaks) + 6 * span)
+        data = np.real(spectrum.data)[:n_slices][rows]
+        try:
+            result = nb_pfg_lineshapes.fit_series_shared_shapes(
+                ppm, data, peaks, window=window, anchors=anchors)
+            slices = [processing_slicing.get_trace(spectrum, axis="f1", index=r + 1) for r in rows]
+            results = nb_pfg_lineshapes.shared_shapes_slice_results(
+                result, [r + 1 for r in rows], slices)
+        except Exception as exc:  # noqa: BLE001 -- surfaced
+            QMessageBox.critical(self, "Shared-shape fit", str(exc))
+            return
+        self._store_slice_results(spectrum, results)
+        spectrum.metadata.raw["shared_shape_fit"] = {"log": result["log"]}
+        if self.value_source_combo.currentData() == "region":
+            self.value_source_combo.setCurrentIndex(self.value_source_combo.findData("area"))
+        self._sync_value_source_availability()
+        text = result["log"]
+        if self._is_diffusion_fit():
+            inputs = self._pfg_series_inputs(spectrum)
+            if inputs is not None and inputs[1].shape[0] == result["areas"].shape[0]:
+                flags = nb_pfg_lineshapes.flag_crosstalk(result, inputs[0])
+                for f in flags:
+                    text += (f"\n⚠ {f['peak']} carries a component ({100 * f['fraction']:.0f} %) "
+                             f"with the D of {f['other']} ({f['D_component']:.3g} m²/s): the "
+                             "peaks overlap or their shapes drift between slices.")
+        self.shared_shape_status_label.setText(
+            text + "\nReady for Fit Curve (Value source: Area).")
+        self.statusBar().showMessage(f"Shared-shape fit of {len(results)} slices done.", 6000)
 
     def _on_score_clicked(self) -> None:
         """Resolve the selected series into component spectra by SCORE.
@@ -29682,14 +30616,26 @@ class MainWindow(QMainWindow):
             return
         settings = dialog.values()
 
+        ppm_axis = spectrum.axes[1].values("ppm") if self.score_align_check.isChecked() else None
+        integral_fit = self._integral_fit_for(spectrum) if is_diffusion else None
+
         def compute():
-            return processing_score.score(
-                x_values, data, n_components=settings["n_components"],
+            matrix, shifts = data, None
+            if ppm_axis is not None:
+                matrix, shifts = nb_pfg_score_check.align_rows(ppm_axis, data)
+            result = processing_score.score(
+                x_values, matrix, n_components=settings["n_components"],
                 kind="diffusion" if is_diffusion else "relaxation",
                 method=settings["method"], model=model,
                 threshold=settings["threshold"], non_negative=settings["non_negative"],
                 non_negative_during_fit=settings["non_negative_during_fit"],
             )
+            if is_diffusion:
+                result["check"] = nb_pfg_score_check.compact_check(
+                    nb_pfg_score_check.check_score_result(result, integral_fit))
+            if shifts is not None:
+                result["alignment_shifts_ppm"] = [float(v) for v in shifts]
+            return result
 
         # The resolution touches no widget, so it runs in the background
         # (gui/jobs.py; explicit user request, 2026-11-13).
@@ -29699,8 +30645,13 @@ class MainWindow(QMainWindow):
             fail=lambda exc: QMessageBox.critical(self, "SCORE failed", str(exc)),
             spectrum_index=index, watched=False))
 
-    def _show_score_result(self, spectrum, result, rows, model_note) -> None:
-        """Show a SCORE/OUTSCORE result just computed (GUI thread)."""
+    def _show_score_result(self, spectrum, result, rows, model_note, *, claim: bool = True,
+                           warn: bool = True) -> None:
+        """Show a SCORE/OUTSCORE result just computed (GUI thread).
+
+        ``claim=False`` leaves the Fit canvas on whatever it shows (SCORE run beside a curve
+        fit must not take the view away from it); ``warn=False`` keeps the warning dialog
+        for results the user asked for directly."""
         # Which slices were resolved (0-based), so the residual and the
         # measured spectrum are the same row as the fit's first level, and
         # the report names a slice by its own number.
@@ -29714,14 +30665,15 @@ class MainWindow(QMainWindow):
         self._populate_score_component_list()
         self._show_score_report(result)
         self._refresh_score_export_buttons()
-        self._redraw_score_components()
-        self._claim_fit_view(spectrum, "score")
+        if claim:
+            self._redraw_score_components()
+            self._claim_fit_view(spectrum, "score")
         # A warning here is not cosmetic: measured on synthetic data, an
         # OUTSCORE run whose diffusion coefficients were 69% wrong
         # reported a *better* R² than the SCORE run that got them right.
         # Nothing in the fit statistics would have told the user, so the
         # warning is raised where it cannot be scrolled past.
-        if result.get("warnings"):
+        if warn and result.get("warnings"):
             QMessageBox.warning(
                 self, "Resolution may not be reliable",
                 "\n\n".join(result["warnings"])
@@ -29739,7 +30691,9 @@ class MainWindow(QMainWindow):
         laid out like the curve fit's (report_format.score_report_html)."""
         if result is None:
             self.score_results_label.setText("")
+            self.score_check_label.setText("")
             return
+        self.score_check_label.setText(nb_pfg_score_check.format_check(result))
         plain = (processing_score.format_score_report(result, width=58)
                  + "\n\n" + self._SCORE_FOOTNOTE)
         muted, warn = self.score_results_label.colours()
@@ -29777,7 +30731,8 @@ class MainWindow(QMainWindow):
         available = self._score_result is not None
         for widget in (self.keep_components_button, self.export_components_button,
                         self.score_component_list, self.score_annotate_check,
-                        self.score_shared_scale_check, self.score_results_label):
+                        self.score_shared_scale_check, self.score_results_label,
+                        self.score_check_label):
             widget.setVisible(available)
 
     def _populate_score_component_list(self) -> None:
@@ -30712,7 +31667,10 @@ class MainWindow(QMainWindow):
             rows = self._fit_slice_rows(spectrum)
             results = nb_series_fitting.fit_series_with_lineshapes(
                 spectrum, x, comps, labels, rows=rows, fit_regions=regions, kind=kind,
-                reference_row=row)
+                reference_row=row,
+                # a diffusion signal cannot go negative: hold the amplitudes >= 0 (PFG notes §5;
+                # relaxation recoveries legitimately cross zero, so they stay unconstrained)
+                non_negative=self._is_diffusion_fit())
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user
             QMessageBox.critical(self, "Fit every slice", str(exc))
             return None
@@ -30742,6 +31700,7 @@ class MainWindow(QMainWindow):
             area = self.value_source_combo.findData("area")
             if area >= 0:
                 self.value_source_combo.setCurrentIndex(area)
+        self._sync_value_source_availability()
         low = [r["index"] for r in results if np.isfinite(r["r_squared"]) and r["r_squared"] < 0.9]
         text = (f"Fitted {len(results)} slices of {self.session.label(parent_index)} with "
                 f"{len(labels)} site(s) ({', '.join(labels)}), shapes from "
@@ -31078,6 +32037,29 @@ class MainWindow(QMainWindow):
                        and not self.fit_canvas.plot_owner))
         bar.setVisible(bool(spin.isEnabled() and on_show
                             and self.canvas_tabs.currentWidget() is self.fit_canvas))
+        self._sync_view_slice_bar()
+
+    def _sync_view_slice_bar(self) -> None:
+        """The slice selector at the top right: bound to the spin box that belongs to the
+        view on show, and shown only where there is more than one slice to choose from."""
+        bar = getattr(self, "view_slice_bar", None)
+        if bar is None or getattr(self, "spectrum_list", None) is None:
+            return
+        tab = self.canvas_tabs.currentWidget()
+        index = self._selected_index()
+        multi_row = index is not None and self.session.spectra[index].ndim == 2
+        target, tooltip = None, ""
+        if tab in (self.fid_canvas, self.processing_preview_canvas) and multi_row:
+            target, tooltip = self.slice_spin, "Which slice the Process views show and act on."
+        elif tab is self.spectral_fit_canvas and self.view_slice_fit_spin.isEnabled():
+            target, tooltip = self.view_slice_fit_spin, "Which slice's spectral fit is shown."
+        bar.bind(target, "Slice:", tooltip)
+        if target is self.slice_spin:
+            # The Process spin's own maximum is Qt's default until the Processing
+            # set-up has run for this spectrum; the rows that exist are the real limit.
+            rows = int(self.session.spectra[index].data.shape[0])
+            bar.spin.setMaximum(min(bar.spin.maximum(), max(1, rows)))
+        bar.setVisible(target is not None and bar.spin.maximum() > 1)
 
     def _display_relaxation_peak(self, index: int) -> None:
         """Show peak ``index`` (0-based) of :attr:`_relaxation_fit_results`
@@ -31851,6 +32833,50 @@ class MainWindow(QMainWindow):
 
         return buffer.getvalue()
 
+    def _results_table_rows(self, index: int) -> list[dict]:
+        """Every fit result the spectrum at ``index`` holds, in the shared
+        results-table shape (see :mod:`notebook.results_table`)."""
+        spectrum = self.session.spectra[index]
+        label = self.session.label(index)
+        rows = nb_results_table.table_for_spectrum(spectrum, label)
+        for key in (spectrum.metadata.raw or {}).get("fits") or {}:
+            try:
+                record = self._tree_fit_record({"row": index, "action": ("stored_fit", key)})
+            except Exception:  # noqa: BLE001 -- one unreadable stored fit must not lose the rest
+                record = None
+            if record:
+                rows += nb_results_table.record_rows(record, fit_type=str(record.get("fit") or "stored"))
+        return rows
+
+    def _on_export_results_table_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        try:
+            rows = self._results_table_rows(index)
+        except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        if not rows:
+            QMessageBox.information(
+                self, "Nothing to export",
+                "This spectrum has no fit results yet – run Fit Spectrum, Fit Curve or "
+                "another fit first.")
+            return
+        stem = os.path.splitext(os.path.basename(str(self.session.label(index)) or "results"))[0]
+        path, _selected = QFileDialog.getSaveFileName(
+            self, "Export results table", f"{stem}_results.csv", "CSV files (*.csv)",
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
+        if not path:
+            return
+        try:
+            written = nb_results_table.write_results_csv(rows, path)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Wrote {os.path.basename(written)} ({len(rows)} rows)", 5000)
+
     def _on_export_fit_report_clicked(self) -> None:
         index = self._selected_index()
         if index is None:
@@ -32025,7 +33051,7 @@ class MainWindow(QMainWindow):
             fixed_item = self.peak_table.item(row, 3)
             row_values.append("1" if fixed_item and fixed_item.checkState() == Qt.CheckState.Checked else "0")
             row_values.extend(self.peak_table.item(row, col).text() if self.peak_table.item(row, col) else ""
-                              for col in (4, 5))      # Multiplet, J (Hz)
+                              for col in (4, 5, self._PEAK_AMPLITUDE_COL))  # Multiplet, J (Hz), Amplitude
             peaks.append(row_values)
             shift_item = self.peak_table.item(row, 0)
             peak_bounds.append((shift_item.data(Qt.ItemDataRole.UserRole) if shift_item else None) or {})
@@ -32093,6 +33119,7 @@ class MainWindow(QMainWindow):
             # happened to the guess table before this block existed.
             "n_components": self.diffusion_components_spin.value(),
             "stretched": self.diffusion_stretched_check.isChecked(),
+            "offset": self.diffusion_offset_check.isChecked(),
             "guesses_enabled": self.guess_group.isChecked(),
             "guesses": self._capture_guess_table(),
             "global_fit": self.global_fit_check.isChecked(),
@@ -32205,6 +33232,12 @@ class MainWindow(QMainWindow):
         self.dosy_results_label.setText("")
         self.gradient_calibration_label.setText("")
         self.pfg_params_source_label.setText("")
+        # Shared-shape and model-selection read-outs describe one dataset;
+        # they must not linger when another is selected (notes 8.3).
+        self.shared_shape_status_label.setText("")
+        self.diffusion_select_label.setText("")
+        self._diffusion_selection = None
+        self.diffusion_apply_selection_button.setEnabled(False)
         self._clear_spectral_fit_report()
         self._adopt_score_state(spectrum)
 
@@ -32237,6 +33270,7 @@ class MainWindow(QMainWindow):
             self._restore_region_options({})
             self.diffusion_components_spin.setValue(2)
             self.diffusion_stretched_check.setChecked(False)
+            self.diffusion_offset_check.setChecked(False)
             self.guess_group.setChecked(False)
             self.global_fit_check.setChecked(False)
             self.shared_params_edit.clear()
@@ -32260,6 +33294,8 @@ class MainWindow(QMainWindow):
                 self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
                 self.peak_table.setItem(row, 4, QTableWidgetItem(peak_row[4] if len(peak_row) > 4 else ""))
                 self.peak_table.setItem(row, 5, QTableWidgetItem(peak_row[5] if len(peak_row) > 5 else ""))
+                self.peak_table.setItem(row, self._PEAK_AMPLITUDE_COL, QTableWidgetItem(
+                    peak_row[6] if len(peak_row) > 6 else ""))
                 if i < len(peak_bounds) and peak_bounds[i]:
                     self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, peak_bounds[i])
                 if i < len(peak_fixed_params) and peak_fixed_params[i]:
@@ -32333,6 +33369,7 @@ class MainWindow(QMainWindow):
             # table and throw the guesses away again.
             self.diffusion_components_spin.setValue(state.get("n_components", 2))
             self.diffusion_stretched_check.setChecked(state.get("stretched", False))
+            self.diffusion_offset_check.setChecked(state.get("offset", False))
             self.global_fit_check.setChecked(state.get("global_fit", False))
             self.shared_params_edit.setText(state.get("shared_params", ""))
             pfg = state.get("pfg") or {}
@@ -32367,9 +33404,11 @@ class MainWindow(QMainWindow):
         else:
             self.view_slice_fit_spin.setEnabled(False)
         self.view_slice_fit_spin.blockSignals(False)
+        self._sync_view_slice_bar()
         self._sync_region_shading()
         self._refresh_peak_markers()
 
+        self._sync_value_source_availability()          # a restored Value source vs what is stored
         self._relaxation_fit_results = spectrum.metadata.raw.get("relaxation_fit_results")
         self._relaxation_fit_xlabel = spectrum.metadata.raw.get("relaxation_fit_xlabel", "Delay (s)")
         self._adopt_relaxation_fit_state(spectrum)
@@ -33571,6 +34610,7 @@ class MainWindow(QMainWindow):
             self.slice_spin.setMaximum(max(1, spectrum.data.shape[0]))
             self.slice_spin.setValue(1)
             self.slice_spin.blockSignals(False)
+            self._sync_view_slice_bar()
             self.apply_all_slices_checkbox.blockSignals(True)
             # Checked by default -- explicit user feedback: a shared
             # phase/baseline correction across the whole series is the
@@ -33580,6 +34620,12 @@ class MainWindow(QMainWindow):
             # is still available by unchecking.
             self.apply_all_slices_checkbox.setChecked(True)
             self.apply_all_slices_checkbox.blockSignals(False)
+            # The dataset's own stored choice wins; otherwise the Settings default (notes 8.8).
+            stored = spectrum.metadata.raw.get("phase_slices_independently")
+            if stored is None and self._ui_settings.get("phase_slices_independently", False):
+                stored = True
+            if stored is not None:
+                self._set_slices_phased_independently(bool(stored))
         if is_2d:
             self.dim_combo.blockSignals(True)
             self.dim_combo.setCurrentIndex(0)

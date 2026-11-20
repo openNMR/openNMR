@@ -151,9 +151,20 @@ def _as_rows(spectrum, rows):
     return [(i, slicing.get_trace(spectrum, axis="f1", index=i)) for i in wanted]
 
 
+def _nonnegative_coefficients(design, y, n_sites):
+    """Least squares with the first ``n_sites`` coefficients >= 0 and the rest (baseline) free."""
+    from scipy.optimize import nnls
+    free = design[:, n_sites:]
+    aug = np.column_stack([design[:, :n_sites], free, -free]) if free.shape[1] else design
+    sol, _ = nnls(aug, y)
+    k = free.shape[1]
+    return np.concatenate([sol[:n_sites], sol[n_sites:n_sites + k] - sol[n_sites + k:n_sites + 2 * k]])
+
+
 def fit_series_with_lineshapes(spectrum, x_components, components, labels=None, rows=None,
                                fit_regions=None, baseline: str = "linear",
-                               kind: str = "model", reference_row: int | None = None):
+                               kind: str = "model", reference_row: int | None = None,
+                               non_negative: bool = False):
     """Fit every slice as a linear combination of fixed site lineshapes.
 
     Parameters
@@ -169,6 +180,10 @@ def fit_series_with_lineshapes(spectrum, x_components, components, labels=None, 
         (use the one the reference fit used). Default the whole axis.
     baseline : "linear" (default; offset and slope, per slice),
         "constant" or "none".
+    non_negative : amplitudes are constrained to be >= 0 (NNLS; the baseline stays free in
+        sign). Without it a weak or vanished site (e.g. the bulk peak at high b) can come back
+        with a negative amplitude. The quoted errors are the unconstrained ones, which are
+        conservative for a site held at zero.
     kind : recorded in each result ("csa", "quadrupolar", "combined").
     reference_row : the slice the lineshapes came from (1-based),
         recorded so the report can say so.
@@ -218,6 +233,8 @@ def fit_series_with_lineshapes(spectrum, x_components, components, labels=None, 
         if n_obs <= n_par:
             raise ValueError(f"Slice {index}: the fit window holds only {n_obs} points.")
         coef, *_ = np.linalg.lstsq(a_mask, y_mask, rcond=None)
+        if non_negative:
+            coef = _nonnegative_coefficients(a_mask, y_mask, len(comps))
         fitted_mask = a_mask @ coef
         residual = y_mask - fitted_mask
         dof = n_obs - n_par
@@ -264,7 +281,7 @@ def fit_series_with_lineshapes(spectrum, x_components, components, labels=None, 
             "baseline_coefficients": [float(v) for v in coef[n_sites:]],
             "r_squared": r2, "rmse": float(np.sqrt(s2)),
             "model": kind, "model_fit": True, "reference_row": reference_row,
-            "baseline_mode": baseline, "fit_regions": fit_regions,
+            "baseline_mode": baseline, "fit_regions": fit_regions, "non_negative": bool(non_negative),
         })
     return results
 

@@ -1959,6 +1959,31 @@ def NMR2d_get_trace(dataset, axis="f1", index=None, shift=None, width=1,
     }
 
 
+def dataset_from_spectrum(spectrum) -> dict:
+    """The :func:`NMR2dimport`-shaped dict of a 2D :class:`~opennmr.core.spectrum.NMRSpectrum`
+    (what ``read_2d`` returns), so the dict-based helpers -- :func:`NMR2D_get_slices`,
+    :func:`NMR2d_get_trace` -- accept either. A dict is returned unchanged."""
+    if isinstance(spectrum, dict):
+        return spectrum
+    data = np.asarray(spectrum.data)
+    if data.ndim != 2 or len(spectrum.axes) < 2:
+        raise ValueError("A 2D spectrum (two axes) is needed.")
+    ax_y, ax_x = spectrum.axes[0], spectrum.axes[-1]
+    n1 = data.shape[0]
+    index = ax_y.index if ax_y.index is not None else np.arange(1, n1 + 1, dtype=float)
+    y_ppm = ax_y.ppm if ax_y.ppm is not None else np.asarray(index, dtype=float)
+    md = spectrum.metadata
+    return {
+        "spectrum": data, "x_ppm": np.asarray(ax_x.ppm, dtype=float),
+        "y_ppm": np.asarray(y_ppm, dtype=float), "y_index": np.asarray(index, dtype=float),
+        "x_Hz": None if ax_x.hz is None else np.asarray(ax_x.hz, dtype=float),
+        "y_Hz": None if ax_y.hz is None else np.asarray(ax_y.hz, dtype=float),
+        "pseudo_2d": bool(md.pseudo_2d), "homonuclear": bool(md.homonuclear),
+        "NUC1": md.nucleus, "NUC2": md.nucleus_indirect or md.nucleus,
+        "SF1": md.sfo1, "SF2": md.sfo1_indirect or md.sfo1, "datapath": md.source_path,
+    }
+
+
 def NMR2D_get_slices(dataset, rows=None, row_shifts=None, row_width=1,
                       columns=None, column_shifts=None, column_width=1,
                       combine="sum", window=None, normalise=False):
@@ -1973,8 +1998,8 @@ def NMR2D_get_slices(dataset, rows=None, row_shifts=None, row_width=1,
 
     Parameters
     ----------
-    dataset : dict
-        Output of :func:`NMR2dimport`.
+    dataset : dict or NMRSpectrum
+        Output of :func:`NMR2dimport`, or a 2D spectrum from ``read_2d``.
 
     rows, row_shifts : list, optional
         1-based F1 indices / F1 chemical shifts (ppm) of rows to
@@ -2008,6 +2033,7 @@ def NMR2D_get_slices(dataset, rows=None, row_shifts=None, row_width=1,
     along the fixed axis.
     """
 
+    dataset = dataset_from_spectrum(dataset)           # an NMRSpectrum from read_2d works too
     slices = {"rows": [], "columns": []}
 
     def _collect(axis, indices, shifts, width):

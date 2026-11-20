@@ -522,7 +522,7 @@ def _stretch_flags(n_components: int, stretched) -> list[bool]:
 
 
 def build_diffusion_model(n_components: int = 1, stretched=False, expected_D=None,
-                          d_bounds_factor: float = 100.0) -> dict:
+                          d_bounds_factor: float = 100.0, offset: bool = False) -> dict:
     """A :data:`~opennmr.processing.relaxation.RELAXATION_MODELS`-shaped
     spec for a sum of ``n_components`` Stejskal-Tanner decays, each
     optionally stretched:
@@ -556,6 +556,11 @@ def build_diffusion_model(n_components: int = 1, stretched=False, expected_D=Non
         genuinely separated or the fit collapses them onto each other.
         When omitted, guesses are spread over decades around the value
         that would decay by ``1/e`` across the sampled b-range.
+    offset : bool
+        Add a constant ``C`` (>= 0) that does not decay: ``I(b) = sum_i I_i exp(-D_i b) + C``.
+        A small plateau (0.1-0.4 % of I0 in PEGDA membranes, from the polymer network or
+        the resin) otherwise drags the slowest component onto itself. Report the
+        fractions relative to ``sum I_i + C`` (see :func:`component_weights`).
     d_bounds_factor : float
         Each ``D`` is bounded to ``[guess/factor, guess*factor]``.
         Anchoring the bounds to the guess (rather than leaving them
@@ -572,7 +577,7 @@ def build_diffusion_model(n_components: int = 1, stretched=False, expected_D=Non
     if n_components < 1:
         raise ValueError(f"n_components must be >= 1, got {n_components}")
     flags = _stretch_flags(n_components, stretched)
-    param_names = diffusion_component_names(n_components, flags)
+    param_names = diffusion_component_names(n_components, flags) + (["C"] if offset else [])
     # Validated here, not lazily inside p0/bounds: an expected_D of the
     # wrong length is a mistake in the *call*, and surfacing it from
     # inside a fit several steps later makes it far harder to place.
@@ -590,6 +595,8 @@ def build_diffusion_model(n_components: int = 1, stretched=False, expected_D=Non
                 amp, d = lookup[f"I{i + 1}"], lookup[f"D{i + 1}"]
                 beta = lookup.get(f"beta{i + 1}", 1.0)
             total = total + amp * np.exp(-np.power(np.clip(d * b, 0.0, None), beta))
+        if offset:
+            total = total + lookup["C"]
         return total
 
     def guesses(b, y):
@@ -605,6 +612,8 @@ def build_diffusion_model(n_components: int = 1, stretched=False, expected_D=Non
             values.extend([amp, d_guesses[i]])
             if flags[i]:
                 values.append(0.9)
+        if offset:
+            values.append(0.002 * amp * n_components)
         return values
 
     def bounds(b, y):
@@ -616,6 +625,9 @@ def build_diffusion_model(n_components: int = 1, stretched=False, expected_D=Non
             if flags[i]:
                 lo.append(0.05)
                 hi.append(2.0)
+        if offset:
+            lo.append(0.0)
+            hi.append(np.inf)
         return (lo, hi)
 
     return {
@@ -630,8 +642,15 @@ def build_diffusion_model(n_components: int = 1, stretched=False, expected_D=Non
         # component. The bounds and guesses above stay in m^2/s.
         "log_params": tuple(name for name in param_names if name == "D" or
                             (name.startswith("D") and name[1:].isdigit())),
-        "n_components": n_components, "stretched": flags,
+        "n_components": n_components, "stretched": flags, "offset": bool(offset),
         "kind": "diffusion",
+        # After the fit the components are renumbered so D1 > D2 > ... (the optimiser may leave
+        # them swapped when the guesses are close, e.g. user-supplied expected_D). Only when
+        # every component carries the same parameters, so a slot can be exchanged as a whole.
+        "components": ([tuple(n for n in (f"I{i + 1}", f"D{i + 1}", f"beta{i + 1}")
+                              if n in param_names) for i in range(n_components)]
+                       if n_components > 1 and len(set(flags)) == 1 else None),
+        "sort_descending": True,
     }
 
 
@@ -669,17 +688,21 @@ def _component_d_guesses(b, expected_D, n_components: int) -> list[float]:
     return spread(1.0 / b_max)
 
 
-def component_weights(params: dict, n_components: int) -> list[float]:
+def component_weights(params: dict, n_components: int, include_offset: bool = True) -> list[float]:
     """Each component's amplitude as a fraction of the total, which is
     how a multi-component diffusion result is actually quoted ("70% at
     2.1e-10, 30% at 4.5e-12") -- the raw ``I`` values depend on
     whatever arbitrary intensity scale the spectra were on and are not
     comparable between datasets. Matches the normalisation the group's
     own ``DiffFit`` applies to its reported ``I``."""
-    if n_components == 1:
+    offset = float(params.get("C", 0.0) or 0.0) if include_offset else 0.0
+    if n_components == 1 and not offset:
         return [1.0]
-    amplitudes = [float(params.get(f"I{i + 1}", 0.0)) for i in range(n_components)]
-    total = sum(amplitudes)
+    if n_components == 1:
+        amplitudes = [float(params.get("I0", 0.0))]
+    else:
+        amplitudes = [float(params.get(f"I{i + 1}", 0.0)) for i in range(n_components)]
+    total = sum(amplitudes) + offset              # fractions of sum(I_i) + C when C is fitted
     if not total:
         return [float("nan")] * n_components
     return [a / total for a in amplitudes]

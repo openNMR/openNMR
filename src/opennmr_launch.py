@@ -86,6 +86,35 @@ def _is_windows() -> bool:
     return sys.platform.startswith("win")
 
 
+#: Faces tried, in order, for the splash on Linux/macOS.
+_SPLASH_FAMILIES = ("Noto Sans", "DejaVu Sans", "Liberation Sans", "Ubuntu", "Cantarell",
+                    "Helvetica Neue", "Helvetica", "Arial")
+_SPLASH_FAMILY: list = []
+
+
+def _splash_family() -> str:
+    """The one face every splash stage is drawn in, chosen the first time and kept.
+
+    The splash is redrawn at each start-up stage. Drawn in a bare ``QFont()`` it
+    followed the application's default font, which fontconfig answers differently
+    once the font database is warm and which the main window changes again when
+    it applies the saved interface font -- so on Linux the text changed face a
+    couple of seconds in (user report, 2026-11-19). Naming one installed family
+    and remembering it makes every stage identical."""
+    if _SPLASH_FAMILY:
+        return _SPLASH_FAMILY[0]
+    family = "Segoe UI" if _is_windows() else ""
+    if not family:
+        try:
+            from PySide6.QtGui import QFont, QFontDatabase
+            installed = set(QFontDatabase.families())
+            family = next((f for f in _SPLASH_FAMILIES if f in installed), "") or QFont().family()
+        except Exception:  # noqa: BLE001 -- a splash must never stop the app
+            family = ""
+    _SPLASH_FAMILY.append(family)
+    return family
+
+
 def splash_font(pixel_size: int, bold: bool = False):
     """A splash font that does not depend on the Qt platform plugin.
 
@@ -96,8 +125,7 @@ def splash_font(pixel_size: int, bold: bool = False):
     from PySide6.QtGui import QFont
 
     font = QFont()
-    if _is_windows():
-        font.setFamily("Segoe UI")
+    font.setFamily(_splash_family())
     font.setPixelSize(pixel_size)
     font.setBold(bold)
     return font

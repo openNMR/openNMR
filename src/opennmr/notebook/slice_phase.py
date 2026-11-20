@@ -50,7 +50,8 @@ def add_slice_phase(spectrum, row: int, delta0: float, delta1: float) -> None:
 
 def autophase_slices(spectrum, joint: bool = False, phase0_inc: float = 0.5,
                      pivot_ppm: float | None = None, rows=None, min_snr: float = 10.0,
-                     window: float | None = None) -> dict:
+                     window: float | None = None, penalty: str = "magnitude",
+                     region=None) -> dict:
     """Autophase each row of a pseudo-2D ``spectrum`` on its own, in place.
 
     Every row is phased from its own data, but not blindly:
@@ -75,6 +76,12 @@ def autophase_slices(spectrum, joint: bool = False, phase0_inc: float = 0.5,
     ``phase0_inc`` : zero-order grid step in degrees.
     ``pivot_ppm`` : the first-order pivot (default: the centre of the axis).
     ``rows`` : indices of the rows to phase (default: all).
+    ``penalty`` : the score each phase is judged by -- ``"magnitude"`` (the
+    default), ``"negarea"``, ``"entropy"`` or ``"acme"``. With ``window`` set,
+    the sign-blind score is used regardless. Compare them on your own data with
+    :func:`opennmr.notebook.compare_phase_methods`.
+    ``region`` : ppm ranges ``[(low, high), ...]`` to judge the phase on, in
+    place of the whole spectrum; the correction is still applied everywhere.
     ``min_snr`` : the signal-to-noise a row needs to be phased from its own
     data.
 
@@ -103,19 +110,21 @@ def autophase_slices(spectrum, joint: bool = False, phase0_inc: float = 0.5,
     if not good.any():
         good[int(np.argmax(snr))] = True  # the best row has to anchor the rest
     ref_local = int(np.argmax(np.where(good, np.sum(np.abs(block), axis=1), -1.0)))
-    ref0 = processing_ft.apc0(block[ref_local], freq_ppm, phase0_inc=phase0_inc)
+    ref0 = processing_ft.apc0(block[ref_local], freq_ppm, phase0_inc=phase0_inc,
+                              penalty=penalty, region=region)
     keep_sign = window is not None
 
     phase0 = np.zeros(len(selected))
     phase1 = np.zeros(len(selected))
     for k in np.flatnonzero(good):
         if window is None:
-            phase0[k] = processing_ft.apc0(block[k], freq_ppm, phase0_inc=phase0_inc)
+            phase0[k] = processing_ft.apc0(block[k], freq_ppm, phase0_inc=phase0_inc,
+                                           penalty=penalty, region=region)
         elif k == ref_local:
             phase0[k] = ref0
         else:
             found = processing_ft.apc0(block[k], freq_ppm, phase0_inc=phase0_inc,
-                                       penalty="signless")
+                                       penalty="signless", region=region)
             # Phase and phase + 180 score alike: take the one nearest the reference.
             options = np.array([found, found + 180.0, found - 180.0])
             phase0[k] = options[int(np.argmin(np.abs(options - ref0)))]
@@ -126,7 +135,8 @@ def autophase_slices(spectrum, joint: bool = False, phase0_inc: float = 0.5,
                                                 pivot_frac=pivot_frac)
             _p0, p1 = processing_ft.autophase01(rotated, freq_ppm, phase0_range=(-30, 30),
                                                 phase0_inc=max(phase0_inc, 1.0),
-                                                pivot_frac=pivot_frac)
+                                                pivot_frac=pivot_frac, penalty=penalty,
+                                                region=region)
             phase0[k] += _p0
             phase1[k] = p1
     index = np.arange(len(selected), dtype=float)

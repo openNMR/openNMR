@@ -290,10 +290,13 @@ def fit_from_starts(fit_once, starts, lo, hi):
     return best
 
 
-def sort_components(result: dict, components) -> dict:
+def sort_components(result: dict, components, descending: bool = False) -> dict:
     """Relabel a multi-exponential fit so its components run fastest
     first (``T..a < T..b < T..c``), carrying values, errors, ``popt`` and
     ``pcov`` with them. In place; returns ``result``.
+
+    ``descending=True`` puts the *largest* value first instead (diffusion coefficients:
+    component 1 is the fastest-diffusing).
 
     Not done when any of the components' parameters is fixed: a fixed
     value belongs to the component the user put it on."""
@@ -304,8 +307,8 @@ def sort_components(result: dict, components) -> dict:
     names = [n for pair in components for n in pair]
     if any(n not in free for n in names):
         return result
-    times = [float(params[T]) for _A, T in components]
-    order = list(np.argsort(times))
+    times = [float(params[comp[1]]) for comp in components]
+    order = list(np.argsort(-np.asarray(times) if descending else times))
     if order == list(range(len(components))):
         return result
     rename = {}
@@ -393,19 +396,23 @@ def integration_weights(x, method: str = "trapezoid") -> np.ndarray:
     return w
 
 
-def integrate(x, y, method: str = "trapezoid", noise: float | None = None):
+def integrate(x, y, method: str = "trapezoid", noise: float | None = None,
+              zero_fill: float = 1.0):
     """``(integral, error)`` of ``y`` over ``x`` by ``method`` (any x
     order; sorted ascending first, so the sign follows the data, not the
     axis direction). ``error`` is ``noise * sqrt(sum(w**2))`` -- exact for
     independent Gaussian noise of standard deviation ``noise`` -- or nan
-    when ``noise`` is None."""
+    when ``noise`` is None. A zero-filled spectrum has correlated neighbouring points, so
+    the independent-noise error is too small by about ``sqrt(zero_fill)``: give the
+    zero-fill factor (2-8x) to multiply it back."""
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     order = np.argsort(x)
     x, y = x[order], y[order]
     w = integration_weights(x, method)
     value = float(np.dot(w, y))
-    err = float(noise * np.sqrt(np.sum(w ** 2))) if noise is not None else float("nan")
+    err = float(noise * np.sqrt(np.sum(w ** 2)) * np.sqrt(max(float(zero_fill), 1.0))) \
+        if noise is not None else float("nan")
     return value, err
 
 
@@ -413,11 +420,27 @@ def integrate(x, y, method: str = "trapezoid", noise: float | None = None):
 # Automatic integration regions from a threshold
 # ============================================================
 
-def _robust_noise(y):
-    d = np.diff(np.asarray(y, dtype=float))
-    if d.size < 2:
-        return 0.0
-    return 1.4826 * float(np.median(np.abs(d - np.median(d)))) / np.sqrt(2.0)
+def _robust_noise(y, stride=1):
+    """Noise σ from differences between points ``stride`` apart (MAD). ``stride="auto"`` widens
+    the lag until the estimate stops growing: zero-filled spectra have *correlated* neighbours,
+    so the point-to-point estimate (stride 1) is far too small (about 1/zero-fill)."""
+    y = np.asarray(y, dtype=float)
+
+    def at(lag):
+        d = y[lag:] - y[:-lag]
+        if d.size < 2:
+            return 0.0
+        return 1.4826 * float(np.median(np.abs(d - np.median(d)))) / np.sqrt(2.0)
+
+    if stride == "auto":
+        lag, sigma = 1, at(1)
+        while lag * 2 <= max(1, y.size // 32):
+            nxt = at(lag * 2)
+            if nxt < 1.05 * sigma:
+                break
+            lag, sigma = lag * 2, nxt
+        return sigma
+    return at(max(int(stride), 1)) if y.size > max(int(stride), 1) else 0.0
 
 
 def _baseline_corrected(x, y):
@@ -428,7 +451,8 @@ def _baseline_corrected(x, y):
 
 def find_integration_regions(x, y, threshold: float = 5.0, mode: str = "noise",
                              min_points: int = 3, extend_to: float = 1.0, pad_points: int = 2,
-                             subtract_baseline: bool = True, noise: float | None = None) -> dict:
+                             subtract_baseline: bool = True, noise: float | None = None,
+                             noise_stride=1) -> dict:
     """Integration regions where a spectrum (or a series of them) holds
     signal, found from a threshold.
 
@@ -436,6 +460,11 @@ def find_integration_regions(x, y, threshold: float = 5.0, mode: str = "noise",
     of a pseudo-2D). For a series, signal in *any* row counts, so a peak
     that grows in or dies away along the series still gets a region; the
     regions are the same for every row, as an integral series needs.
+
+    ``noise_stride`` : lag (in points) of the differences the noise is measured from; 1 is
+    right for white noise. A zero-filled spectrum has correlated neighbours and needs its
+    zero-fill factor (or ``"auto"``), otherwise σ comes out near zero and the whole axis is
+    one region.
 
     ``mode`` / ``threshold`` : ``"noise"`` -- signal is where ``|y|``
     exceeds ``threshold`` × the noise σ (measured robustly from point-to-
@@ -478,7 +507,7 @@ def find_integration_regions(x, y, threshold: float = 5.0, mode: str = "noise",
     if subtract_baseline:
         Y = np.vstack([_baseline_corrected(xs, row) for row in Y])
     n = xs.size
-    sigmas = np.array([noise if noise else _robust_noise(row) for row in Y])
+    sigmas = np.array([noise if noise else _robust_noise(row, noise_stride) for row in Y])
     strongest = int(np.argmax(np.max(np.abs(Y), axis=1)))
     # "fraction" is of the largest signal anywhere in the series: a share
     # of each slice's own maximum would, on a fully decayed slice, be a

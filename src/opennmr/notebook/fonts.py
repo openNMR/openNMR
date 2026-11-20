@@ -142,7 +142,7 @@ def font_rc(name: str | None) -> dict:
     DejaVu), and TrueType embedding in PDF/PS. Empty for ``None``."""
     if not name:
         return {}
-    rc = {"pdf.fonttype": 42, "ps.fonttype": 42}
+    rc = {"pdf.fonttype": 42, "ps.fonttype": 42, "svg.fonttype": "none"}
     if name in GENERIC_FAMILIES:
         rc["font.family"] = name
         return rc

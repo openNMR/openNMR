@@ -1038,6 +1038,27 @@ def downsample_indices(n, max_points=DOWNSAMPLE_1D_MAX_POINTS):
     return np.linspace(0, n - 1, max_points, dtype=int)
 
 
+def _max_abs_bin_all(y, coords, n_bins):
+    """:func:`_max_abs_bin` for one real line, but covering **every** sample.
+
+    ``_max_abs_bin`` trims the trailing ``n % n_bins`` samples so the bins reshape
+    evenly -- for a 2-D contour a negligible edge, but for a spectrum zero-filled
+    to 8192 points shown in 8000 bins it cut the last 192 points (and 384 of
+    16384), so the right-hand end of the trace -- and any signal there -- vanished
+    when the zero-fill went up (user recording, 2026-11-19). Here the bins differ
+    in width by at most one sample and together span the whole line; each keeps its
+    signed largest-magnitude value, at its middle coordinate, as before."""
+    y = np.asarray(y)
+    n = y.shape[0]
+    edges = (np.arange(n_bins + 1, dtype=np.int64) * n) // n_bins
+    starts = edges[:-1]
+    high = np.maximum.reduceat(y, starts)
+    low = np.minimum.reduceat(y, starts)
+    reduced = np.where(high >= -low, high, low)
+    middle = starts + (edges[1:] - starts) // 2
+    return reduced, np.asarray(coords)[middle]
+
+
 def downsample_1d(x, y, max_points=DOWNSAMPLE_1D_MAX_POINTS):
     """Peak-preserving downsample of a 1D line for *display* only --
     :func:`downsample_2d`'s own ``_max_abs_bin`` binning, applied to a
@@ -1072,5 +1093,8 @@ def downsample_1d(x, y, max_points=DOWNSAMPLE_1D_MAX_POINTS):
     if n <= max_points:
         return x, y
     coords = np.arange(n) if x is None else np.asarray(x)
-    y_ds, x_ds = _max_abs_bin(y, coords, max_points, axis=0)
+    if np.iscomplexobj(y):
+        y_ds, x_ds = _max_abs_bin(y, coords, max_points, axis=0)
+    else:
+        y_ds, x_ds = _max_abs_bin_all(y, coords, max_points)
     return (None if x is None else x_ds), y_ds

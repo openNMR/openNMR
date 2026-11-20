@@ -237,7 +237,9 @@ def test_dynamics_plot_options_are_right_click_windows(qapp, monkeypatch):  # no
 def test_peak_browser_lives_by_the_plot_view(qapp):  # noqa: F811
     window = _fitted_series(MainWindow())
     bar = window.curve_peak_bar
-    assert window.canvas_tabs.cornerWidget() is bar
+    # The corner holds the slice selector and the peak browser side by side (notes 8.2).
+    assert window.canvas_tabs.cornerWidget() is window.view_selector_bar
+    assert bar.parentWidget() is window.view_selector_bar
     dynamics = window.side_tabs.widget(
         [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())].index("Dynamics"))
     assert not dynamics.isAncestorOf(window.view_relaxation_peak_spin)

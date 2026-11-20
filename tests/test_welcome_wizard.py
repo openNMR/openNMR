@@ -200,7 +200,7 @@ def test_choosing_work_types_sets_the_layout_page_and_can_be_overridden(qapp):  
     wizard.work_type_checks["solution"].setChecked(True)
     off = {k for k, b in wizard.section_checks.items() if not b.isChecked()}
     assert off == {"solid", "pnmr", "dnp", "czjzek", "cp_buildup", "offset_tracker",
-                   "batch_pseudo2d", "bpp", "exchange", "advanced"}
+                   "batch_pseudo2d", "bpp", "exchange", "motion", "advanced"}
     wizard.work_type_checks["solid"].setChecked(True)
     off = {k for k, b in wizard.section_checks.items() if not b.isChecked()}
     assert off == {"pnmr", "dnp"}

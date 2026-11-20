@@ -15,7 +15,8 @@ duration of a save, keeping each run's lowest and highest point (so no
 peak or edge is lost: at any print resolution the result is the same
 picture), then puts everything back. It also embeds fonts as TrueType
 (``pdf.fonttype``/``ps.fonttype`` 42) rather than matplotlib's default
-Type 3, which Illustrator cannot edit as text.
+Type 3, which Illustrator cannot edit as text, and keeps SVG text as text
+(``svg.fonttype`` ``"none"``; the default turns every glyph into a path).
 
 It also cuts every line and filled area at the edges of the box it is
 clipped to (:func:`crop_to_axes`), so releasing the clipping masks in
@@ -41,6 +42,34 @@ import numpy as np
 MAX_PATH_POINTS = 20000
 
 VECTOR_FORMATS = ("pdf", "svg", "svgz", "eps", "ps")
+
+#: Text stays text in every vector format: TrueType (42) embedding in PDF/PS,
+#: and ``svg.fonttype = "none"`` -- matplotlib's default for SVG is ``"path"``,
+#: which draws every glyph as an outline (user report, 2026-11-19: "text is not
+#: saved as text but as path").
+TEXT_AS_TEXT_RC = {"pdf.fonttype": 42, "ps.fonttype": 42, "svg.fonttype": "none"}
+
+#: ``"text"`` (the default: SVG keeps ``<text>`` elements, editable in any editor)
+#: or ``"path"`` (every glyph drawn as an outline: looks the same on a machine
+#: without the font, but cannot be edited as text). Settings ▸ Output.
+_SVG_TEXT = ["text"]
+
+
+def set_svg_text(mode: str) -> str:
+    """Choose how SVG text is written (``"text"`` or ``"path"``); returns the mode set."""
+    _SVG_TEXT[0] = "path" if str(mode).lower() in ("path", "paths", "outline", "outlines") else "text"
+    return _SVG_TEXT[0]
+
+
+def get_svg_text() -> str:
+    return _SVG_TEXT[0]
+
+
+def text_rc() -> dict:
+    """The rcParams a vector save runs under (see :data:`TEXT_AS_TEXT_RC`)."""
+    rc = dict(TEXT_AS_TEXT_RC)
+    rc["svg.fonttype"] = "none" if _SVG_TEXT[0] == "text" else "path"
+    return rc
 
 
 def thin_indices(values: np.ndarray, max_points: int = MAX_PATH_POINTS) -> np.ndarray:
@@ -386,7 +415,7 @@ def vector_safe(figure, max_points: int = MAX_PATH_POINTS, crop: bool = True):
                     original = list(paths)
                     _swap_paths(coll, thinned)
                     restore.append(lambda c=coll, o=original: _swap_paths(c, o))
-        with matplotlib.rc_context({"pdf.fonttype": 42, "ps.fonttype": 42}):
+        with matplotlib.rc_context(text_rc()):
             yield
     finally:
         for undo in reversed(restore):

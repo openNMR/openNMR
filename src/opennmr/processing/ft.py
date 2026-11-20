@@ -165,6 +165,44 @@ def align_echo(fid: np.ndarray, target_index: int = 0, echo_offset: float = 0.0)
     return roll_fid(fid, target_index - top)
 
 
+def net_fid_roll(fid: np.ndarray, fid_shift: float = 0.0, align_echo_enabled: bool = False,
+                 echo_offset: float = 0.0) -> float:
+    """The circular shift, in samples, that :func:`prepare_fid` applies to ``fid``
+    for these controls: ``fid_shift`` alone, or -- with echo alignment on -- that
+    plus the roll that lands the (shifted) echo top at index 0."""
+    fid = np.asarray(fid)
+    roll = float(fid_shift or 0.0)
+    if align_echo_enabled:
+        top = find_echo_top(roll_fid(fid, roll) if roll else fid, offset=echo_offset)
+        roll -= top
+    return roll
+
+
+def roll_phase_compensation(delta_roll: float, dt: float, ppm: np.ndarray, sfo: float,
+                            pivot_ppm: float) -> tuple[float, float]:
+    """The ``(phase0, phase1)`` change, in degrees and in :func:`apply_phase`'s
+    own convention (first order across the whole ppm range, about ``pivot_ppm``),
+    that keeps a spectrum looking the same when the FID is rolled a further
+    ``delta_roll`` samples.
+
+    Rolling an FID by ``s`` samples multiplies its spectrum by
+    ``exp(+2*pi*i*f*s*dt)`` (``f``: the displayed offset from the carrier, in
+    Hz, which :func:`fft_spectrum` gives with the displayed sign), and
+    :func:`apply_phase` multiplies by ``exp(-i*phi)``; so
+    ``phi(f) = 2*pi*s*dt*f`` undoes it. The carrier is the centre of the axis.
+    This is what lets FID shift and Align Echo change where time zero is without
+    the spectrum swinging about: the phase it needs is predicted, not re-dialled."""
+    ppm = np.asarray(ppm, dtype=float)
+    if not delta_roll or ppm.size < 2 or not dt or not sfo:
+        return 0.0, 0.0
+    span = float(ppm.max() - ppm.min())
+    centre = 0.5 * float(ppm.max() + ppm.min())
+    cycles_per_ppm = delta_roll * dt * sfo * 1.0      # s*dt*sfo  (Hz per ppm times seconds)
+    phase1 = 360.0 * cycles_per_ppm * span
+    phase0 = 360.0 * cycles_per_ppm * (pivot_ppm - centre)
+    return phase0, phase1
+
+
 def digital_filter_points(td: int, n_points: int) -> int:
     """Complex points TopSpin's TD has that the FID here does not: the
     digital filter's group delay, removed on reading. ``td`` counts real
@@ -608,12 +646,53 @@ def phase_score(spectrum: np.ndarray, penalty: str = "negarea") -> float:
         h = -np.sum(p * np.log(p + 1e-30))
         neg_penalty = np.sum(np.abs(real[real < 0]))
         return h + 1e-3 * neg_penalty
+    elif penalty == "acme":
+        # Chen et al. 2002: entropy of the normalised first derivative of
+        # the real part plus gamma * (sum of squared negative points), with
+        # the spectrum scaled to a unit maximum so gamma means the same
+        # thing for any intensity.
+        scale = float(np.max(np.abs(spectrum))) or 1.0
+        r = real / scale
+        deriv = np.abs(np.diff(r))
+        p = deriv / (np.sum(deriv) + 1e-30)
+        h = -np.sum(p * np.log(p + 1e-30))
+        return h + 100.0 * np.sum(r[r < 0] ** 2)
     else:
-        raise ValueError("penalty must be 'negarea', 'magnitude', or 'entropy'")
+        raise ValueError("penalty must be 'negarea', 'magnitude', 'entropy' or 'acme'")
+
+
+def phase_region_mask(freq: np.ndarray, region=None) -> np.ndarray | None:
+    """Boolean mask of the points a phase is to be judged on.
+
+    ``region`` is ``None`` (every point: returns ``None``), a boolean array
+    the length of ``freq``, or one ``(low, high)`` ppm pair or a list of them
+    -- the picked regions of the GUI. Judging the phase on the peaks alone is
+    for a spectrum whose broad background or distant spinning sidebands pull
+    the whole-spectrum score away from the line of interest. Raises
+    ``ValueError`` if the region contains fewer than 8 points, since a phase
+    cannot be told from so few."""
+    if region is None:
+        return None
+    freq = np.asarray(freq, dtype=float)
+    arr = np.asarray(region)
+    if arr.dtype == bool and arr.shape == freq.shape:
+        mask = arr.copy()
+    else:
+        pairs = np.atleast_2d(np.asarray(region, dtype=float))
+        if pairs.ndim != 2 or pairs.shape[1] != 2:
+            raise ValueError("region must be a boolean mask or (low, high) ppm pairs")
+        mask = np.zeros(freq.shape, dtype=bool)
+        for lo, hi in pairs:
+            lo, hi = min(lo, hi), max(lo, hi)
+            mask |= (freq >= lo) & (freq <= hi)
+    if int(mask.sum()) < 8:
+        raise ValueError("The region to phase on holds fewer than 8 points.")
+    return mask
 
 
 def apc0(spectrum: np.ndarray, freq: np.ndarray, phase0_inc: float = 0.1, penalty: str = "magnitude",
-         center: float | None = None, window: float = 90.0, remove_baseline: bool = True) -> float:
+         center: float | None = None, window: float = 90.0, remove_baseline: bool = True,
+         region=None) -> float:
     """Zero-order-only autophase: grid search minimizing
     :func:`phase_score` (same criterion/default ``penalty`` as
     :func:`autophase01`'s own stage-1 search -- see :func:`autophase01`
@@ -639,10 +718,17 @@ def apc0(spectrum: np.ndarray, freq: np.ndarray, phase0_inc: float = 0.1, penalt
     construction) was off by only 2 deg, and the gap widens further at
     higher noise. Real bug, not just theoretical: this is what
     "Autophase zeroes everything" on real, lower-SNR data actually
-    was."""
+    was.
+
+    ``region`` (ppm pairs or a boolean mask, see :func:`phase_region_mask`)
+    scores only those points; ``penalty="acme"`` is also available. The
+    defaults are unchanged."""
     spectrum = np.asarray(spectrum)
     if remove_baseline:
         spectrum = spectrum - phasing_baseline(spectrum)
+    mask = phase_region_mask(freq, region)
+    if mask is not None:
+        spectrum = spectrum[mask]       # judged on the chosen region only
     if center is None:
         phase0_values = np.arange(-180, 180, phase0_inc)
     else:
@@ -664,7 +750,7 @@ def apc0(spectrum: np.ndarray, freq: np.ndarray, phase0_inc: float = 0.1, penalt
 def autophase01(spectrum: np.ndarray, freq: np.ndarray, phase0_range: tuple[float, float] = (-180, 180),
                  phase0_inc: float = 1.0, phase1_max: float = 20.0, phase1_improvement: float = 0.15,
                  penalty: str = "magnitude", pivot_frac: float = 0.5, verbose: bool = False,
-                 remove_baseline: bool = True) -> tuple[float, float]:
+                 remove_baseline: bool = True, region=None) -> tuple[float, float]:
     """``phase0, phase1 = autophase01(spectrum, freq, ...)``
 
     Joint zero- and first-order autophasing, but phase1 is only ever
@@ -689,17 +775,20 @@ def autophase01(spectrum: np.ndarray, freq: np.ndarray, phase0_range: tuple[floa
     spectrum = np.asarray(spectrum)
     if remove_baseline:
         spectrum = spectrum - phasing_baseline(spectrum)
+    mask = phase_region_mask(freq, region)
+
+    def scored(p0, p1):
+        out = apply_phase(spectrum, freq, p0, p1, pivot_frac)
+        return phase_score(out if mask is None else out[mask], penalty)
+
     phase0_grid = np.arange(phase0_range[0], phase0_range[1], phase0_inc)
-    scores = [
-        phase_score(apply_phase(spectrum, freq, p0, 0.0, pivot_frac), penalty)
-        for p0 in phase0_grid
-    ]
+    scores = [scored(p0, 0.0) for p0 in phase0_grid]
     p0_start = float(phase0_grid[int(np.argmin(scores))])
     stage1_score = min(scores)
 
     def objective(params):
         p0, p1 = params
-        return phase_score(apply_phase(spectrum, freq, p0, p1, pivot_frac), penalty)
+        return scored(p0, p1)
 
     bounds = [(p0_start - 90, p0_start + 90), (-phase1_max, phase1_max)]
     result = minimize(objective, x0=[p0_start, 0.0], method="Nelder-Mead", bounds=bounds,
@@ -721,6 +810,31 @@ def autophase01(spectrum: np.ndarray, freq: np.ndarray, phase0_range: tuple[floa
               f"phase0={phase0:.2f} deg, phase1={phase1:.2f} deg")
 
     return float(phase0), float(phase1)
+
+
+def compare_phase_methods(spectrum: np.ndarray, freq: np.ndarray, region=None,
+                          phase0_inc: float = 0.5, penalties=("magnitude", "negarea", "entropy", "acme")
+                          ) -> dict:
+    """Zero-order phase found by each scoring method, for judging on your own
+    data which to trust.
+
+    Returns ``{"phase0": {name: degrees}, "spread": degrees, "agree": bool}``,
+    with every method run on the whole spectrum and, when ``region`` is given,
+    on that region as well (names ending ``" (region)"``). ``spread`` is the
+    largest circular difference between any two results; ``agree`` is True
+    when it is under 5 degrees. Where they do not agree, the line shape is
+    not one these scores can all read: look at the spectrum rather than
+    take any of them on trust."""
+    out = {}
+    for pen in penalties:
+        out[pen] = apc0(spectrum, freq, phase0_inc=phase0_inc, penalty=pen)
+        if region is not None:
+            out[f"{pen} (region)"] = apc0(spectrum, freq, phase0_inc=phase0_inc,
+                                          penalty=pen, region=region)
+    vals = np.array(list(out.values()))
+    diff = np.abs(((vals[:, None] - vals[None, :]) + 180) % 360 - 180)
+    spread = float(diff.max())
+    return {"phase0": out, "spread": spread, "agree": spread < 5.0}
 
 
 # ============================================================
