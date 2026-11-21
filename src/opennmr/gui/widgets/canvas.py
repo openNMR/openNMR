@@ -3498,6 +3498,48 @@ class MplCanvas(QWidget):
         if self._contour_spectrum is not None:
             self._redraw_contour(preserve_view=True)
 
+    def contour_slice_label(self, position: int) -> str:
+        """The name a slice is shown under: its own label, or the
+        default ``Slice n`` (n counting from 1) when it has none."""
+        spec = self._contour_slices[position]
+        return spec.get("label") or f"Slice {position + 1}"
+
+    def rename_contour_slice(self, position: int, label: str) -> bool:
+        """Re-label an extracted slice after the fact.
+
+        The label was previously settable only in the Extract Slice
+        dialog. An empty ``label`` puts the default ``Slice n`` back.
+        The spec is the store that persists with the spectrum, so this
+        writes there, drops any "typed in the series list" override
+        that would otherwise shadow it, emits
+        :attr:`contourSlicesChanged` and redraws without resetting the
+        zoom. Returns ``False`` for a position that does not exist."""
+        if not (0 <= position < len(self._contour_slices)):
+            return False
+        text = (label or "").strip()
+        self._contour_slices[position]["label"] = text
+        for entry in self._series.get("slices", []):
+            if entry.key == str(position):
+                entry.label = text or f"Slice {position + 1}"
+                entry.label_overridden = bool(text)
+        self.contourSlicesChanged.emit(list(self._contour_slices))
+        if self._contour_spectrum is not None:
+            self._redraw_contour(preserve_view=True)
+        return True
+
+    def _prompt_rename_slice(self, position: int) -> None:
+        if not (0 <= position < len(self._contour_slices)):
+            return
+        spec = self._contour_slices[position]
+        text, ok = QInputDialog.getText(
+            self, "Rename slice",
+            f"Label for the {spec['axis'].upper()} slice at index {spec['index']} "
+            "(blank for the default):",
+            text=spec.get("label") or "",
+        )
+        if ok:
+            self.rename_contour_slice(position, text)
+
     def _clear_contour_slices(self) -> None:
         self._contour_slices = []
         self.contourSlicesChanged.emit([])
@@ -5435,6 +5477,16 @@ class MplCanvas(QWidget):
                 clear_slices_action = menu.addAction(
                     f"Clear Extracted Slices ({len(self._contour_slices)})"
                 )
+                # One entry per slice, so there is nothing to hit-test: the
+                # list shows each slice's current name and colour order.
+                rename_menu = menu.addMenu("Rename Extracted Slice")
+                rename_menu.setToolTip(
+                    "Change the label of a slice already extracted. Also under "
+                    "Plot Style, in the series list.")
+                for position in range(len(self._contour_slices)):
+                    rename_action = rename_menu.addAction(self.contour_slice_label(position))
+                    rename_action.triggered.connect(
+                        lambda _c=False, p=position: self._prompt_rename_slice(p))
             proj_menu = menu.addMenu("Projections computed as")
             for text, mode in (("Maximum (positive)", "max"), ("Sum", "sum")):
                 act = proj_menu.addAction(text)

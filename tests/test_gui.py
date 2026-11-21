@@ -11311,7 +11311,8 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     analysis = [s.title() for s in applications_tab.findChildren(CollapsibleSection)]
     # DNP (2026-09-30), Signal-to-Noise (2026-10-12) and CP Build-up joined
     # them, then moved to Integrate with the integration regions (2026-10-16).
-    assert analysis == ["eNMR", "Imaging"]
+    assert analysis[:2] == ["eNMR", "Imaging"]
+    assert analysis[2].startswith("Electrochemistry")   # 2026-11-20
     integrate_tab = window.side_tabs.widget(side.index("Integration"))
     assert [s.title() for s in integrate_tab.findChildren(CollapsibleSection)] == [
         "Integration Regions", "DNP", "Enhancement", "Field Sweep Profile",
@@ -11398,7 +11399,9 @@ def test_main_window_applications_is_its_own_top_level_button(qapp):
     applications_tab = window.side_tabs.widget(side.index("Applications"))
     sections = applications_tab.findChildren(CollapsibleSection)
     # DNP, Signal-to-Noise and CP Build-up moved to Integrate (2026-10-16).
-    assert [s.title() for s in sections] == ["eNMR", "Imaging"]
+    titles = [s.title() for s in sections]
+    assert titles[:2] == ["eNMR", "Imaging"]
+    assert len(titles) == 3 and titles[2].startswith("Electrochemistry")   # 2026-11-20
 
     enmr_section = _enclosing_collapsible_section(window.enmr_voltage_label)
     imaging_section = _enclosing_collapsible_section(window.imaging_max_gradient_spin)

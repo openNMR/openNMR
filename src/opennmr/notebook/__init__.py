@@ -135,6 +135,9 @@ from .referencing import transfer_sr, transfer_sr_between
 # Phase each slice of a pseudo-2D on its own -- Process ▸ Phase ▸ "Autophase each
 # slice independently" in the GUI.
 from .slice_phase import autophase_slices
+from .slice_labels import slice_labels, relabel_slice
+from . import dnp_polarisation
+from . import echem, echem_plot
 from ..processing.ft import compare_phase_methods
 from . import results_table
 from .drift_correction import (
@@ -432,6 +435,10 @@ from .experiment_notebook import (
 )
 
 __all__ = [
+    "slice_labels", "relabel_slice",
+    "dnp_polarisation",
+    "echem",
+    "echem_plot",
     "compare_phase_methods", "results_table",
     "add_inset", "remove_insets", "insets_of", "INSET_DEFAULTS", "INSET_CORNERS",
     "integral_labels", "add_integral_labels", "remove_integral_labels", "normalised_integrals",

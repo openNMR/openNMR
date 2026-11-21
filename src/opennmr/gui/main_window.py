@@ -195,6 +195,8 @@ from .czjzek_panels import CzjzekFitPanel, CzjzekSimPanel
 from .dnp_panel import DnpWorkflowPanel
 from .snr_panel import SnrPanel
 from .cp_buildup_panel import CpBuildupPanel
+from .dnp_polarisation_panel import DnpPolarisationPanel
+from .echem_panel import EchemPanel
 from .offset_tracker_panel import OffsetTrackerPanel
 from .tensor_view_panel import TensorViewControls
 from .periodic_table_panel import LarmorCalculatorPanel, PeriodicTableView
@@ -5315,6 +5317,103 @@ class MainWindow(QMainWindow):
             self.simulation_canvas,
         ]
 
+    def _build_echem_style(self, form) -> None:
+        """Plot Style ▸ Electrochemistry: how Apply ▸ Electrochemistry draws (explicit user
+        request, 2026-11-20: style belongs in Plot Style, not a menu of its own)."""
+        sec = "Electrochemistry"
+        changed = self._on_echem_style_changed
+        for attr, label in (("echem_cell_xticks_combo", "Cell x ticks:"),
+                            ("echem_cell_yticks_combo", "Cell y ticks:"),
+                            ("echem_spectra_xticks_combo", "Spectra x ticks:"),
+                            ("echem_spectra_yticks_combo", "Spectra y ticks:")):
+            combo = QComboBox()
+            combo.addItem("Ticks and labels", "both")
+            combo.addItem("Ticks only", "ticks")
+            combo.addItem("None", "none")
+            combo.currentIndexChanged.connect(changed)
+            setattr(self, attr, combo)
+            form.addRow(label, combo, section=sec)
+        self.echem_gap_spin = QDoubleSpinBox()
+        self.echem_gap_spin.setRange(0.0, 0.6)
+        self.echem_gap_spin.setSingleStep(0.01)
+        self.echem_gap_spin.setDecimals(2)
+        self.echem_gap_spin.setValue(0.05)
+        self.echem_gap_spin.setToolTip("The space between the cell and the spectra, as a fraction "
+                                       "of the plot size (the gap is vertical when the cell is above or below).")
+        self.echem_gap_spin.valueChanged.connect(changed)
+        form.addRow("Space between the plots:", self.echem_gap_spin, section=sec)
+        self.echem_spectra_left_spine_check = QCheckBox("Left line on the spectra")
+        self.echem_spectra_left_spine_check.setChecked(True)
+        self.echem_spectra_left_spine_check.toggled.connect(changed)
+        form.addRow("", self.echem_spectra_left_spine_check, section=sec)
+        for attr, label in (("echem_cell_top_spine_check", "Top line on the cell"),
+                            ("echem_cell_right_spine_check", "Right line on the cell"),
+                            ("echem_spectra_top_spine_check", "Top line on the spectra"),
+                            ("echem_spectra_right_spine_check", "Right line on the spectra")):
+            box = QCheckBox(label)
+            box.toggled.connect(changed)
+            setattr(self, attr, box)
+            form.addRow("", box, section=sec)
+        for attr, label in (("echem_cell_xlabel_edit", "Cell x axis name:"),
+                            ("echem_cell_ylabel_edit", "Cell y axis name:"),
+                            ("echem_spectra_xlabel_edit", "Spectra x axis name:"),
+                            ("echem_spectra_ylabel_edit", "Spectra y axis name:")):
+            edit = QLineEdit()
+            edit.setPlaceholderText("automatic")
+            edit.setObjectName(attr.replace("_edit", "_show_check"))
+            edit.editingFinished.connect(changed)
+            setattr(self, attr, edit)
+            form.addRow(label, edit, section=sec)
+            show = QCheckBox("Show this axis name")
+            show.setChecked(True)
+            show.toggled.connect(changed)
+            setattr(self, attr.replace("_edit", "_show_check"), show)
+            form.addRow("", show, section=sec)
+        self.echem_cell_colour_edit = QLineEdit("tab:blue")
+        self.echem_cell_colour_edit.setToolTip("A colour name or #rrggbb.")
+        self.echem_cell_colour_edit.editingFinished.connect(changed)
+        form.addRow("Cell curve colour:", self.echem_cell_colour_edit, section=sec)
+        self.echem_linewidth_spin = QDoubleSpinBox()
+        self.echem_linewidth_spin.setRange(0.1, 10.0)
+        self.echem_linewidth_spin.setSingleStep(0.1)
+        self.echem_linewidth_spin.setValue(1.0)
+        self.echem_linewidth_spin.valueChanged.connect(changed)
+        form.addRow("Cell curve line width:", self.echem_linewidth_spin, section=sec)
+        self.echem_marker_combo = QComboBox()
+        for text, key in (("Circle", "o"), ("Square", "s"), ("Triangle up", "^"),
+                          ("Triangle down", "v"), ("Diamond", "D"), ("Star", "*"),
+                          ("Plus", "P"), ("Cross", "X")):
+            self.echem_marker_combo.addItem(text, key)
+        self.echem_marker_combo.currentIndexChanged.connect(changed)
+        form.addRow("Marker shape:", self.echem_marker_combo, section=sec)
+        self.echem_marker_size_spin = QDoubleSpinBox()
+        self.echem_marker_size_spin.setRange(1.0, 30.0)
+        self.echem_marker_size_spin.setValue(6.0)
+        self.echem_marker_size_spin.valueChanged.connect(changed)
+        form.addRow("Marker size:", self.echem_marker_size_spin, section=sec)
+        self.echem_marker_colour_edit = QLineEdit("tab:red")
+        self.echem_marker_colour_edit.editingFinished.connect(changed)
+        form.addRow("Marker colour:", self.echem_marker_colour_edit, section=sec)
+        self.echem_fraction_spin = QDoubleSpinBox()
+        self.echem_fraction_spin.setRange(0.1, 0.7)
+        self.echem_fraction_spin.setSingleStep(0.05)
+        self.echem_fraction_spin.setValue(0.3)
+        self.echem_fraction_spin.setToolTip("The share of the figure the cell takes.")
+        self.echem_fraction_spin.valueChanged.connect(changed)
+        form.addRow("Cell share of the figure:", self.echem_fraction_spin, section=sec)
+        self.echem_colormap_combo = QComboBox()
+        for name in ("viridis", "plasma", "inferno", "magma", "cividis", "turbo", "gray"):
+            self.echem_colormap_combo.addItem(name, name)
+        self.echem_colormap_combo.currentIndexChanged.connect(changed)
+        form.addRow("Heat map / series colours:", self.echem_colormap_combo, section=sec)
+        self.echem_stack_spin = QDoubleSpinBox()
+        self.echem_stack_spin.setRange(0.1, 10.0)
+        self.echem_stack_spin.setSingleStep(0.1)
+        self.echem_stack_spin.setValue(1.0)
+        self.echem_stack_spin.setToolTip("Stacked spectra: their height in spectrum spacings.")
+        self.echem_stack_spin.valueChanged.connect(changed)
+        form.addRow("Stacked height:", self.echem_stack_spin, section=sec)
+
     def _build_style_panel(self) -> QWidget:
         """Every plot-style and export control, as a plain widget.
 
@@ -5351,7 +5450,9 @@ class MainWindow(QMainWindow):
         style_form.add_section("Legend")
         style_form.add_section("Compare")
         style_form.add_section("2-D")
+        style_form.add_section("Electrochemistry")
         self.style_sections = style_form.sections
+        self._build_echem_style(style_form)
 
         self.output_linewidth_spin = QDoubleSpinBox()
         self.output_linewidth_spin.setRange(0.1, 10.0)
@@ -8273,12 +8374,16 @@ class MainWindow(QMainWindow):
         "simpson": ("SIMPSON import (Simulate ▸ SIMPSON, Fit ▸ SIMPSON spectrum)",
                     ("_simpson_sim_section", "_simpson_fit_section")),
         "dnp": ("DNP (Integrate ▸ DNP)", ("_dnp_section",)),
+        "dnp_polarisation": ("DNP polarisation against a delay (Dynamics)",
+                             ("_dnp_polarisation_section",)),
         "drift": ("Field drift correction (Process)", ("drift_section",)),
         # Explicit user request, 2026-10-14 (second round).
         "czjzek": ("Czjzek distribution (Fit and Simulate)",
                    ("_czjzek_fit_section", "_czjzek_sim_section")),
         "enmr": ("eNMR (Apply)", ("_enmr_section",)),
         "imaging": ("Imaging (Apply)", ("_imaging_section",)),
+        # Explicit user request, 2026-11-20.
+        "echem": ("Electrochemistry beside spectra (Apply)", ("_echem_section",)),
         "cp_buildup": ("CP Build-up (Integrate)", ("_cp_buildup_section",)),
         "regularisation": ("Regularisation (Dynamics)", ("_regularisation_section",)),
         # Explicit user request, 2026-10-17.
@@ -8305,7 +8410,7 @@ class MainWindow(QMainWindow):
 
     #: The optional sections that live on the Apply tile. With none of
     #: them shown the tile has nothing on it, so it is hidden too.
-    APPLY_TILE_SECTIONS = ("enmr", "imaging")
+    APPLY_TILE_SECTIONS = ("enmr", "imaging", "echem")
 
     def _apply_section_shown(self, key: str, shown: bool) -> None:
         for name in self.OPTIONAL_SECTIONS[key][1]:
@@ -18099,8 +18204,85 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._enmr_section)
         self._imaging_section = CollapsibleSection("Imaging", content=self._build_imaging_subtab())
         layout.addWidget(self._imaging_section)
+        # The cell beside the spectra (explicit user request, 2026-11-20); maths
+        # notebook.echem and notebook.echem_plot, drawn on the Compare view.
+        self.echem_panel = EchemPanel(
+            spectra=self._echem_spectra, draw=self._echem_draw, style=self._echem_style)
+        self._echem_section = CollapsibleSection(
+            "Electrochemistry (Beside Operando, Ex Situ or Fitted Values)", content=self.echem_panel)
+        self._echem_section.toggled.connect(
+            lambda expanded: expanded and self.echem_panel.refresh())
+        layout.addWidget(self._echem_section)
+        _model = self.spectrum_list.model()
+        def _refresh_echem(*_a):
+            try:
+                self.echem_panel.refresh()
+            except RuntimeError:    # a widget was deleted while the window closes
+                pass
+        for _signal in (_model.rowsInserted, _model.rowsRemoved, _model.modelReset):
+            _signal.connect(_refresh_echem)
+        self.spectrum_list.itemSelectionChanged.connect(_refresh_echem)
         layout.addStretch(1)
         return tab
+
+    def _echem_spectra(self) -> list[dict]:
+        """Every 1D spectrum in Open experiments, for Apply ▸ Electrochemistry."""
+        try:
+            selected = set(self._dnp_selected_rows())
+        except RuntimeError:        # the list widget was rebuilt or is closing
+            selected = set()
+        return [{"label": self.session.label(i), "spectrum": s, "index": i,
+                 "path": s.metadata.source_path, "selected": i in selected}
+                for i, s in enumerate(self.session.spectra) if s.ndim == 1]
+
+    def _echem_draw(self, draw, hz_per_ppm=None) -> None:
+        """The cell-and-spectra figure on the Compare view (its own plot kind, so Plot Style applies).
+        ``hz_per_ppm`` lets Measure give Hz as well as ppm on the shift axis."""
+        self._dnp_show_canvas(self.compare_canvas)
+        self.compare_canvas.show_external_plot(
+            draw, kind="compare", series_group="echem", hz_per_ppm=hz_per_ppm)
+
+    def _echem_style(self) -> dict:
+        """Plot Style ▸ Electrochemistry, as keyword arguments of ``plot_echem_nmr``."""
+        import matplotlib.colors as _mc
+        w = getattr(self, "echem_cell_colour_edit", None)
+        if w is None:
+            return {}
+        def colour(edit, default):
+            text = edit.text().strip()
+            return text if text and _mc.is_color_like(text) else default
+        def text(edit):
+            shown = getattr(self, edit.objectName(), None)
+            if shown is not None and not shown.isChecked():
+                return ""               # no name at all
+            return edit.text() if edit.text().strip() else None
+        return dict(
+            fontsize=float(self.output_fontsize_spin.value()),
+            cell_colour=colour(self.echem_cell_colour_edit, "tab:blue"),
+            cell_linewidth=float(self.echem_linewidth_spin.value()),
+            cell_xticks=self.echem_cell_xticks_combo.currentData(),
+            cell_yticks=self.echem_cell_yticks_combo.currentData(),
+            spectra_xticks=self.echem_spectra_xticks_combo.currentData(),
+            spectra_yticks=self.echem_spectra_yticks_combo.currentData(),
+            gap=float(self.echem_gap_spin.value()),
+            spectra_left_spine=self.echem_spectra_left_spine_check.isChecked(),
+            cell_top_spine=self.echem_cell_top_spine_check.isChecked(),
+            cell_right_spine=self.echem_cell_right_spine_check.isChecked(),
+            spectra_top_spine=self.echem_spectra_top_spine_check.isChecked(),
+            spectra_right_spine=self.echem_spectra_right_spine_check.isChecked(),
+            cell_xlabel=text(self.echem_cell_xlabel_edit), cell_ylabel=text(self.echem_cell_ylabel_edit),
+            spectra_xlabel=text(self.echem_spectra_xlabel_edit),
+            spectra_ylabel=text(self.echem_spectra_ylabel_edit),
+            marker=self.echem_marker_combo.currentData(), marker_size=float(self.echem_marker_size_spin.value()),
+            marker_colour=colour(self.echem_marker_colour_edit, "tab:red"),
+            cell_fraction=float(self.echem_fraction_spin.value()),
+            colormap=self.echem_colormap_combo.currentData(),
+            stack_height=float(self.echem_stack_spin.value()))
+
+    def _on_echem_style_changed(self, *_args) -> None:
+        panel = getattr(self, "echem_panel", None)
+        if panel is not None:
+            panel.replot()
 
     def _build_integrate_panel(self) -> QWidget:
         """The "Integrate" launcher button (explicit user request,
@@ -21701,6 +21883,20 @@ class MainWindow(QMainWindow):
         self._motion_fit_section = CollapsibleSection(
             "Anisotropic Motion 2: Fit Rates and Barriers to Spectra", content=self.motion_fit_panel)
         layout.addWidget(self._motion_fit_section)
+        # Polarisation against a delay: the difference of two pseudo-2D
+        # series, nothing fitted (explicit user request, 2026-11-20); maths
+        # notebook.dnp_polarisation, drawn on the Fit view.
+        self.dnp_polarisation_panel = DnpPolarisationPanel(
+            spectra=self._polarisation_spectra, draw=self._polarisation_draw)
+        self._dnp_polarisation_section = CollapsibleSection(
+            "DNP Polarisation (Difference of Two Pseudo-2D Series)",
+            content=self.dnp_polarisation_panel)
+        self._dnp_polarisation_section.toggled.connect(
+            lambda expanded: expanded and self.dnp_polarisation_panel.refresh())
+        layout.addWidget(self._dnp_polarisation_section)
+        _model = self.spectrum_list.model()
+        for _signal in (_model.rowsInserted, _model.rowsRemoved, _model.modelReset):
+            _signal.connect(lambda *_a: self.dnp_polarisation_panel.refresh())
         # Tikhonov regularisation, its own section (explicit user request,
         # 2026-10-16: the MATLAB_RELAX_ALGORITHM scripts); maths
         # notebook.regularisation, drawn on the Fit view.
@@ -21714,6 +21910,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._regularisation_section)
         layout.addStretch(1)
         return container
+
+    def _polarisation_spectra(self) -> list[dict]:
+        """Every pseudo-2D (and 2D) experiment in Open experiments, for Dynamics ▸ DNP Polarisation."""
+        return [{"label": self.session.label(i), "spectrum": s, "index": i}
+                for i, s in enumerate(self.session.spectra) if s.ndim == 2]
+
+    def _polarisation_draw(self, draw) -> None:
+        """Put the polarisation figure on the Fit view, announced as a curve so its plot
+        style (fonts, ticks, colours, axis names) applies."""
+        self._raise_fit_canvas()
+        self.fit_canvas.show_external_plot(draw, kind="curve")
 
     def _regularisation_series(self) -> list[dict]:
         """Fit Curve's last result, one entry per peak, for Dynamics ▸

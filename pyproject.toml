@@ -36,6 +36,9 @@ dependencies = [
 # pytest-xdist: run in parallel (pytest -n 8); pytest-timeout: a test that
 # hangs fails after [tool.pytest.ini_options] timeout instead of freezing
 # the run (2026-10-16).
+# Reading Biologic / Arbin / Neware / Landt / Ivium cycler files (notebook.echem, Apply >
+# Electrochemistry). Plain .csv/.txt tables need nothing extra.
+echem = ["navani; python_version < \"3.14\"", "galvani"]
 test = ["pytest", "pytest-xdist", "pytest-timeout", "nmrglue", "pymatgen"]
 # CIF-based pNMR simulation (notebook.pnmr_simulator, Simulate > pNMR (CIF)).
 build = ["pyinstaller"]
