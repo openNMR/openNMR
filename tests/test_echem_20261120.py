@@ -117,7 +117,7 @@ def test_semicolon_and_decimal_comma_and_eclab_header(tmp_path):
     assert len(echem.load_echem(path2)["data"]) == 20
 
 
-def test_missing_file_bad_reader_and_missing_navani(tmp_path, monkeypatch):
+def test_missing_file_bad_reader_and_unsupported_format(tmp_path, monkeypatch):
     with pytest.raises(FileNotFoundError):
         echem.load_echem(tmp_path / "nope.csv")
     p = tmp_path / "x.mpr"
@@ -132,7 +132,7 @@ def test_missing_file_bad_reader_and_missing_navani(tmp_path, monkeypatch):
             raise ImportError("no navani")
         return real(name, *a, **k)
     monkeypatch.setattr(builtins, "__import__", refuse)
-    with pytest.raises(ImportError, match="pip install navani"):
+    with pytest.raises(ImportError, match="export the data as a .csv"):
         echem.load_echem(p)
 
 
@@ -286,3 +286,59 @@ def test_mpr_reads_through_galvani_when_navani_is_missing(monkeypatch):
     monkeypatch.setitem(sys.modules, "navani.echem", None)
     data = echem.load_echem(_MPR, mass_mg=1.0)["data"]
     assert data["cycle"].max() >= 2 and np.isfinite(data["voltage_V"]).all()
+
+
+# ---- Biologic files without navani (galvani is a core dependency) ---------------------------
+
+
+def _write_mpt(path, current_name="<I>/mA"):
+    t = np.arange(0, 600.0, 30.0)
+    v = 3.0 + 0.001 * t
+    i = np.where(t < 300, 1.0, -1.0)
+    lines = ["EC-Lab ASCII FILE", "Nb header lines : 3",
+             "\t".join(["mode", "time/s", "Ewe/V", current_name])]
+    lines += ["\t".join(["1", f"{a:.3f}", f"{b:.5f}", f"{c:.4f}"]) for a, b, c in zip(t, v, i)]
+    path.write_bytes(("\r\n".join(lines) + "\r\n").encode("ascii"))
+    return t, v, i
+
+
+def test_mpt_reads_through_galvani_without_navani(tmp_path, monkeypatch):
+    import sys
+    pytest.importorskip("galvani")
+    monkeypatch.setitem(sys.modules, "navani", None)
+    monkeypatch.setitem(sys.modules, "navani.echem", None)
+    p = tmp_path / "cell.mpt"
+    t, v, i = _write_mpt(p)
+    data = echem.load_echem(p, mass_mg=1.0)["data"]
+    assert len(data) == len(t)
+    assert np.allclose(data["voltage_V"], v)
+    assert np.allclose(data["current_mA"], i)
+    assert set(data["state"]) >= {"charge", "discharge"}
+
+
+def test_biologic_frame_takes_the_charge_step_when_there_is_no_current():
+    t = np.arange(0.0, 100.0, 10.0)
+    frame = pd.DataFrame({"time/s": t, "Ewe/V": 3.0 + 0 * t, "dQ/mA.h": 0.0 + 0 * t})
+    frame.loc[1:, "dQ/mA.h"] = 1.0 * 10.0 / 3600.0      # 1 mA for 10 s
+    out = echem._biologic_frame(frame)
+    assert np.allclose(out["Current"].iloc[1:], 1.0)
+    with pytest.raises(ValueError, match="current nor a charge"):
+        echem._biologic_frame(frame[["time/s", "Ewe/V"]])
+
+
+def test_galvani_is_a_core_dependency_not_only_an_extra():
+    import pathlib, re
+    text = (pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+        encoding="utf-8")
+    core = text.split("dependencies = [", 1)[1].split("]", 1)[0]
+    assert re.search(r'"galvani"', core)
+    assert "navani" not in text        # one behaviour on every Python and every install route
+
+
+def test_supported_python_range_is_declared():
+    import pathlib
+    text = (pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+        encoding="utf-8")
+    assert 'requires-python = ">=3.12,<3.15"' in text
+    for minor in ("3.12", "3.13", "3.14"):
+        assert f"Programming Language :: Python :: {minor}" in text

@@ -20,7 +20,7 @@ def read_particles_dump(filename):
     if a later section happened to tokenize as the right number of
     floats -- silently return wrong data mixed in from another
     timestep."""
-    with open(filename) as f:
+    with open(filename, encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
 
     n_atoms = None
@@ -208,5 +208,5 @@ def inp_sim(simulation):
 
 
 def read_input(json_path):
-    with open(json_path) as f:
+    with open(json_path, encoding="utf-8") as f:
         return json.load(f)

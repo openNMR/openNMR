@@ -1320,7 +1320,7 @@ def _read_gradient_relative(path: str) -> np.ndarray | None:
     if not os.path.exists(list_path):
         return None
     try:
-        with open(list_path) as f:
+        with open(list_path, encoding="utf-8", errors="replace") as f:
             values = [float(line.strip()) for line in f if line.strip()]
     except (OSError, ValueError):
         return None

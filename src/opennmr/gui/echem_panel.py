@@ -1,7 +1,7 @@
 """
 Apply ▸ Electrochemistry: the cell beside the spectra.
 
-Load a cycler file (anything navani reads, or a plain table), enter the sample mass, area
+Load a cycler file (Biologic .mpr/.mpt, or a plain csv/txt table), enter the sample mass, area
 and formula, and put the cell curve beside either
 
 * **operando** spectra (a series recorded while the cell cycled): choose the experiments
@@ -112,7 +112,7 @@ class EchemPanel(QWidget):
         form = QFormLayout(box)
         row = QHBoxLayout()
         self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText(".mpr, .mpt, .res, .nda(x), .xlsx, .csv … (navani or a table)")
+        self.path_edit.setPlaceholderText(".mpr, .mpt, .res, .nda(x), .xlsx, .csv … (.mpr/.mpt and tables need nothing extra)")
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse)
         row.addWidget(self.path_edit, 1)

@@ -403,7 +403,7 @@ def read_nuslist(path: str, ndim_indirect: int) -> np.ndarray:
     F1, F2, ... column order. The file itself lists the highest-numbered
     indirect dimension first (``F2 F1`` for a 3D, ``F3 F2 F1`` for a
     4D -- the order ``lindriftcomp`` reads it in)."""
-    with open(path) as handle:
+    with open(path, encoding="utf-8", errors="replace") as handle:
         values = [int(v) for v in re.findall(r"-?\d+", handle.read())]
     arr = np.array(values, dtype=int)
     if arr.size % ndim_indirect:

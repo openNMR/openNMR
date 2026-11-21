@@ -140,7 +140,7 @@ def _read_simp_text(path):
     real, imag = [], []
     in_data = False
 
-    with open(path, 'r') as f:
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
             line = line.strip()
             if not line:

@@ -7340,7 +7340,7 @@ class MainWindow(QMainWindow):
 
     def _load_figure_styles(self) -> dict:
         try:
-            with open(self._FIGURE_STYLES_PATH) as f:
+            with open(self._FIGURE_STYLES_PATH, encoding="utf-8") as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
@@ -8912,7 +8912,7 @@ class MainWindow(QMainWindow):
 
     def _load_probe_config(self) -> dict:
         try:
-            with open(self._PROBE_CONFIG_PATH) as f:
+            with open(self._PROBE_CONFIG_PATH, encoding="utf-8") as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return {}

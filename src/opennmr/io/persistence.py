@@ -117,7 +117,7 @@ def _read_json(path: str) -> dict | None:
     if not os.path.exists(path):
         return None
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         # Fails soft -- a corrupted or foreign (e.g. hand-edited into

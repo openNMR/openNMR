@@ -2,10 +2,9 @@
 Electrochemistry data for NMR: read a cycler file, derive capacity and composition,
 select cycles, and find where an ex situ sample or an operando spectrum sits on the curve.
 
-Reading uses `navani <https://github.com/be-smith/navani>`_ (Biologic ``.mpr``/``.mpt``,
-Arbin ``.res``/``.xlsx``, Neware ``.nda``/``.ndax``, Landt, Ivium, BDF) when it is installed
-(``pip install navani``); plain delimited tables (``.csv``/``.tsv``/``.txt``/``.dat``) are read
-with pandas, so any export with a header row works without it. Every column of the file is
+Biologic ``.mpr``/``.mpt`` files are read with galvani, which comes with openNMR, and plain
+delimited tables (``.csv``/``.tsv``/``.txt``/``.dat``) are read
+with pandas, so any export with a header row works. Every column of the file is
 kept, so *whatever is in the file can be plotted*. The standard columns below are added where
 they can be worked out.
 
@@ -128,15 +127,16 @@ def _read_table(path: str) -> pd.DataFrame:
     return df
 
 
-def _read_biologic_mpr(path: str) -> pd.DataFrame:
-    """A Biologic ``.mpr`` through galvani alone (navani needs numpy < 2, which has no wheels for
-    the newest Python versions). Current is the file's ``I/mA`` when it has one, otherwise the
-    charge step over the time step, which is how navani gets it too."""
-    from galvani import BioLogic
-    with open(path, "rb") as handle:
-        data = pd.DataFrame(BioLogic.MPRfile(handle).data)
-    out = pd.DataFrame({"Time": data["time/s"], "Voltage": data["Ewe/V"]})
-    dt = np.diff(data["time/s"].to_numpy(float), prepend=data["time/s"].iloc[0])
+def _biologic_frame(data: pd.DataFrame) -> pd.DataFrame:
+    """Time, voltage and current from the columns of a Biologic file (``.mpr`` or ``.mpt``).
+    Current is the file's ``I/mA`` (``<I>/mA``) when it has one, otherwise the charge step over
+    the time step, which is how navani gets it too."""
+    data = data.rename(columns=lambda c: str(c).replace("<", "").replace(">", ""))
+    if "time/s" not in data or "Ewe/V" not in data:
+        raise ValueError("The Biologic file has no time/s or Ewe/V column.")
+    out = pd.DataFrame({"Time": data["time/s"].to_numpy(float),
+                        "Voltage": data["Ewe/V"].to_numpy(float)})
+    dt = np.diff(out["Time"].to_numpy(float), prepend=out["Time"].iloc[0])
     if "I/mA" in data:
         out["Current"] = data["I/mA"].to_numpy(float)
     else:
@@ -146,26 +146,44 @@ def _read_biologic_mpr(path: str) -> pd.DataFrame:
         elif "Q charge/discharge/mA.h" in data:
             dq = np.diff(data["Q charge/discharge/mA.h"].to_numpy(float), prepend=0.0)
         else:
-            raise ValueError("The .mpr file has neither a current nor a charge column.")
+            raise ValueError("The Biologic file has neither a current nor a charge column.")
         with np.errstate(divide="ignore", invalid="ignore"):
             current = dq / (dt / 3600.0)
         out["Current"] = np.where(np.isfinite(current), current, 0.0)
     return out
 
 
+def _read_biologic(path: str) -> pd.DataFrame:
+    """A Biologic ``.mpr`` or ``.mpt`` through galvani alone. galvani is a core dependency;
+    navani is not needed for these two."""
+    from galvani import BioLogic
+    with open(path, "rb") as handle:
+        if path.lower().endswith(".mpt"):
+            data = pd.DataFrame(BioLogic.MPTfile(handle, encoding="latin-1")[0])
+        else:
+            data = pd.DataFrame(BioLogic.MPRfile(handle).data)
+    return _biologic_frame(data)
+
+
+_BIOLOGIC_EXTENSIONS = (".mpr", ".mpt")
+
+
 def _read_navani(path: str) -> pd.DataFrame:
+    """Biologic files through galvani, which comes with openNMR. Any other instrument format is
+    handed to navani only if it happens to be installed; it is not a dependency, because it
+    cannot be installed on every supported Python, so everyone is told the same thing:
+    export a csv."""
+    if path.lower().endswith(_BIOLOGIC_EXTENSIONS):
+        try:
+            return _read_biologic(path)
+        except ImportError:
+            pass  # galvani missing from an odd install: try navani below
     try:
         from navani import echem as navani_echem
     except ImportError as exc:
-        if path.lower().endswith(".mpr"):
-            try:
-                return _read_biologic_mpr(path)
-            except ImportError:
-                pass
         raise ImportError(
-            "Reading this kind of file needs navani ('pip install navani'; for a Biologic .mpr "
-            "'pip install galvani' is enough, and works where navani cannot be installed, such "
-            "as Python 3.14). Or export the data as a .csv table, which needs nothing extra.") from exc
+            "openNMR reads Biologic .mpr and .mpt files and plain .csv/.txt tables. For any "
+            "other cycler software, export the data as a .csv table.") from exc
     return navani_echem.echem_file_loader(path)
 
 
@@ -176,9 +194,9 @@ def load_echem(path, mass_mg: float | None = None, area_cm2: float | None = None
                capacity_from: str = "integrated", rest_fraction: float = 1e-4) -> dict:
     """Read a cycler file and add the standard columns (see the module notes).
 
-    ``reader``: ``"auto"`` (a plain table for ``.csv``/``.tsv``/``.txt``/``.dat``, navani for
-    the instrument formats, navani as the fallback for a table it cannot make sense of),
-    ``"navani"`` or ``"table"``. ``current_unit`` / ``time_unit`` say what the file's
+    ``reader``: ``"auto"`` (a plain table for ``.csv``/``.tsv``/``.txt``/``.dat``, galvani for
+    Biologic files, then navani if it is installed, as the fallback for a table it cannot make
+    sense of), ``"navani"`` or ``"table"``. ``current_unit`` / ``time_unit`` say what the file's
     columns are in (``"A"``, ``"mA"``, ``"uA"``; ``"s"``, ``"min"``, ``"h"``). The mass,
     area, molar mass (or ``formula``) and ``x0`` are optional; each derived column
     appears only when what it needs is given. Returns ``{"data", "source", "reader",

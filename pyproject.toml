@@ -7,13 +7,16 @@ name = "opennmr"
 version = "0.12.0"
 description = "Vendor-agnostic NMR import, processing, plotting, and GUI"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.15"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Euan Bassey" }, { name = "Leo Gordon" }]  
 keywords = ["NMR", "solid-state NMR", "spectroscopy", "fitting"]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Chemistry",
     "Topic :: Scientific/Engineering :: Physics",
     "Intended Audience :: Science/Research",
@@ -26,6 +29,7 @@ dependencies = [
     "PySide6-Essentials",
     "sympy",
     "pymatgen",
+    "galvani",  # reads Biologic .mpr/.mpt echem files with no extra install
 ]
 
 [project.optional-dependencies]
@@ -36,9 +40,6 @@ dependencies = [
 # pytest-xdist: run in parallel (pytest -n 8); pytest-timeout: a test that
 # hangs fails after [tool.pytest.ini_options] timeout instead of freezing
 # the run (2026-10-16).
-# Reading Biologic / Arbin / Neware / Landt / Ivium cycler files (notebook.echem, Apply >
-# Electrochemistry). Plain .csv/.txt tables need nothing extra.
-echem = ["navani; python_version < \"3.14\"", "galvani"]
 test = ["pytest", "pytest-xdist", "pytest-timeout", "nmrglue", "pymatgen"]
 # CIF-based pNMR simulation (notebook.pnmr_simulator, Simulate > pNMR (CIF)).
 build = ["pyinstaller"]
