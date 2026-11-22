@@ -48,6 +48,8 @@ DEFAULT_COLORS = {
     "decoupling": "#009E73",  # green
     "gradient": "#CC79A7",    # reddish purple
     "acquire": "#4D4D4D",     # grey
+    "adiabatic": "#B8860B",   # dark goldenrod
+    "ramp": "#7B3FA0",        # purple
     "delay": "#333333",       # delay brackets
 }
 
@@ -55,7 +57,17 @@ KIND_NAMES = {
     "hard": "Hard pulse", "shaped": "Shaped pulse",
     "decoupling": "Decoupling / recoupling", "gradient": "Gradient",
     "acquire": "Acquisition", "delay": "Delay",
+    "adiabatic": "Adiabatic pulse", "ramp": "Ramp pulse",
 }
+
+#: How the power of each pulse is written under it (``show_power``).
+POWER_MODES = ("none", "W", "dB", "both")
+#: What a pulse can be drawn as, for the per-pulse overrides (``pulse_types``).
+PULSE_TYPES = ("hard", "shaped", "adiabatic", "ramp_up", "ramp_down")
+PULSE_TYPE_NAMES = {"hard": "Hard pulse", "shaped": "Shaped pulse", "adiabatic": "Adiabatic pulse",
+                    "ramp_up": "Ramp pulse (rising)", "ramp_down": "Ramp pulse (falling)"}
+#: A ramp whose own levels are not known runs between these fractions of the full amplitude.
+RAMP_LOW = 0.4
 
 _GREEK = {"tau": r"\tau", "delta": r"\delta", "Delta": r"\Delta", "gamma": r"\gamma",
           "theta": r"\theta", "alpha": r"\alpha", "beta": r"\beta", "phi": r"\phi"}
@@ -66,7 +78,8 @@ __all__ = [
     "read_pulse_sequences", "parse_pulse_sequence", "pulse_sequence_for",
     "find_sequence_file", "plot_pulse_sequence", "figure_size", "event_table", "channel_nuclei",
     "pulse_label", "enable_zoom_pan", "housekeeping_delays", "DELAY_STYLES", "SHAPED_STYLES", "LEGEND_POSITIONS",
-    "TITLE_POSITIONS", "font_rc", "user_label",
+    "TITLE_POSITIONS", "font_rc", "user_label", "POWER_MODES", "PULSE_TYPES", "PULSE_TYPE_NAMES",
+    "classify_shape", "resolve_pulse_details", "power_text",
 ]
 
 
@@ -140,7 +153,84 @@ def pulse_sequence_for(spectrum, path: str | None = None, flags: dict | None = N
     nuclei = channel_nuclei(spectrum)
     for s in seqs:
         s.channel_nuclei = dict(nuclei)
+        resolve_pulse_details(s, consts, raw.get("acqus") or {})
     return seqs
+
+
+# ---------------------------------------------------------------------------
+# power levels and the kind of shaped pulse
+# ---------------------------------------------------------------------------
+
+_ADIABATIC = re.compile(r"chirp|crp|wurst|hypsec|sech|\bhs\d|^hs|bir[-_]?\d|tanh|adiab|smchirp|"
+                        r"fm[-_]?sweep", re.I)
+_RAMP = re.compile(r"ramp", re.I)
+
+
+def classify_shape(name) -> tuple[str, tuple | None]:
+    """``(kind, ramp)`` for a shape file name: ``kind`` is ``"adiabatic"`` (chirp, WURST, hyperbolic
+    secant, BIR-4 …), ``"ramp"`` or ``"shaped"``; ``ramp`` is ``(start, end)`` as fractions of the
+    full amplitude for a ramp (read from the name where it says so, as in ``ramp70100``, or
+    ``down`` / ``up``; a rising ramp from :data:`RAMP_LOW` otherwise), else ``None``."""
+    text = str(name or "")
+    if _RAMP.search(text):
+        m = (re.search(r"ramp[_-]?(\d{2,3})[_-](\d{2,3})", text, re.I)
+             or re.search(r"ramp(\d{2})(\d{3})(?!\d)", text, re.I))
+        if m:
+            a, b = int(m.group(1)) / 100.0, int(m.group(2)) / 100.0
+            if 0.0 <= a <= 1.0 and 0.0 <= b <= 1.0 and a != b:
+                return "ramp", (a, b)
+        if re.search(r"down|fall|dec|desc", text, re.I):
+            return "ramp", (1.0, RAMP_LOW)
+        return "ramp", (RAMP_LOW, 1.0)
+    if _ADIABATIC.search(text):
+        return "adiabatic", None
+    return "shaped", None
+
+
+def resolve_pulse_details(seq, constants: dict, acqus: dict | None = None) -> None:
+    """Fill in, for every pulse of a Bruker sequence, its power (``power_w`` in watts and
+    ``power_db``, the attenuation in dB with 0 dB = 1 W, as the experiment recorded them), the
+    name of its shape file (``shape_name``) and how it is drawn (``shape_kind``, ``ramp``).
+    Anything the experiment does not record stays ``None``."""
+    consts = {str(k).lower(): v for k, v in (constants or {}).items()}
+    names = (acqus or {}).get("SPNAM")
+    for e in seq.events:
+        if e.kind not in ("hard", "shaped"):
+            continue
+        name = (e.power or "").lower()
+        if not name and e.kind == "shaped" and e.shape and re.fullmatch(r"sp\d+", e.shape, re.I):
+            name = e.shape.lower()
+        m = re.fullmatch(r"(pl|sp)(w|db)?(\d+)", name)
+        if m:
+            fam, _unit, n = m.groups()
+            w = consts.get(f"{fam}w{n}")
+            db = consts.get(f"{fam}db{n}", consts.get(f"{fam}{n}"))
+            if w is None and db is not None:
+                w = 10.0 ** (-db / 10.0)
+            if db is None and w:
+                db = -10.0 * math.log10(w)
+            e.power_w, e.power_db = w, db
+        if e.kind == "shaped":
+            shape = e.shape
+            sm = re.fullmatch(r"sp(\d+)", shape or "", re.I)
+            if sm and isinstance(names, (list, tuple)) and int(sm.group(1)) < len(names):
+                shape = str(names[int(sm.group(1))]).strip() or None
+            e.shape_name = shape
+            e.shape_kind, e.ramp = classify_shape(shape)
+
+
+def power_text(e, mode: str) -> str:
+    """The power of event ``e`` as written under it: ``"0.25 W"``, ``"6.0 dB"`` or both; empty
+    when the experiment does not record it (or ``mode`` is ``"none"``)."""
+    if mode not in POWER_MODES:
+        raise ValueError(f"show_power must be one of {POWER_MODES}, got {mode!r}.")
+    w, db = getattr(e, "power_w", None), getattr(e, "power_db", None)
+    parts = []
+    if mode in ("W", "both") and w is not None:
+        parts.append(f"{w:.3g} W")
+    if mode in ("dB", "both") and db is not None:
+        parts.append(f"{db:.3g} dB")
+    return "  ".join(parts) if mode != "both" else "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +276,8 @@ def event_table(seq: PulseSequence) -> list:
     for e in seq.events:
         rows.append({"#": e.uid, "kind": KIND_NAMES.get(e.kind, e.kind), "channel": e.channel,
                      "name": e.label, "expression": e.expr, "duration": e.value_text(),
-                     "shape": e.shape or "", "phase": e.phase or "",
+                     "shape": getattr(e, "shape_name", None) or e.shape or "", "phase": e.phase or "",
+                     "power": power_text(e, "both").replace("\n", "  "),
                      "housekeeping": e.minor})
     return rows
 
@@ -269,7 +360,8 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
                         figsize=None, fontsize: float = 10.0, channel_fontsize: float | None = None,
                         legend_fontsize: float | None = None, title_fontsize: float | None = None,
                         fontfamily: str | None = None, linewidth: float = 1.0,
-                        pulse_height: float = 1.0, shaped_style: str = "rounded"):
+                        pulse_height: float = 1.0, shaped_style: str = "rounded",
+                        show_power: str = "none", pulse_types: dict | None = None):
     """Draw ``seq`` as a pulse-sequence diagram. Returns ``(fig, ax)``.
 
     Parameters
@@ -333,6 +425,14 @@ def plot_pulse_sequence(seq: PulseSequence, ax=None, *, colors: dict | None = No
     pulse_height
         Multiplies the height of every pulse, gradient and the acquisition
         by the same factor.
+    show_power
+        ``"W"``, ``"dB"`` or ``"both"``: write each pulse's power under it, where the experiment
+        records it (Bruker ``plw`` / ``pl`` and ``spw`` / ``sp``; 0 dB = 1 W). ``"none"`` (default).
+    pulse_types
+        ``{uid or name: type}`` -- draw a pulse as one of :data:`PULSE_TYPES` (``"hard"``,
+        ``"shaped"``, ``"adiabatic"``, ``"ramp_up"``, ``"ramp_down"``) whatever the file says.
+        Adiabatic and ramp pulses found from their shape name are drawn as such by default: a
+        ramp is a quadrilateral whose top edge rises or falls linearly.
     """
     import matplotlib
     kw = dict(locals())
@@ -357,7 +457,8 @@ def _draw_pulse_sequence(seq, ax, colors, show_pulse_names, show_delay_names, sh
                          renames, channel_labels, legend_labels, acquire_separate, legend,
                          legend_position, title, title_text, title_position, note, figsize,
                          fontsize, channel_fontsize, legend_fontsize, title_fontsize, fontfamily,
-                         linewidth, pulse_height, shaped_style="rounded"):
+                         linewidth, pulse_height, shaped_style="rounded", show_power="none",
+                         pulse_types=None):
     import matplotlib.pyplot as plt
     from matplotlib.patches import Polygon, Rectangle
     import numpy as np
@@ -369,6 +470,28 @@ def _draw_pulse_sequence(seq, ax, colors, show_pulse_names, show_delay_names, sh
         raise ValueError(f"delay_style must be one of {DELAY_STYLES}, got {style!r}.")
     if shaped_style not in SHAPED_STYLES:
         raise ValueError(f"shaped_style must be one of {SHAPED_STYLES}, got {shaped_style!r}.")
+    if show_power not in POWER_MODES:
+        raise ValueError(f"show_power must be one of {POWER_MODES}, got {show_power!r}.")
+    pulse_types = dict(pulse_types or {})
+    for v in pulse_types.values():
+        if v not in PULSE_TYPES:
+            raise ValueError(f"pulse type must be one of {PULSE_TYPES}, got {v!r}.")
+
+    def how_drawn(e):
+        """``(kind, shape_kind, ramp)`` of a pulse: the file's, unless the user chose a type."""
+        over = pulse_types.get(e.uid, pulse_types.get(e.label))
+        if over is None:
+            sk, rp = getattr(e, "shape_kind", "shaped"), getattr(e, "ramp", None)
+            if e.kind == "shaped" and sk == "shaped" and e.shape and not getattr(e, "shape_name", None):
+                sk, rp = classify_shape(e.shape)       # a sequence read without its experiment
+            return e.kind, sk, rp
+        if over == "hard":
+            return "hard", "shaped", None
+        if over == "shaped":
+            return "shaped", "shaped", None
+        if over == "adiabatic":
+            return "shaped", "adiabatic", None
+        return "shaped", "ramp", ((RAMP_LOW, 1.0) if over == "ramp_up" else (1.0, RAMP_LOW))
     if legend_position not in LEGEND_POSITIONS:
         raise ValueError(f"legend_position must be one of {LEGEND_POSITIONS}, got {legend_position!r}.")
     if title_position not in TITLE_POSITIONS:
@@ -517,12 +640,35 @@ def _draw_pulse_sequence(seq, ax, colors, show_pulse_names, show_delay_names, sh
             continue
         x0, x1 = lay.x0[e.uid], lay.x1[e.uid]
         y = row_y.get(e.channel, 0.0)
-        c = col.get(e.kind, "#444")
+        ek, sk, rp = how_drawn(e) if e.kind in ("hard", "shaped") else (e.kind, "shaped", None)
+        c = col.get(sk if ek == "shaped" and sk in ("adiabatic", "ramp") else ek, "#444")
         xm = 0.5 * (x0 + x1)
-        if e.kind == "hard":
+        if show_power != "none" and ek in ("hard", "shaped"):
+            ptxt = power_text(e, show_power)
+            if ptxt:
+                ax.text(xm, y - 0.1, ptxt, ha="center", va="top", fontsize=fontsize * 0.75,
+                        color="#444", zorder=5, linespacing=1.0)
+        if ek == "hard":
             ax.add_patch(Rectangle((x0, y), max(x1 - x0, 0.05), hp, fc=c, ec=c, lw=0.8 * lw, zorder=3))
             put_label(e, xm, y, hp, c)
-        elif e.kind == "shaped" and shaped_style != "rounded":
+        elif ek == "shaped" and sk == "ramp":
+            # a quadrilateral: three edges at right angles, the fourth (top) rising or falling
+            w = max(x1 - x0, 0.05)
+            lo, hi = rp if rp else (RAMP_LOW, 1.0)
+            ax.add_patch(Polygon([(x0, y), (x0 + w, y), (x0 + w, y + hp * hi), (x0, y + hp * lo)],
+                                 closed=True, fc=c, ec=c, lw=0.8 * lw, zorder=3, joinstyle="miter"))
+            put_label(e, xm, y, hp * max(lo, hi), c)
+        elif ek == "shaped" and sk == "adiabatic":
+            # a smoothed plateau, hatched: the amplitude is flat while the frequency sweeps
+            from matplotlib.colors import to_rgba
+            xs = np.linspace(x0, x1, 80)
+            u = (xs - xm) / max((x1 - x0) / 2, 1e-6)
+            ys = y + hp * np.tanh(6.0 * (1.0 - np.abs(u)))
+            ax.add_patch(Polygon(np.column_stack([np.r_[xs, xs[0]], np.r_[ys, y]]), closed=True,
+                                 fc=to_rgba(c, 0.25), ec=c, hatch="////", lw=0.8 * lw, zorder=3,
+                                 joinstyle="round"))
+            put_label(e, xm, y, hp, c)
+        elif ek == "shaped" and shaped_style != "rounded":
             w = max(x1 - x0, 0.05)
             if shaped_style == "shaded":                 # lower-right half filled, upper-left open
                 ax.add_patch(Polygon([(x0, y), (x0 + w, y), (x0 + w, y + hp)], closed=True,
@@ -534,7 +680,7 @@ def _draw_pulse_sequence(seq, ax, colors, show_pulse_names, show_delay_names, sh
                                         color=c, lw=0.8 * lw, shrinkA=0, shrinkB=0,
                                         mutation_scale=8.0 * max(lw, 0.6)))
             put_label(e, xm, y, hp, c)
-        elif e.kind == "shaped":
+        elif ek == "shaped":
             n = 60
             xs = np.linspace(x0, x1, n)
             a = max((x1 - x0) / 2, 1e-6)
@@ -607,8 +753,15 @@ def _draw_pulse_sequence(seq, ax, colors, show_pulse_names, show_delay_names, sh
         _fit_texts_inside_right_edge(ax, loop_texts)
 
     if legend and legend_position != "none":
-        present = [k for k in ("hard", "shaped", "decoupling", "gradient", "acquire")
-                   if any(e.kind == k for e in seq.events)]
+        drawn = set()
+        for e in seq.events:
+            if e.kind in ("hard", "shaped"):
+                k_, s_, _r = how_drawn(e)
+                drawn.add(s_ if k_ == "shaped" and s_ in ("adiabatic", "ramp") else k_)
+            else:
+                drawn.add(e.kind)
+        present = [k for k in ("hard", "shaped", "adiabatic", "ramp", "decoupling", "gradient",
+                               "acquire") if k in drawn]
         if present:
             from matplotlib.patches import Patch
             names = legend_labels or {}

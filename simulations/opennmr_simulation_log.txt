@@ -1,0 +1,133 @@
+openNMR simulation log
+======================
+
+Every simulation run in openNMR, with its inputs. Written from
+opennmr_simulation_history.json after every run; edits here are not read back --
+use File ▸ Simulation History in openNMR to restore a run's inputs.
+
+------------------------------------------------------------------------
+Monday 12 October 2026 (UTC+02:00)
+------------------------------------------------------------------------
+08:43:51–08:45:41  #1 Shaped pulse (Bloch) (run 10 times; the last run is shown)
+    Inputs:
+      Shape: WURST-n (adiabatic)
+      Sweep width: 4000.0 kHz
+      HS β: 5.30
+      HS n: 1
+      WURST n: 20
+      tanh/tan ξ: 10.00
+      tanh/tan tan κ: 20.00
+      Duration: 16.000 µs
+      Time step: auto
+      Power from: Peak B1
+      Q₀: 5.00
+      Flip angle: 90.0°
+      Peak B1: 150000.0 Hz
+      TX amplitude: 0.1000
+      Hard 90° width: 10.00 µs
+      Hard 90° amplitude: 1.0000
+      LP max fraction: 1.0000
+      ± Offset: auto
+      Points: 401
+      Power scales: 5
+    Result:
+      Peak B1 = 150000.0 Hz (as entered). Time step 0.025 µs (auto, 640 steps).
+      On resonance: Mz = -1.000, |Mxy| = 0.002.
+      Adiabaticity: Q₀ = 0.565 at the centre, 0.231 at worst over the central 80% of the sweep.
+      inverted (Mz < −0.9) from -1.380 to 1.400 MHz (2.780 MHz wide).
+
+08:53:49  #2 Shaped pulse (Bloch)
+    Inputs:
+      Shape: WURST-n (adiabatic)
+      Sweep width: 4000.0 kHz
+      HS β: 5.30
+      HS n: 1
+      WURST n: 20
+      tanh/tan ξ: 10.00
+      tanh/tan tan κ: 20.00
+      Duration: 16.000 µs
+      Time step: auto
+      Power from: Peak B1
+      Q₀: 5.00
+      Flip angle: 90.0°
+      Peak B1: 150000.0 Hz
+      TX amplitude: 0.1000
+      Hard 90° width: 10.00 µs
+      Hard 90° amplitude: 1.0000
+      LP max fraction: 1.0000
+      ± Offset: auto
+      Points: 401
+      Power scales: 5
+    Result:
+      Peak B1 = 150000.0 Hz (as entered). Time step 0.025 µs (auto, 640 steps).
+      On resonance: Mz = -1.000, |Mxy| = 0.002.
+      Adiabaticity: Q₀ = 0.565 at the centre, 0.231 at worst over the central 80% of the sweep.
+      inverted (Mz < −0.9) from -1.380 to 1.400 MHz (2.780 MHz wide).
+
+09:24:51  #3 pNMR (CIF)
+    Inputs:
+      cif_filename: C:\Users\quark\Documents\Calculations\Na2MFeCN6\CIF_Na2MnFeCN6_Gebert_2021.cif
+      atom_of_interest: Na+
+      shell_bins: [["NN", 0.0, 4.4], ["NNN", 4.4, 4.9], ["N3N", 4.9, 5.099]]
+      shift_dict: {"NN": {"Na+": 0.0, "Mn2.40+": 8.0, "Fe2+": 0.0}, "NNN": {"Na+": 0.0, "Mn2.40+": -3.0, "Fe2+": 0.0}, "N3N": {"Na+": 0.0, "Mn2.40+": 2.0, "Fe2+": 0.0}}
+      ignore_species: ["C0+", "N-", "O2-"]
+      ignore_sites: []
+      sites_of_interest: None
+      nuclide: 23Na
+      B0_tesla: 11.7
+      broadening: 1.0
+      n_points: 8192
+      xlims: None
+      weight_by_occupancy: True
+    Result:
+      kind: pnmr_cif
+      format: opennmr.pnmr_simulation_parameters
+      version: 1
+      cif_filename: C:\Users\quark\Documents\Calculations\Na2MFeCN6\CIF_Na2MnFeCN6_Gebert_2021.cif
+      atom_of_interest: Na+
+      sites_of_interest: None
+      ignore_species: ["C0+", "N-", "O2-"]
+      ignore_sites: []
+      shell_bins: [["NN", 0.0, 4.4], ["NNN", 4.4, 4.9], ["N3N", 4.9, 5.099]]
+      shift_dict: {"NN": {"Na+": 0.0, "Mn2.40+": 8.0, "Fe2+": 0.0}, "NNN": {"Na+": 0.0, "Mn2.40+": -3.0, "Fe2+": 0.0}, "N3N": {"Na+": 0.0, "Mn2.40+": 2.0, "Fe2+": 0.0}}
+      nuclide: 23Na
+      B0_tesla: 11.7
+      offset_ppm: 0
+      gamma_MHz_per_T: None
+      broadening_sigma_ppm: 1
+      n_points: 8192
+      xlims: None
+      weight_by_occupancy: True
+      output_dir: C:\Users\quark\Documents\Calculations\Na2MFeCN6\pnmr_simulation
+      BF1_MHz: 131.853417
+      SFO1_MHz: 131.853417
+      n_sites: 4
+      n_configurations: 12
+
+------------------------------------------------------------------------
+Wednesday 21 October 2026 (UTC+02:00)
+------------------------------------------------------------------------
+13:31:46  #4 CSA, Quad & J-coupling
+    Inputs:
+      Nucleus: 23Na
+      Larmor frequency: 132.2938 MHz
+      Regime: MAS (centreband + sidebands)
+      MAS rate: 100000 Hz
+      Transitions: All transitions
+      Quadrupolar theory: Second-order perturbation
+      Orientations: auto
+      Axis: on
+      Axis min: -6727.52 ppm
+      Axis max: 5948.18 ppm
+      Axis points: 8192
+      Also plot each site (Simulation plot): on
+      Compare levels of theory (first, second, exact): off
+      Site Site 1: δiso 33.3556 ppm; amount 5.89176e+09; FWHM 33.0498 ppm (pseudo_voigt); CSA Δ -1215.45 ppm, η 0.000349427 (Haeberlen), Euler (0.0, 0.0, 0.0); C_Q 0.81248 MHz, η_Q 1.35095e-05
+      Site Site 2: nucleus 63Cu; δiso 1961.95 ppm; amount 2.73071e+08; FWHM 86.0613 ppm (pseudo_voigt)
+    Result:
+      kind: combined
+      settings: {"larmor_Hz": 132293800.0, "mas_Hz": 100000.0, "order": "second", "transitions": "all", "rotor_angle": "magic", "n_zcw": 4181, "n_gamma": null, "use_symmetry":…
+      log: Site 1 (23Na, I = 1.5): δiso 33.3556 ppm; CSA Δ -1215.45 ppm, η 0.000349427; quadrupolar C_Q 0.81248 MHz, η_Q 1.35095e-05; amount 5.89176e+09, FWHM 33.0498 ppm pseudo_voigt
+      Site 2 (63Cu, I = 1.5): δiso 1961.95 ppm; amount 2.73071e+08, FWHM 86.0613 ppm pseudo_voigt
+      MAS 100 kHz, nu0 = 132.2938 MHz, quadrupolar second-order, transitions all, Site 1: 5797 orientations (octant), Site 2: 5797 orientations (octant).
+      63Cu on the 23Na scale: its 0 ppm is at +2403.34 ppm (ratio 1.002403343, from the IUPAC frequency ratios).

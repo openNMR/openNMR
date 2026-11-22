@@ -11401,7 +11401,8 @@ def test_main_window_applications_is_its_own_top_level_button(qapp):
     # DNP, Signal-to-Noise and CP Build-up moved to Integrate (2026-10-16).
     titles = [s.title() for s in sections]
     assert titles[:2] == ["eNMR", "Imaging"]
-    assert len(titles) == 3 and titles[2].startswith("Electrochemistry")   # 2026-11-20
+    assert len(titles) == 4 and titles[2].startswith("Electrochemistry")   # 2026-11-20
+    assert titles[3].startswith("Plot other data")                          # 2026-11-22
 
     enmr_section = _enclosing_collapsible_section(window.enmr_voltage_label)
     imaging_section = _enclosing_collapsible_section(window.imaging_max_gradient_spin)

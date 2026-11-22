@@ -121,8 +121,7 @@ def test_ex_situ_table_and_missing_value_message(window):
 def test_no_spectra_chosen_says_so(window):
     p = window.echem_panel
     p.load()
-    window.spectrum_list.clearSelection()
-    p.refresh()
+    p.remove_spectra(None)          # an emptied plot list (every spectrum is in it until edited)
     p.plot()
     assert "No spectra chosen" in p.report_label.text()
 

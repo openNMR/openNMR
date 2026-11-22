@@ -99,6 +99,8 @@ def test_apply_tile_goes_when_enmr_and_imaging_are_both_off_and_returns(window):
     window._set_section_shown("imaging", False)
     assert _apply_tile_visible(window)             # Electrochemistry is still on it
     window._set_section_shown("echem", False)
+    assert _apply_tile_visible(window)             # Plot other data is still on it
+    window._set_section_shown("other_plot", False)
     assert not _apply_tile_visible(window)
     assert not window._window_panel_actions["Apply"].isEnabled()
 
@@ -114,6 +116,7 @@ def test_apply_tile_via_the_settings_checkboxes(window):
     window.section_shown_checkboxes["enmr"].setChecked(False)
     window.section_shown_checkboxes["imaging"].setChecked(False)
     window.section_shown_checkboxes["echem"].setChecked(False)
+    window.section_shown_checkboxes["other_plot"].setChecked(False)
     assert not _apply_tile_visible(window)
     window.section_shown_checkboxes["enmr"].setChecked(True)
     assert _apply_tile_visible(window)
@@ -126,7 +129,7 @@ def test_apply_tile_stays_hidden_after_a_restart(qapp):
     path = MainWindow._UI_SETTINGS_PATH
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
-        json.dump({"hidden_sections": ["enmr", "imaging", "echem"]}, handle)
+        json.dump({"hidden_sections": ["enmr", "imaging", "echem", "other_plot"]}, handle)
     window = MainWindow()
     try:
         assert not _apply_tile_visible(window)

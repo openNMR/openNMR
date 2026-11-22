@@ -137,7 +137,7 @@ from .referencing import transfer_sr, transfer_sr_between
 from .slice_phase import autophase_slices
 from .slice_labels import slice_labels, relabel_slice
 from . import dnp_polarisation
-from . import echem, echem_plot
+from . import echem, echem_plot, other_plot
 from ..processing.ft import compare_phase_methods
 from . import results_table
 from .drift_correction import (
@@ -439,6 +439,7 @@ __all__ = [
     "dnp_polarisation",
     "echem",
     "echem_plot",
+    "other_plot",
     "compare_phase_methods", "results_table",
     "add_inset", "remove_insets", "insets_of", "INSET_DEFAULTS", "INSET_CORNERS",
     "integral_labels", "add_integral_labels", "remove_integral_labels", "normalised_integrals",

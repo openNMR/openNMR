@@ -1053,6 +1053,10 @@ class MplCanvas(QWidget):
     #: reports the drop: checking the nucleus and asking the user are
     #: the owner's, which knows what the rows are.
     externalProjectionDropped = Signal(list, str)
+    #: Rows of the Open experiments list dropped on the plot itself (not on a projection strip).
+    experimentRowsDropped = Signal(list)
+    #: Files / folders dragged in from the file explorer / Finder and dropped on the plot.
+    pathsDropped = Signal(list)
 
     #: Qt's own payload type for a drag out of a QListWidget -- the
     #: Open experiments list's.
@@ -1284,6 +1288,11 @@ class MplCanvas(QWidget):
         self._axis_label_overrides: dict[int, dict] = {}
         self._last_right_click_axes = None
         self._drop_highlight = None  # (Axes, previous facecolor) while hovering a strip
+        #: Set by the window for the plots that take dropped experiments (``experimentRowsDropped``)
+        #: and files / folders (``pathsDropped``). Off by default: a canvas that does not take
+        #: files leaves them to carry on up to the window's own folder drop.
+        self.accept_row_drops = False
+        self.accept_file_drops = False
         self.canvas.setAcceptDrops(True)
         self.canvas.installEventFilter(self)
 
@@ -3178,12 +3187,34 @@ class MplCanvas(QWidget):
         if kind == QEvent.Type.DragLeave:
             self._set_drop_highlight(None)
             return False
-        if not event.mimeData().hasFormat(self._LIST_DRAG_MIME):
+        mime = event.mimeData()
+        if mime.hasUrls() and not mime.hasFormat(self._LIST_DRAG_MIME):
+            if not self.accept_file_drops:
+                event.ignore()
+                return False
+            # Files or folders from the file explorer / Finder: opened by the window.
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            if kind == QEvent.Type.Drop:
+                paths = [u.toLocalFile() for u in mime.urls() if u.isLocalFile()]
+                if paths:
+                    QTimer.singleShot(0, lambda: self._emit_safely(self.pathsDropped, paths))
+            return True
+        if not mime.hasFormat(self._LIST_DRAG_MIME):
             event.ignore()
             return False
         target = self.projection_drop_target(event.position())
-        if target is None:
+        if target is None and not self.accept_row_drops:
             event.ignore()
+            return True
+        if target is None:
+            # Not over a projection strip: the dragged experiments go onto the plot itself.
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            if kind == QEvent.Type.Drop:
+                rows = _rows_from_list_drag(mime, self._LIST_DRAG_MIME)
+                if rows:
+                    QTimer.singleShot(0, lambda: self._emit_safely(self.experimentRowsDropped, rows))
             return True
         event.setDropAction(Qt.DropAction.CopyAction)
         event.accept()
@@ -3198,6 +3229,14 @@ class MplCanvas(QWidget):
         else:
             self._set_drop_highlight(target)
         return True
+
+    @staticmethod
+    def _emit_safely(signal, payload) -> None:
+        """Emit a deferred drop signal, unless the canvas was deleted in the meantime."""
+        try:
+            signal.emit(payload)
+        except RuntimeError:
+            pass
 
     # -- projection strip style ----------------------------------------
 

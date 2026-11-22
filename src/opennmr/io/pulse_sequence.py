@@ -77,6 +77,17 @@ class Event:
     shape: str | None = None
     phase: str | None = None
     uid: int = -1
+    #: The power parameter this pulse uses, as the file names it (``pl1``, ``plw1``, ``spw1``);
+    #: Bruker only. Filled in by :func:`opennmr.notebook.pulse_sequence.pulse_sequence_for`:
+    #: ``power_w`` (watts), ``power_db`` (attenuation, dB: 0 dB = 1 W) and ``shape_name``.
+    power: str | None = None
+    power_w: float | None = None
+    power_db: float | None = None
+    shape_name: str | None = None
+    #: How a shaped pulse is drawn: ``"shaped"``, ``"adiabatic"`` or ``"ramp"``; ``ramp`` is
+    #: ``(start, end)`` as fractions of the full amplitude (rising when end > start).
+    shape_kind: str = "shaped"
+    ramp: tuple | None = None
 
     @property
     def duration(self) -> float:
@@ -174,14 +185,25 @@ class _Timeline:
         self._open_dec: dict[str, Event] = {}
         self._open_grad: dict = {}
         self.recording = True
+        #: the power parameter last set on each channel (``pl1:f1``), for hard pulses and
+        #: for shaped ones (``spw1:f1``) -- what a pulse uses when it names none itself
+        self.power_state: dict = {}
+        self.shaped_power_state: dict = {}
 
     def add(self, kind, channel, label="", *, expr="", dur=None, shape=None,
-            phase=None, minor=False, advance=True) -> Event:
+            phase=None, minor=False, advance=True, power=None) -> Event:
         d = dur if dur is not None else NOMINAL[kind]
         # Every delay is just a delay: nothing is hidden for being short
         # (fast MAS experiments live on delays of a few microseconds).
         ev = Event(kind, channel, label, expr, self.t, self.t + d,
                    dur, False, shape, phase)
+        if kind == "hard":
+            ev.power = power or self.power_state.get(channel)
+        elif kind == "shaped":
+            # a shape in slot spN runs at that slot's own power (spN / spwN) unless it says
+            # otherwise; any other shape at the power last set on its channel
+            own = re.fullmatch(r"sp\d+", shape or "", re.I)
+            ev.power = power or (None if own else self.shaped_power_state.get(channel))
         if self.recording:
             self.events.append(ev)
         if advance:
@@ -470,7 +492,9 @@ def _group_item_specs(toks, ch, consts, user_delays=()):
             if specs and specs[-1]["kind"] != "delay" and specs[-1].get("phase") is None:
                 specs[-1]["phase"] = w
         elif _G_POWER.match(w):
-            pass
+            # "p1 pl1 ph1": the power belongs to the pulse just before it
+            if specs and specs[-1]["kind"] in ("hard", "shaped"):
+                specs[-1]["power"] = w.split(":")[0]
         elif _G_PULSE.match(w) or (first and not (_B_NUM.match(w) or re.fullmatch(r"d\d+|de", lw)
                                                   or lw in user_delays)):
             shape, name = None, w
@@ -649,6 +673,11 @@ def parse_bruker(text, *, constants=None, flags=None, defines=None, name=None,
                 flush()
                 aq = consts.get("aq")
                 tl.add("acquire", "ACQ", "ACQ", expr=w, dur=float(aq) if aq else None)
+            elif re.fullmatch(r"(pl|plw|pldb|sp|spw|spdb)\d+:f\d", lw):
+                # a power set on a channel: what the pulses after it use
+                name, ch = lw.split(":")
+                state = tl.shaped_power_state if name.startswith("sp") else tl.power_state
+                state[ch] = name
             elif re.fullmatch(r"cpd\w*:f\d|cpds?\d*:f\d", lw):
                 tl.open_dec("f" + lw.rsplit("f", 1)[1], lw.split(":")[0], w, at=line_t0)
             elif re.fullmatch(r"do:f\d", lw):

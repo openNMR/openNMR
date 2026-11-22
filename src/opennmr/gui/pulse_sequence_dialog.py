@@ -79,7 +79,7 @@ def saved_draw_options(settings: dict | None, sequence_name: str = "") -> dict:
         opts[key] = value if isinstance(value, type(default)) or (
             isinstance(default, float) and isinstance(value, int)) else default
     for key, allowed in (("legend_position", ps.LEGEND_POSITIONS), ("title_position", ps.TITLE_POSITIONS),
-                         ("shaped_style", ps.SHAPED_STYLES)):
+                         ("shaped_style", ps.SHAPED_STYLES), ("show_power", ps.POWER_MODES)):
         if opts[key] not in allowed:
             opts[key] = PulseSequenceDialog._STYLE_DEFAULTS[key]
     renames = (settings.get("pulse_sequence_renames") or {}).get(sequence_name) or {}
@@ -95,7 +95,8 @@ def saved_draw_options(settings: dict | None, sequence_name: str = "") -> dict:
                 legend_fontsize=float(opts["legend_fontsize"]) or None,
                 title_fontsize=float(opts["title_fontsize"]) or None,
                 linewidth=float(opts["linewidth"]), pulse_height=float(opts["pulse_height"]),
-                shaped_style=opts["shaped_style"],
+                shaped_style=opts["shaped_style"], show_power=opts["show_power"],
+                pulse_types=dict((settings.get("pulse_sequence_types") or {}).get(sequence_name) or {}),
                 title=opts["title"], title_text=opts["title_text"] or None,
                 title_position=opts["title_position"], legend=opts["legend"],
                 legend_position=opts["legend_position"], note=opts["note"])
@@ -113,6 +114,7 @@ class PulseSequenceDialog(QDialog):
         "title": True, "title_text": "", "title_position": "left", "legend": True,
         "legend_position": "below", "note": True, "shaped_style": "rounded",
         "export_width": 0.0, "export_height": 0.0, "export_dpi": 300, "export_format": "pdf",
+        "show_power": "none",
     }
 
     def __init__(self, spectrum=None, settings: dict | None = None, save_settings=None,
@@ -145,10 +147,11 @@ class PulseSequenceDialog(QDialog):
                 isinstance(default, float) and isinstance(value, int)) else default
         for key, allowed in (("legend_position", ps.LEGEND_POSITIONS),
                              ("title_position", ps.TITLE_POSITIONS),
-                             ("shaped_style", ps.SHAPED_STYLES)):
+                             ("shaped_style", ps.SHAPED_STYLES), ("show_power", ps.POWER_MODES)):
             if self._opts[key] not in allowed:
                 self._opts[key] = self._STYLE_DEFAULTS[key]
         self._renames = {"names": {}, "channels": {}, "legend": {}}
+        self._types: dict = {}
 
         root = QVBoxLayout(self)
         top = QHBoxLayout()
@@ -216,7 +219,8 @@ class PulseSequenceDialog(QDialog):
         cbox = QGroupBox("Colours")
         cg = QGridLayout(cbox)
         self.colour_buttons: dict = {}
-        for row, kind in enumerate(("hard", "shaped", "decoupling", "gradient", "acquire", "delay")):
+        for row, kind in enumerate(("hard", "shaped", "adiabatic", "ramp", "decoupling", "gradient",
+                                    "acquire", "delay")):
             cg.addWidget(QLabel(ps.KIND_NAMES[kind]), row, 0)
             b = QPushButton()
             b.setFixedWidth(60)
@@ -226,7 +230,7 @@ class PulseSequenceDialog(QDialog):
             self.colour_buttons[kind] = b
         reset = QPushButton("Reset colours")
         reset.clicked.connect(self._reset_colours)
-        cg.addWidget(reset, 6, 0, 1, 2)
+        cg.addWidget(reset, 8, 0, 1, 2)
         sl.addWidget(cbox)
         # names
         nbox = QGroupBox("Names shown")
@@ -292,6 +296,20 @@ class PulseSequenceDialog(QDialog):
         self.shaped_style_combo.currentIndexChanged.connect(
             lambda _i: self._set_option("shaped_style", self.shaped_style_combo.currentData()))
         ol.addWidget(self.shaped_style_combo)
+        ol.addWidget(QLabel("Show the power of each pulse:"))
+        self.show_power_combo = QComboBox()
+        for key, text in (("none", "Not shown"), ("W", "In watts (W)"),
+                          ("dB", "In dB (attenuation, 0 dB = 1 W)"), ("both", "Watts and dB")):
+            self.show_power_combo.addItem(text, key)
+        self.show_power_combo.setCurrentIndex(
+            max(self.show_power_combo.findData(self._opts["show_power"]), 0))
+        self.show_power_combo.setToolTip(
+            "Write the power each pulse was run at under it, from the experiment's own "
+            "parameters (Bruker plw / pl and spw / sp). Nothing is written for a pulse whose "
+            "power the experiment does not record.")
+        self.show_power_combo.currentIndexChanged.connect(
+            lambda _i: self._set_option("show_power", self.show_power_combo.currentData()))
+        ol.addWidget(self.show_power_combo)
         sl.addWidget(obox)
         # conditional blocks
         self.flag_box = QGroupBox("Conditional blocks (#ifdef / flags)")
@@ -538,6 +556,22 @@ class PulseSequenceDialog(QDialog):
         reset.clicked.connect(self._reset_renames)
         rl.addWidget(reset)
         sl.addWidget(rbox)
+        # how each pulse is drawn
+        pbox = QGroupBox("Pulse types (drawing only)")
+        pl_ = QVBoxLayout(pbox)
+        phint = QLabel("Adiabatic and ramp pulses are recognised from their shape file's name "
+                       "(chirp, WURST, ramp …). Choose a type here to draw a pulse differently: a "
+                       "ramp pulse is a quadrilateral whose top edge rises or falls.")
+        phint.setWordWrap(True)
+        phint.setStyleSheet("color:#666;")
+        pl_.addWidget(phint)
+        self.type_table = QTableWidget(0, 2)
+        self.type_table.setHorizontalHeaderLabels(["Pulse", "Drawn as"])
+        self.type_table.verticalHeader().setVisible(False)
+        self.type_table.horizontalHeader().setStretchLastSection(True)
+        self.type_table.setMinimumHeight(120)
+        pl_.addWidget(self.type_table)
+        sl.addWidget(pbox)
         # text
         tbox = QGroupBox("Text")
         tg = QGridLayout(tbox)
@@ -655,6 +689,60 @@ class PulseSequenceDialog(QDialog):
         stored = (self._settings.get("pulse_sequence_renames") or {}).get(self._renames_key()) or {}
         self._renames = {g: dict(stored.get(g) or {}) for g in ("names", "channels", "legend")}
         self._rebuild_renames()
+        self._load_types()
+
+    # -- how each pulse is drawn (by pulse name) ----------------------------
+    def _load_types(self) -> None:
+        stored = (self._settings.get("pulse_sequence_types") or {}).get(self._renames_key()) or {}
+        self._types = {str(k): v for k, v in stored.items() if v in self._ps.PULSE_TYPES}
+        self._rebuild_types()
+
+    def _save_types(self) -> None:
+        book = self._settings.setdefault("pulse_sequence_types", {})
+        if self._types:
+            book[self._renames_key()] = dict(self._types)
+        else:
+            book.pop(self._renames_key(), None)
+        self._save_settings()
+
+    def _rebuild_types(self) -> None:
+        t = self.type_table
+        self._building = True
+        t.setRowCount(0)
+        seen = set()
+        for e in (self.sequence.events if self.sequence else []):
+            if e.kind not in ("hard", "shaped") or not e.label or e.label in seen:
+                continue
+            seen.add(e.label)
+            r = t.rowCount()
+            t.insertRow(r)
+            what = "shaped" if e.kind == "shaped" else "hard"
+            shape = getattr(e, "shape_name", None)
+            if e.kind == "shaped" and getattr(e, "shape_kind", "shaped") != "shaped":
+                what = e.shape_kind
+            item = QTableWidgetItem(f"{e.label}  ({what}{', ' + shape if shape else ''})")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            t.setItem(r, 0, item)
+            combo = QComboBox()
+            combo.addItem("As in the file", "")
+            for key in self._ps.PULSE_TYPES:
+                combo.addItem(self._ps.PULSE_TYPE_NAMES[key], key)
+            combo.setCurrentIndex(max(combo.findData(self._types.get(e.label, "")), 0))
+            combo.currentIndexChanged.connect(
+                lambda _i, name=e.label, c=combo: self._on_type_chosen(name, c.currentData()))
+            t.setCellWidget(r, 1, combo)
+        t.resizeColumnToContents(0)
+        self._building = False
+
+    def _on_type_chosen(self, name: str, kind: str) -> None:
+        if self._building:
+            return
+        if kind:
+            self._types[name] = kind
+        else:
+            self._types.pop(name, None)
+        self._save_types()
+        self._redraw(keep_view=True)
 
     def _save_renames(self) -> None:
         book = self._settings.setdefault("pulse_sequence_renames", {})
@@ -683,8 +771,11 @@ class PulseSequenceDialog(QDialog):
             chans = seq.channels or ["f1"]
             for c in chans:
                 rows.append(("channels", c, f"channel {c}" + (f"  ({nuc[c]})" if c in nuc else "")))
-            for k in ("hard", "shaped", "decoupling", "gradient", "acquire"):
-                if any(e.kind == k for e in seq.events):
+            kinds = {e.kind for e in seq.events}
+            kinds |= {e.shape_kind for e in seq.events
+                      if e.kind == "shaped" and getattr(e, "shape_kind", "shaped") != "shaped"}
+            for k in ("hard", "shaped", "adiabatic", "ramp", "decoupling", "gradient", "acquire"):
+                if k in kinds:
                     rows.append(("legend", k, f"legend: {self._ps.KIND_NAMES[k]}"))
         for group, key, text in rows:
             r = t.rowCount()
@@ -755,6 +846,7 @@ class PulseSequenceDialog(QDialog):
                     linewidth=float(self._opts["linewidth"]),
                     pulse_height=float(self._opts["pulse_height"]),
                     shaped_style=self._opts["shaped_style"],
+                    show_power=self._opts["show_power"], pulse_types=dict(self._types),
                     title=self._opts["title"],
                     title_text=self._opts["title_text"] or None,
                     title_position=self._opts["title_position"],

@@ -1,0 +1,564 @@
+{
+ "opennmr_simulation_journal_version": 1,
+ "entries": [
+  {
+   "id": 1,
+   "time": "2026-10-12T08:43:51+02:00",
+   "runs": 10,
+   "panel": "bloch",
+   "label": "Shaped pulse (Bloch)",
+   "inputs": {
+    "widgets": {
+     "bloch_shape_combo": {
+      "kind": "combo",
+      "value": "WURST",
+      "text": "WURST-n (adiabatic)",
+      "display": "WURST-n (adiabatic)",
+      "label": "Shape"
+     },
+     "bloch_sweep_spin": {
+      "kind": "spin",
+      "value": 4000.0,
+      "display": "4000.0 kHz",
+      "label": "Sweep width"
+     },
+     "bloch_hs_beta_spin": {
+      "kind": "spin",
+      "value": 5.3,
+      "display": "5.30",
+      "label": "HS β"
+     },
+     "bloch_hs_n_spin": {
+      "kind": "spin",
+      "value": 1.0,
+      "display": "1",
+      "label": "HS n"
+     },
+     "bloch_wurst_n_spin": {
+      "kind": "spin",
+      "value": 20.0,
+      "display": "20",
+      "label": "WURST n"
+     },
+     "bloch_tanh_xi_spin": {
+      "kind": "spin",
+      "value": 10.0,
+      "display": "10.00",
+      "label": "tanh/tan ξ"
+     },
+     "bloch_tanh_kappa_spin": {
+      "kind": "spin",
+      "value": 20.0,
+      "display": "20.00",
+      "label": "tanh/tan tan κ"
+     },
+     "bloch_duration_spin": {
+      "kind": "spin",
+      "value": 16.0,
+      "display": "16.000 µs",
+      "label": "Duration"
+     },
+     "bloch_time_step_spin": {
+      "kind": "spin",
+      "value": 0.0,
+      "display": "auto",
+      "label": "Time step"
+     },
+     "bloch_power_mode_combo": {
+      "kind": "combo",
+      "value": "b1",
+      "text": "Peak B1",
+      "display": "Peak B1",
+      "label": "Power from"
+     },
+     "bloch_q_spin": {
+      "kind": "spin",
+      "value": 5.0,
+      "display": "5.00",
+      "label": "Q₀"
+     },
+     "bloch_flip_spin": {
+      "kind": "spin",
+      "value": 90.0,
+      "display": "90.0°",
+      "label": "Flip angle"
+     },
+     "bloch_b1_spin": {
+      "kind": "spin",
+      "value": 150000.0,
+      "display": "150000.0 Hz",
+      "label": "Peak B1"
+     },
+     "bloch_tx_spin": {
+      "kind": "spin",
+      "value": 0.1,
+      "display": "0.1000",
+      "label": "TX amplitude"
+     },
+     "bloch_hard_width_spin": {
+      "kind": "spin",
+      "value": 10.0,
+      "display": "10.00 µs",
+      "label": "Hard 90° width"
+     },
+     "bloch_hard_amp_spin": {
+      "kind": "spin",
+      "value": 1.0,
+      "display": "1.0000",
+      "label": "Hard 90° amplitude"
+     },
+     "bloch_lp_spin": {
+      "kind": "spin",
+      "value": 1.0,
+      "display": "1.0000",
+      "label": "LP max fraction"
+     },
+     "bloch_offset_spin": {
+      "kind": "spin",
+      "value": 0.0,
+      "display": "auto",
+      "label": "± Offset"
+     },
+     "bloch_n_offsets_spin": {
+      "kind": "spin",
+      "value": 401,
+      "display": "401",
+      "label": "Points"
+     },
+     "bloch_power_scales_edit": {
+      "kind": "line",
+      "value": "5",
+      "display": "5",
+      "label": "Power scales"
+     }
+    }
+   },
+   "inputs_text": [
+    "Shape: WURST-n (adiabatic)",
+    "Sweep width: 4000.0 kHz",
+    "HS β: 5.30",
+    "HS n: 1",
+    "WURST n: 20",
+    "tanh/tan ξ: 10.00",
+    "tanh/tan tan κ: 20.00",
+    "Duration: 16.000 µs",
+    "Time step: auto",
+    "Power from: Peak B1",
+    "Q₀: 5.00",
+    "Flip angle: 90.0°",
+    "Peak B1: 150000.0 Hz",
+    "TX amplitude: 0.1000",
+    "Hard 90° width: 10.00 µs",
+    "Hard 90° amplitude: 1.0000",
+    "LP max fraction: 1.0000",
+    "± Offset: auto",
+    "Points: 401",
+    "Power scales: 5"
+   ],
+   "summary": "Peak B1 = 150000.0 Hz (as entered). Time step 0.025 µs (auto, 640 steps).\nOn resonance: Mz = -1.000, |Mxy| = 0.002.\nAdiabaticity: Q₀ = 0.565 at the centre, 0.231 at worst over the central 80% of the sweep.\ninverted (Mz < −0.9) from -1.380 to 1.400 MHz (2.780 MHz wide).",
+   "updated": "2026-10-12T08:45:41+02:00"
+  },
+  {
+   "id": 2,
+   "time": "2026-10-12T08:53:49+02:00",
+   "runs": 1,
+   "panel": "bloch",
+   "label": "Shaped pulse (Bloch)",
+   "inputs": {
+    "widgets": {
+     "bloch_shape_combo": {
+      "kind": "combo",
+      "value": "WURST",
+      "text": "WURST-n (adiabatic)",
+      "display": "WURST-n (adiabatic)",
+      "label": "Shape"
+     },
+     "bloch_sweep_spin": {
+      "kind": "spin",
+      "value": 4000.0,
+      "display": "4000.0 kHz",
+      "label": "Sweep width"
+     },
+     "bloch_hs_beta_spin": {
+      "kind": "spin",
+      "value": 5.3,
+      "display": "5.30",
+      "label": "HS β"
+     },
+     "bloch_hs_n_spin": {
+      "kind": "spin",
+      "value": 1.0,
+      "display": "1",
+      "label": "HS n"
+     },
+     "bloch_wurst_n_spin": {
+      "kind": "spin",
+      "value": 20.0,
+      "display": "20",
+      "label": "WURST n"
+     },
+     "bloch_tanh_xi_spin": {
+      "kind": "spin",
+      "value": 10.0,
+      "display": "10.00",
+      "label": "tanh/tan ξ"
+     },
+     "bloch_tanh_kappa_spin": {
+      "kind": "spin",
+      "value": 20.0,
+      "display": "20.00",
+      "label": "tanh/tan tan κ"
+     },
+     "bloch_duration_spin": {
+      "kind": "spin",
+      "value": 16.0,
+      "display": "16.000 µs",
+      "label": "Duration"
+     },
+     "bloch_time_step_spin": {
+      "kind": "spin",
+      "value": 0.0,
+      "display": "auto",
+      "label": "Time step"
+     },
+     "bloch_power_mode_combo": {
+      "kind": "combo",
+      "value": "b1",
+      "text": "Peak B1",
+      "display": "Peak B1",
+      "label": "Power from"
+     },
+     "bloch_q_spin": {
+      "kind": "spin",
+      "value": 5.0,
+      "display": "5.00",
+      "label": "Q₀"
+     },
+     "bloch_flip_spin": {
+      "kind": "spin",
+      "value": 90.0,
+      "display": "90.0°",
+      "label": "Flip angle"
+     },
+     "bloch_b1_spin": {
+      "kind": "spin",
+      "value": 150000.0,
+      "display": "150000.0 Hz",
+      "label": "Peak B1"
+     },
+     "bloch_tx_spin": {
+      "kind": "spin",
+      "value": 0.1,
+      "display": "0.1000",
+      "label": "TX amplitude"
+     },
+     "bloch_hard_width_spin": {
+      "kind": "spin",
+      "value": 10.0,
+      "display": "10.00 µs",
+      "label": "Hard 90° width"
+     },
+     "bloch_hard_amp_spin": {
+      "kind": "spin",
+      "value": 1.0,
+      "display": "1.0000",
+      "label": "Hard 90° amplitude"
+     },
+     "bloch_lp_spin": {
+      "kind": "spin",
+      "value": 1.0,
+      "display": "1.0000",
+      "label": "LP max fraction"
+     },
+     "bloch_offset_spin": {
+      "kind": "spin",
+      "value": 0.0,
+      "display": "auto",
+      "label": "± Offset"
+     },
+     "bloch_n_offsets_spin": {
+      "kind": "spin",
+      "value": 401,
+      "display": "401",
+      "label": "Points"
+     },
+     "bloch_power_scales_edit": {
+      "kind": "line",
+      "value": "5",
+      "display": "5",
+      "label": "Power scales"
+     }
+    }
+   },
+   "inputs_text": [
+    "Shape: WURST-n (adiabatic)",
+    "Sweep width: 4000.0 kHz",
+    "HS β: 5.30",
+    "HS n: 1",
+    "WURST n: 20",
+    "tanh/tan ξ: 10.00",
+    "tanh/tan tan κ: 20.00",
+    "Duration: 16.000 µs",
+    "Time step: auto",
+    "Power from: Peak B1",
+    "Q₀: 5.00",
+    "Flip angle: 90.0°",
+    "Peak B1: 150000.0 Hz",
+    "TX amplitude: 0.1000",
+    "Hard 90° width: 10.00 µs",
+    "Hard 90° amplitude: 1.0000",
+    "LP max fraction: 1.0000",
+    "± Offset: auto",
+    "Points: 401",
+    "Power scales: 5"
+   ],
+   "summary": "Peak B1 = 150000.0 Hz (as entered). Time step 0.025 µs (auto, 640 steps).\nOn resonance: Mz = -1.000, |Mxy| = 0.002.\nAdiabaticity: Q₀ = 0.565 at the centre, 0.231 at worst over the central 80% of the sweep.\ninverted (Mz < −0.9) from -1.380 to 1.400 MHz (2.780 MHz wide)."
+  },
+  {
+   "id": 3,
+   "time": "2026-10-12T09:24:51+02:00",
+   "runs": 1,
+   "panel": "pnmr",
+   "label": "pNMR (CIF)",
+   "inputs": {
+    "kwargs": {
+     "cif_filename": "C:\\Users\\quark\\Documents\\Calculations\\Na2MFeCN6\\CIF_Na2MnFeCN6_Gebert_2021.cif",
+     "atom_of_interest": "Na+",
+     "shell_bins": [
+      [
+       "NN",
+       0.0,
+       4.4
+      ],
+      [
+       "NNN",
+       4.4,
+       4.9
+      ],
+      [
+       "N3N",
+       4.9,
+       5.099
+      ]
+     ],
+     "shift_dict": {
+      "NN": {
+       "Na+": 0.0,
+       "Mn2.40+": 8.0,
+       "Fe2+": 0.0
+      },
+      "NNN": {
+       "Na+": 0.0,
+       "Mn2.40+": -3.0,
+       "Fe2+": 0.0
+      },
+      "N3N": {
+       "Na+": 0.0,
+       "Mn2.40+": 2.0,
+       "Fe2+": 0.0
+      }
+     },
+     "ignore_species": [
+      "C0+",
+      "N-",
+      "O2-"
+     ],
+     "ignore_sites": [],
+     "sites_of_interest": null,
+     "nuclide": "23Na",
+     "B0_tesla": 11.7,
+     "broadening": 1.0,
+     "n_points": 8192,
+     "xlims": null,
+     "weight_by_occupancy": true
+    },
+    "extra": {
+     "cif_filename": "C:\\Users\\quark\\Documents\\Calculations\\Na2MFeCN6\\CIF_Na2MnFeCN6_Gebert_2021.cif",
+     "atom_of_interest": "Na+",
+     "shell_bins": "[[\"NN\", 0.0, 4.4], [\"NNN\", 4.4, 4.9], [\"N3N\", 4.9, 5.099]]",
+     "shift_dict": "{\"NN\": {\"Na+\": 0.0, \"Mn2.40+\": 8.0, \"Fe2+\": 0.0}, \"NNN\": {\"Na+\": 0.0, \"Mn2.40+\": -3.0, \"Fe2+\": 0.0}, \"N3N\": {\"Na+\": 0.0, \"Mn2.40+\": 2.0, \"Fe2+\": 0.0}}",
+     "ignore_species": "[\"C0+\", \"N-\", \"O2-\"]",
+     "ignore_sites": "[]",
+     "sites_of_interest": "None",
+     "nuclide": "23Na",
+     "B0_tesla": "11.7",
+     "broadening": "1.0",
+     "n_points": "8192",
+     "xlims": "None",
+     "weight_by_occupancy": "True"
+    }
+   },
+   "inputs_text": [
+    "cif_filename: C:\\Users\\quark\\Documents\\Calculations\\Na2MFeCN6\\CIF_Na2MnFeCN6_Gebert_2021.cif",
+    "atom_of_interest: Na+",
+    "shell_bins: [[\"NN\", 0.0, 4.4], [\"NNN\", 4.4, 4.9], [\"N3N\", 4.9, 5.099]]",
+    "shift_dict: {\"NN\": {\"Na+\": 0.0, \"Mn2.40+\": 8.0, \"Fe2+\": 0.0}, \"NNN\": {\"Na+\": 0.0, \"Mn2.40+\": -3.0, \"Fe2+\": 0.0}, \"N3N\": {\"Na+\": 0.0, \"Mn2.40+\": 2.0, \"Fe2+\": 0.0}}",
+    "ignore_species: [\"C0+\", \"N-\", \"O2-\"]",
+    "ignore_sites: []",
+    "sites_of_interest: None",
+    "nuclide: 23Na",
+    "B0_tesla: 11.7",
+    "broadening: 1.0",
+    "n_points: 8192",
+    "xlims: None",
+    "weight_by_occupancy: True"
+   ],
+   "summary": "kind: pnmr_cif\nformat: opennmr.pnmr_simulation_parameters\nversion: 1\ncif_filename: C:\\Users\\quark\\Documents\\Calculations\\Na2MFeCN6\\CIF_Na2MnFeCN6_Gebert_2021.cif\natom_of_interest: Na+\nsites_of_interest: None\nignore_species: [\"C0+\", \"N-\", \"O2-\"]\nignore_sites: []\nshell_bins: [[\"NN\", 0.0, 4.4], [\"NNN\", 4.4, 4.9], [\"N3N\", 4.9, 5.099]]\nshift_dict: {\"NN\": {\"Na+\": 0.0, \"Mn2.40+\": 8.0, \"Fe2+\": 0.0}, \"NNN\": {\"Na+\": 0.0, \"Mn2.40+\": -3.0, \"Fe2+\": 0.0}, \"N3N\": {\"Na+\": 0.0, \"Mn2.40+\": 2.0, \"Fe2+\": 0.0}}\nnuclide: 23Na\nB0_tesla: 11.7\noffset_ppm: 0\ngamma_MHz_per_T: None\nbroadening_sigma_ppm: 1\nn_points: 8192\nxlims: None\nweight_by_occupancy: True\noutput_dir: C:\\Users\\quark\\Documents\\Calculations\\Na2MFeCN6\\pnmr_simulation\nBF1_MHz: 131.853417\nSFO1_MHz: 131.853417\nn_sites: 4\nn_configurations: 12"
+  },
+  {
+   "id": 4,
+   "time": "2026-10-21T13:31:46+02:00",
+   "runs": 1,
+   "panel": "combined",
+   "label": "CSA, Quad & J-coupling",
+   "inputs": {
+    "widgets": {
+     "nucleus_combo": {
+      "kind": "combo",
+      "value": null,
+      "text": "23Na",
+      "display": "23Na",
+      "label": "Nucleus"
+     },
+     "larmor_spin": {
+      "kind": "spin",
+      "value": 132.2938,
+      "display": "132.2938 MHz",
+      "label": "Larmor frequency"
+     },
+     "regime_combo": {
+      "kind": "combo",
+      "value": "mas",
+      "text": "MAS (centreband + sidebands)",
+      "display": "MAS (centreband + sidebands)",
+      "label": "Regime"
+     },
+     "mas_spin": {
+      "kind": "spin",
+      "value": 100000.0,
+      "display": "100000 Hz",
+      "label": "MAS rate"
+     },
+     "transitions_combo": {
+      "kind": "combo",
+      "value": "all",
+      "text": "All transitions",
+      "display": "All transitions",
+      "label": "Transitions"
+     },
+     "order_combo": {
+      "kind": "combo",
+      "value": "second",
+      "text": "Second-order perturbation",
+      "display": "Second-order perturbation",
+      "label": "Quadrupolar theory"
+     },
+     "orientations_spin": {
+      "kind": "spin",
+      "value": 0,
+      "display": "auto",
+      "label": "Orientations"
+     },
+     "auto_axis_check": {
+      "kind": "check",
+      "value": true,
+      "display": "on",
+      "label": "Axis"
+     },
+     "ppm_min_spin": {
+      "kind": "spin",
+      "value": -6727.52,
+      "display": "-6727.52 ppm",
+      "label": "Axis min"
+     },
+     "ppm_max_spin": {
+      "kind": "spin",
+      "value": 5948.18,
+      "display": "5948.18 ppm",
+      "label": "Axis max"
+     },
+     "points_spin": {
+      "kind": "spin",
+      "value": 8192,
+      "display": "8192",
+      "label": "Axis points"
+     },
+     "show_sites_check": {
+      "kind": "check",
+      "value": true,
+      "display": "on",
+      "label": "Also plot each site (Simulation plot)"
+     },
+     "compare_orders_check": {
+      "kind": "check",
+      "value": false,
+      "display": "off",
+      "label": "Compare levels of theory (first, second, exact)"
+     }
+    },
+    "sites": [
+     {
+      "delta_iso": 33.35563066448142,
+      "label": "Site 1",
+      "amount": 5891757222.764472,
+      "fwhm": 33.049817889134616,
+      "lineshape": "pseudo_voigt",
+      "eta": 0.9999999999,
+      "interactions": [
+       {
+        "type": "csa",
+        "aniso": -1215.4454858263532,
+        "asym": 0.0003494274772345217,
+        "convention": "Haeberlen",
+        "euler": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       {
+        "type": "quadrupolar",
+        "C_Q": 0.8124800086443517,
+        "eta_Q": 1.3509544311491168e-05
+       }
+      ]
+     },
+     {
+      "delta_iso": 1961.9510199161812,
+      "label": "Site 2",
+      "amount": 273071427.86433965,
+      "fwhm": 86.06132690248985,
+      "lineshape": "pseudo_voigt",
+      "eta": 0.34005540690964864,
+      "interactions": [],
+      "isotope": "63Cu"
+     }
+    ],
+    "current": 0,
+    "extra": {
+     "Site Site 1": "δiso 33.3556 ppm; amount 5.89176e+09; FWHM 33.0498 ppm (pseudo_voigt); CSA Δ -1215.45 ppm, η 0.000349427 (Haeberlen), Euler (0.0, 0.0, 0.0); C_Q 0.81248 MHz, η_Q 1.35095e-05",
+     "Site Site 2": "nucleus 63Cu; δiso 1961.95 ppm; amount 2.73071e+08; FWHM 86.0613 ppm (pseudo_voigt)"
+    }
+   },
+   "inputs_text": [
+    "Nucleus: 23Na",
+    "Larmor frequency: 132.2938 MHz",
+    "Regime: MAS (centreband + sidebands)",
+    "MAS rate: 100000 Hz",
+    "Transitions: All transitions",
+    "Quadrupolar theory: Second-order perturbation",
+    "Orientations: auto",
+    "Axis: on",
+    "Axis min: -6727.52 ppm",
+    "Axis max: 5948.18 ppm",
+    "Axis points: 8192",
+    "Also plot each site (Simulation plot): on",
+    "Compare levels of theory (first, second, exact): off",
+    "Site Site 1: δiso 33.3556 ppm; amount 5.89176e+09; FWHM 33.0498 ppm (pseudo_voigt); CSA Δ -1215.45 ppm, η 0.000349427 (Haeberlen), Euler (0.0, 0.0, 0.0); C_Q 0.81248 MHz, η_Q 1.35095e-05",
+    "Site Site 2: nucleus 63Cu; δiso 1961.95 ppm; amount 2.73071e+08; FWHM 86.0613 ppm (pseudo_voigt)"
+   ],
+   "summary": "kind: combined\nsettings: {\"larmor_Hz\": 132293800.0, \"mas_Hz\": 100000.0, \"order\": \"second\", \"transitions\": \"all\", \"rotor_angle\": \"magic\", \"n_zcw\": 4181, \"n_gamma\": null, \"use_symmetry\":…\nlog: Site 1 (23Na, I = 1.5): δiso 33.3556 ppm; CSA Δ -1215.45 ppm, η 0.000349427; quadrupolar C_Q 0.81248 MHz, η_Q 1.35095e-05; amount 5.89176e+09, FWHM 33.0498 ppm pseudo_voigt\nSite 2 (63Cu, I = 1.5): δiso 1961.95 ppm; amount 2.73071e+08, FWHM 86.0613 ppm pseudo_voigt\nMAS 100 kHz, nu0 = 132.2938 MHz, quadrupolar second-order, transitions all, Site 1: 5797 orientations (octant), Site 2: 5797 orientations (octant).\n63Cu on the 23Na scale: its 0 ppm is at +2403.34 ppm (ratio 1.002403343, from the IUPAC frequency ratios)."
+  }
+ ],
+ "next_id": 5
+}

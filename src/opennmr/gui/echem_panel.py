@@ -5,8 +5,8 @@ Load a cycler file (Biologic .mpr/.mpt, or a plain csv/txt table), enter the sam
 and formula, and put the cell curve beside either
 
 * **operando** spectra (a series recorded while the cell cycled): choose the experiments
-  (the rows selected in Open experiments, or a start, stop and step of experiment
-  numbers), and say when the first began on the cycler's clock and how long each took.
+  (a list of your own, filled from Open experiments with Add / Remove; the rows selected
+  in Open experiments; or a start, stop and step of experiment numbers), and say when the first began on the cycler's clock and how long each took.
   The two instruments' clocks are not compared, so the order and timing are the user's;
 * **ex situ** spectra: one value per sample (usually its voltage), the cycle and the
   direction it was stopped in, so the point on the curve is found for you; or
@@ -28,7 +28,7 @@ import pandas as pd
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QMenu, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+    QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QListWidget, QListWidgetItem, QMenu, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -78,6 +78,11 @@ class EchemPanel(QWidget):
         self.link: pd.DataFrame | None = None
         self.plotted = False
         self._entries: list[dict] = []
+        #: The user's own spectrum list (keys of :meth:`_key`), in plotting order. Until the user
+        #: adds or removes something it is every open 1D experiment, so opening experiments after
+        #: loading the cell file just works.
+        self._plot_keys: list[str] = []
+        self._list_touched = False
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -152,9 +157,10 @@ class EchemPanel(QWidget):
         for key, text in _MODES:
             self.mode_combo.addItem(text, key)
         self.mode_combo.currentIndexChanged.connect(self._sync)
-        form.addRow("Beside the cell:", self.mode_combo)
+        form.addRow("Type of data to plot:", self.mode_combo)
 
         self.select_combo = QComboBox()
+        self.select_combo.addItem("The list below (add from Open experiments)", "list")
         self.select_combo.addItem("The rows selected in Open experiments", "selected")
         self.select_combo.addItem("Experiment numbers: start, stop, step", "range")
         self.select_combo.currentIndexChanged.connect(self._sync)
@@ -175,6 +181,7 @@ class EchemPanel(QWidget):
         self.range_widget.setLayout(range_row)
         range_row.setContentsMargins(0, 0, 0, 0)
         form.addRow("Experiments:", self.range_widget)
+        form.addRow(self._build_spectrum_lists())
         self.chosen_label = QLabel("")
         self.chosen_label.setWordWrap(True)
         form.addRow(self.chosen_label)
@@ -236,6 +243,140 @@ class EchemPanel(QWidget):
         form.addRow("Plot:", self.value_cols_edit)
         self.values_edit.editingFinished.connect(self._read_values)
         return box
+
+    def _build_spectrum_lists(self) -> QWidget:
+        """Two lists: the open 1D experiments not yet used, and the spectra that will be plotted
+        (in this order). Add / Remove move experiments between them."""
+        box = QWidget()
+        self._lists_widget = box
+        grid = QHBoxLayout(box)
+        grid.setContentsMargins(0, 0, 0, 0)
+        def make_list(tip):
+            w = QListWidget()
+            w.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+            w.setMinimumHeight(110)
+            w.setToolTip(tip)
+            return w
+        left, right = QVBoxLayout(), QVBoxLayout()
+        left.addWidget(QLabel("Open experiments (1D)"))
+        self.avail_list = make_list("Every open 1D experiment not yet in the plot. Double-click to add.")
+        left.addWidget(self.avail_list)
+        right.addWidget(QLabel("Spectra to plot (in this order)"))
+        self.plot_list = make_list("The spectra that are plotted, top to bottom = first to last. "
+                                   "Double-click to remove.")
+        right.addWidget(self.plot_list)
+        mid = QVBoxLayout()
+        self.add_button = QPushButton("Add →")
+        self.add_all_button = QPushButton("Add all →")
+        self.remove_button = QPushButton("← Remove")
+        self.clear_button = QPushButton("Clear")
+        self.up_button, self.down_button = QPushButton("Up"), QPushButton("Down")
+        self.sort_button = QPushButton("Sort by number")
+        self.sort_button.setToolTip("Order the plot list by the number of each experiment's folder.")
+        for b in (self.add_button, self.add_all_button, self.remove_button, self.clear_button,
+                  self.up_button, self.down_button, self.sort_button):
+            mid.addWidget(b)
+        mid.addStretch(1)
+        grid.addLayout(left, 1)
+        grid.addLayout(mid)
+        grid.addLayout(right, 1)
+        self.add_button.clicked.connect(lambda: self.add_spectra(self._picked(self.avail_list)))
+        self.add_all_button.clicked.connect(lambda: self.add_spectra(None))
+        self.remove_button.clicked.connect(lambda: self.remove_spectra(self._picked(self.plot_list)))
+        self.clear_button.clicked.connect(lambda: self.remove_spectra(None))
+        self.up_button.clicked.connect(lambda: self.move_spectra(-1))
+        self.down_button.clicked.connect(lambda: self.move_spectra(1))
+        self.sort_button.clicked.connect(self.sort_spectra)
+        self.avail_list.itemDoubleClicked.connect(lambda item: self.add_spectra([item.data(Qt.ItemDataRole.UserRole)]))
+        self.plot_list.itemDoubleClicked.connect(lambda item: self.remove_spectra([item.data(Qt.ItemDataRole.UserRole)]))
+        return box
+
+    # ----------------------------------------------------- the user's spectrum list
+    @staticmethod
+    def _key(entry: dict) -> str:
+        return f"{entry.get('path') or ''}|{entry['label']}"
+
+    @staticmethod
+    def _picked(widget) -> list[str]:
+        return [i.data(Qt.ItemDataRole.UserRole) for i in widget.selectedItems()]
+
+    def _current_keys(self) -> list[str]:
+        """The plot list as it stands: before the user's first edit, every open 1D experiment;
+        afterwards their list, less anything since closed."""
+        open_keys = [self._key(e) for e in self._entries]
+        if not self._list_touched:
+            return open_keys
+        return [k for k in self._plot_keys if k in set(open_keys)]
+
+    def _touch(self) -> None:
+        if not self._list_touched:
+            self._list_touched = True
+            self._plot_keys = [self._key(e) for e in self._entries]
+
+    def add_spectra(self, keys: list[str] | None = None) -> None:
+        """Add open experiments (by key; ``None``: all of them) to the end of the plot list."""
+        self._touch()
+        open_keys = [self._key(e) for e in self._entries]
+        have = set(self._current_keys())
+        wanted = open_keys if keys is None else keys
+        self._plot_keys = self._current_keys() + [k for k in wanted if k in open_keys and k not in have]
+        self._after_list_edit()
+
+    def remove_spectra(self, keys: list[str] | None = None) -> None:
+        """Take spectra out of the plot list (``None``: all of them); they stay open."""
+        self._touch()
+        current = self._current_keys()
+        gone = set(current if keys is None else keys)
+        self._plot_keys = [k for k in current if k not in gone]
+        self._after_list_edit()
+
+    def move_spectra(self, step: int) -> None:
+        """Move the chosen rows of the plot list up (``-1``) or down (``1``)."""
+        self._touch()
+        order = self._current_keys()
+        picked = set(self._picked(self.plot_list))
+        idx = [i for i, k in enumerate(order) if k in picked]
+        if not idx:
+            return
+        for i in (idx if step < 0 else reversed(idx)):
+            j = i + step
+            if 0 <= j < len(order) and order[j] not in picked:
+                order[i], order[j] = order[j], order[i]
+        self._plot_keys = order
+        self._after_list_edit(keep=picked)
+
+    def sort_spectra(self) -> None:
+        """Order the plot list by experiment (folder) number; those without one keep their place last."""
+        self._touch()
+        by_key = {self._key(e): e for e in self._entries}
+        def number(k):
+            n = ep.experiment_number(by_key[k].get("path"))
+            return (n is None, n if n is not None else 0)
+        self._plot_keys = sorted(self._current_keys(), key=number)
+        self._after_list_edit()
+
+    def _after_list_edit(self, keep=None) -> None:
+        self._rebuild_lists(keep)
+        if self.select_combo.currentData() != "list":
+            self.select_combo.setCurrentIndex(self.select_combo.findData("list"))   # also syncs
+        else:
+            self._sync()
+
+    def _rebuild_lists(self, keep=None) -> None:
+        by_key = {self._key(e): e for e in self._entries}
+        in_plot = self._current_keys()
+        for widget, keys in ((self.avail_list, [k for k in by_key if k not in set(in_plot)]),
+                             (self.plot_list, in_plot)):
+            widget.blockSignals(True)
+            widget.clear()
+            for k in keys:
+                item = QListWidgetItem(by_key[k]["label"])
+                item.setData(Qt.ItemDataRole.UserRole, k)
+                item.setToolTip(str(by_key[k].get("path") or ""))
+                widget.addItem(item)
+                if widget is self.plot_list and keep and k in keep:
+                    item.setSelected(True)
+            widget.blockSignals(False)
 
     def _build_layout(self) -> QGroupBox:
         box = QGroupBox("3. Layout")
@@ -312,6 +453,7 @@ class EchemPanel(QWidget):
     def refresh(self) -> None:
         """Re-read the spectra of Open experiments."""
         self._entries = list(self._spectra())
+        self._rebuild_lists()
         self._sync()
 
     def _mode(self) -> str:
@@ -329,6 +471,7 @@ class EchemPanel(QWidget):
                 label.setVisible(bool(on))
         show(self.select_combo, spectra)
         show(self.range_widget, ranged)
+        self._lists_widget.setVisible(spectra and self.select_combo.currentData() == "list")
         self.chosen_label.setVisible(spectra)
         for w in (self.time_unit_combo, self.start_edit, self.per_edit, self.gap_edit, self.starts_edit):
             show(w, mode == "operando" or mode == "values")
@@ -365,6 +508,13 @@ class EchemPanel(QWidget):
             if missing:
                 notes.append("Not open: " + ", ".join(map(str, missing[:8])) + (" …" if len(missing) > 8 else "") + ".")
             return chosen, notes
+        if self.select_combo.currentData() == "list":
+            by_key = {self._key(e): e for e in entries}
+            if self._list_touched:
+                gone = [k for k in self._plot_keys if k not in by_key]
+                if gone:
+                    notes.append(f"{len(gone)} listed experiment{'s are' if len(gone) > 1 else ' is'} no longer open.")
+            return [by_key[k] for k in self._current_keys()], notes
         return [e for e in entries if e.get("selected")], notes
 
     def _sync_table(self, chosen) -> None:

@@ -197,6 +197,7 @@ from .snr_panel import SnrPanel
 from .cp_buildup_panel import CpBuildupPanel
 from .dnp_polarisation_panel import DnpPolarisationPanel
 from .echem_panel import EchemPanel
+from .other_plot_panel import OtherPlotPanel
 from .offset_tracker_panel import OffsetTrackerPanel
 from .tensor_view_panel import TensorViewControls
 from .periodic_table_panel import LarmorCalculatorPanel, PeriodicTableView
@@ -899,6 +900,11 @@ class MainWindow(QMainWindow):
         self.canvas.sliceKeepRequested.connect(self._on_slice_keep_requested)
         self.canvas.measurementCompleted.connect(self._on_measurement_completed)
         self.canvas.externalProjectionDropped.connect(self._on_external_projection_dropped)
+        # Drag-and-drop onto the plot (2026-11-22): on the Spectrum view an experiment dragged from
+        # Open experiments is shown (files/folders dropped here are opened by the window itself); on
+        # Compare both are added to the overlay (see _on_paths_dropped_on_compare).
+        self.canvas.experimentRowsDropped.connect(self._on_rows_dropped_on_spectrum_plot)
+        self.canvas.accept_row_drops = True       # files on this plot go on up to the window's own drop
         self.fid_canvas = MplCanvas()
         self.fid_canvas.measurementCompleted.connect(self._on_measurement_completed)
         # Full resolution, like the Spectrum view: explicit user report
@@ -908,6 +914,10 @@ class MainWindow(QMainWindow):
         self.compare_canvas = MplCanvas(full_resolution=True)
         self.compare_canvas.measurementCompleted.connect(self._on_measurement_completed)
         self.compare_canvas.axisUnitChanged.connect(self._on_compare_canvas_unit_changed)
+        self.compare_canvas.accept_row_drops = True
+        self.compare_canvas.accept_file_drops = True
+        self.compare_canvas.experimentRowsDropped.connect(self._on_experiments_dropped_on_compare)
+        self.compare_canvas.pathsDropped.connect(self._on_paths_dropped_on_compare)
         # A legend by default: saying which trace is which is the point
         # of a comparison (explicit user request, 2026-09-28). Still
         # right-click > Show Legend to turn it off.
@@ -8384,6 +8394,8 @@ class MainWindow(QMainWindow):
         "imaging": ("Imaging (Apply)", ("_imaging_section",)),
         # Explicit user request, 2026-11-20.
         "echem": ("Electrochemistry beside spectra (Apply)", ("_echem_section",)),
+        # Explicit user request, 2026-11-22.
+        "other_plot": ("Plot other data: 2-D / 3-D scatter, line, bar (Apply)", ("_other_plot_section",)),
         "cp_buildup": ("CP Build-up (Integrate)", ("_cp_buildup_section",)),
         "regularisation": ("Regularisation (Dynamics)", ("_regularisation_section",)),
         # Explicit user request, 2026-10-17.
@@ -8410,7 +8422,7 @@ class MainWindow(QMainWindow):
 
     #: The optional sections that live on the Apply tile. With none of
     #: them shown the tile has nothing on it, so it is hidden too.
-    APPLY_TILE_SECTIONS = ("enmr", "imaging", "echem")
+    APPLY_TILE_SECTIONS = ("enmr", "imaging", "echem", "other_plot")
 
     def _apply_section_shown(self, key: str, shown: bool) -> None:
         for name in self.OPTIONAL_SECTIONS[key][1]:
@@ -9088,6 +9100,57 @@ class MainWindow(QMainWindow):
     # -- external projections (a 1D dropped onto a 2D contour) ---------
 
     _PROJECTION_NAMES = {"f2": "F2 (top)", "f1": "F1 (left)"}
+
+    def _on_rows_dropped_on_spectrum_plot(self, rows: list[int]) -> None:
+        """Experiments dragged from Open experiments onto the Spectrum plot: show them (the first
+        one, or all of them selected, as clicking the rows would)."""
+        n = len(self.session)
+        rows = [r for r in rows if 0 <= r < n]
+        if not rows:
+            return
+        self._select_single_row(rows[0])
+        for r in rows[1:]:
+            item = self.spectrum_list.item(r)
+            if item is not None:
+                item.setSelected(True)
+
+    def _on_paths_dropped_on_compare(self, paths: list[str]) -> None:
+        """Files / folders dropped on the Compare plot: opened (as a drop on the window would) and
+        added to the overlay once loaded. Ones already open are added at once."""
+        paths = [p for p in paths if p and (os.path.isdir(p) or os.path.isfile(p))]
+        if not paths:
+            return
+        def already_open(path: str) -> bool:
+            norm = os.path.normcase(os.path.abspath(path))
+            return any((src := getattr(s.metadata, "source_path", None))
+                       and os.path.normcase(os.path.abspath(str(src))) == norm
+                       for s in self.session.spectra)
+        to_open = [p for p in paths if not already_open(p)]
+        self._compare_after_open = list(getattr(self, "_compare_after_open", [])) + paths
+        if to_open:
+            self._handle_dropped_paths(to_open)
+        self._add_opened_paths_to_compare()
+
+    def _add_opened_paths_to_compare(self) -> None:
+        """Add to Compare every dropped path that is now in the session (a folder holding several
+        experiments adds those under it)."""
+        waiting = list(getattr(self, "_compare_after_open", []))
+        if not waiting:
+            return
+        rows, still = [], []
+        for path in waiting:
+            norm = os.path.normcase(os.path.abspath(path))
+            found = [i for i, s in enumerate(self.session.spectra)
+                     if (src := getattr(s.metadata, "source_path", None))
+                     and (os.path.normcase(os.path.abspath(str(src))) == norm
+                          or os.path.normcase(os.path.abspath(str(src))).startswith(norm + os.sep))]
+            if found:
+                rows += found
+            elif Session._path_key(path) in self._pending_load_paths:
+                still.append(path)
+        self._compare_after_open = still
+        if rows:
+            self._on_experiments_dropped_on_compare(list(dict.fromkeys(rows)), -1)
 
     def _on_external_projection_dropped(self, rows: list[int], target: str) -> None:
         """A row of Open experiments was dropped on the 2D contour
@@ -18213,7 +18276,16 @@ class MainWindow(QMainWindow):
         self._echem_section.toggled.connect(
             lambda expanded: expanded and self.echem_panel.refresh())
         layout.addWidget(self._echem_section)
+        # Any table of numbers as a 2-D / 3-D scatter, line or bar chart (2026-11-22), drawn on
+        # the Compare view; notebook.other_plot.
+        self.other_plot_panel = OtherPlotPanel(
+            draw=self._other_plot_draw, fontsize=lambda: float(self.output_fontsize_spin.value()))
+        self._other_plot_section = CollapsibleSection(
+            "Plot other data (2-D / 3-D scatter, line, bar)", content=self.other_plot_panel)
+        layout.addWidget(self._other_plot_section)
         _model = self.spectrum_list.model()
+        _model.rowsInserted.connect(
+            lambda *_a: QTimer.singleShot(0, self._add_opened_paths_to_compare))
         def _refresh_echem(*_a):
             try:
                 self.echem_panel.refresh()
@@ -18234,6 +18306,11 @@ class MainWindow(QMainWindow):
         return [{"label": self.session.label(i), "spectrum": s, "index": i,
                  "path": s.metadata.source_path, "selected": i in selected}
                 for i, s in enumerate(self.session.spectra) if s.ndim == 1]
+
+    def _other_plot_draw(self, draw) -> None:
+        """Apply ▸ Plot other data: the figure on the Compare view (so Plot Style and export apply)."""
+        self._dnp_show_canvas(self.compare_canvas)
+        self.compare_canvas.show_external_plot(draw, kind="compare", series_group="other_plot")
 
     def _echem_draw(self, draw, hz_per_ppm=None) -> None:
         """The cell-and-spectra figure on the Compare view (its own plot kind, so Plot Style applies).
