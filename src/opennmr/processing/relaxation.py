@@ -517,6 +517,12 @@ def build_custom_model(equation: str, independent_var: str = "x",
         "p0": lambda t, y: list(p0_values),
         "bounds": lambda t, y: ([-1.0e12] * len(param_names), [1.0e12] * len(param_names)),
         "rate_param": None,
+        # How to build this spec again (its functions cannot be saved):
+        # used by opennmr.io.fit_results so a saved curve fit still has
+        # its model after reopening.
+        "rebuild": {"kind": "equation", "equation": equation,
+                    "constants": dict((str(sym), float(val)) for sym, val in substitutions.items()),
+                    "p0_overrides": list(overrides) or None},
     }
 
 

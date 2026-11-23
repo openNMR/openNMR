@@ -91,6 +91,8 @@ def load_state(folder) -> list[dict]:
                         spectrum.metadata.raw[key] = processing[key]
                 note = ("Re-read from its own folder; the saved processing settings are "
                         "recorded in 'state' but not re-applied here (the GUI does that).")
+        if spectrum is not None:
+            spectrum.metadata.raw.update(entry.get("fit_results") or {})
         fits = {}
         if spectrum is not None:
             for key, fit in ((spectrum.metadata.raw or {}).get("fits") or {}).items():

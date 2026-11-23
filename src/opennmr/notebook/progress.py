@@ -185,6 +185,7 @@ def load_saved_spectrum(folder: str):
     folder = os.path.expanduser(folder)
     spectrum = io_history.read_spectrum_folder(folder)
     spectrum.metadata.raw.update(io_persistence.load_processing_sidecar(folder) or {})
+    spectrum.metadata.raw.update(io_persistence.load_results_sidecar(folder))
     saved = io_persistence.load_metadata_sidecar(folder) or {}
     if saved.get("mass_g") is not None:
         spectrum.metadata.mass = saved["mass_g"]

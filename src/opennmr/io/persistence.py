@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 from ..core.atomic_write import write_json_atomic
+from . import fit_results as _fit_results
 
 #: Bumped only if a future format change needs old sidecar files to
 #: be recognizably distinguishable from new ones -- nothing currently
@@ -104,6 +105,27 @@ def processing_sidecar_path(source_path: str) -> str:
     """:func:`metadata_sidecar_path`'s own sibling for the processing-
     parameters file."""
     return _sidecar_base(source_path) + "_processing.json"
+
+
+def results_sidecar_path(source_path: str) -> str:
+    """The file holding a spectrum's saved fit results (per-slice fits and
+    Dynamics curve fits -- see :mod:`opennmr.io.fit_results`), beside the
+    processing file. Derived from :func:`processing_sidecar_path` so that
+    anything that redirects the processing file redirects this one too."""
+    base = processing_sidecar_path(source_path)
+    stem, _ext = os.path.splitext(base)
+    if stem.endswith("_processing"):
+        stem = stem[: -len("_processing")]
+    return stem + "_results.json.gz"
+
+
+def load_results_sidecar(source_path: str) -> dict:
+    """``{key: results}`` saved with the experiment at ``source_path``
+    (``slice_fit_results``, ``relaxation_fit_results``), ready to merge
+    into ``metadata.raw``; ``{}`` when there are none."""
+    if not source_path:
+        return {}
+    return _fit_results.read_results_file(results_sidecar_path(source_path))
 
 
 def _write_json(path: str, payload: dict) -> None:
@@ -223,6 +245,13 @@ def save_processing_sidecar(spectrum) -> None:
         return
     payload = {"opennmr_processing_version": _PROCESSING_VERSION, "state": processing_state(spectrum)}
     _write_json(processing_sidecar_path(source_path), payload)
+    # The fit results hold numpy arrays, so they cannot go in the JSON
+    # above (processing_state skips what json cannot write): they have
+    # a file of their own.
+    try:
+        _fit_results.write_results_file(results_sidecar_path(source_path), spectrum)
+    except Exception:  # noqa: BLE001 -- the processing recipe is already saved
+        pass
 
 
 def processing_state(spectrum) -> dict:

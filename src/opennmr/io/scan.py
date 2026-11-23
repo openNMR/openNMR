@@ -68,7 +68,7 @@ _ARRAY_DIR_RE = re.compile(r"^array(\d+)$", re.IGNORECASE)
 #: and SIMPSON's text output. A SIMPSON file with another name can
 #: still be opened with File ▸ Open; it is just not listed here.
 FILE_EXTENSIONS = frozenset({".jdx", ".dx", ".jdf", ".csv", ".xy",
-                             ".spe", ".fid", ".csdf", ".dat"})
+                             ".spe", ".fid", ".csdf", ".dat", ".tnt", ".asc", ".fxml"})
 #: A cloud-only file is recognised from its extension alone (opening it
 #: would download it). Anything else cloud-only is not listed.
 CLOUD_EXTENSION_VENDORS = {".jdx": "xpulse", ".dx": "xpulse", ".jdf": "jeol",

@@ -102,21 +102,23 @@ def test_panel_reads_plots_and_writes_code(qapp):
     from opennmr.gui.other_plot_panel import OtherPlotPanel
     drawn = []
     panel = OtherPlotPanel(draw=lambda fn: drawn.append(fn), fontsize=lambda: 11.0)
-    panel.paste_edit.setPlainText(TEXT)
-    assert panel.load() and panel.x_combo.count() == 3
+    assert panel.add_pasted(TEXT)
+    assert len(panel.sources) == 1 and len(panel.datasets) == 1       # a first dataset comes with the file
+    assert panel.x_combo.count() >= 3
     panel.plot()
     assert "Plotted" in panel.report_label.text() and len(drawn) == 1
     fig = Figure()
     drawn[0](fig)
     assert fig.axes
     panel.dim_combo.setCurrentIndex(panel.dim_combo.findData("3d"))
-    panel.kind_combo.setCurrentIndex(panel.kind_combo.findData("line"))
+    panel.default_kind_combo.setCurrentIndex(panel.default_kind_combo.findData("line"))
+    panel.datasets[0]["z"] = {"col": list(panel.sources[0]["table"].columns)[2]}
     panel.plot()
     fig = Figure()
     drawn[-1](fig)
     assert hasattr(fig.axes[0], "get_zlim")
     code = panel.notebook_code()
-    assert "plot_other_data" in code and "'line'" in code
+    assert "plot_datasets" in code and "'line'" in code
 
 
 def test_panel_without_data_says_so(qapp):

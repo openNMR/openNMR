@@ -644,6 +644,10 @@ def build_diffusion_model(n_components: int = 1, stretched=False, expected_D=Non
                             (name.startswith("D") and name[1:].isdigit())),
         "n_components": n_components, "stretched": flags, "offset": bool(offset),
         "kind": "diffusion",
+        # How to build this spec again (see opennmr.io.fit_results).
+        "rebuild": {"kind": "diffusion", "n_components": int(n_components),
+                    "stretched": [bool(f) for f in flags], "offset": bool(offset),
+                    "d_bounds_factor": float(d_bounds_factor)},
         # After the fit the components are renumbered so D1 > D2 > ... (the optimiser may leave
         # them swapped when the guesses are close, e.g. user-supplied expected_D). Only when
         # every component carries the same parameters, so a slot can be exchanged as a whole.

@@ -38,6 +38,7 @@ import datetime as _dt
 import json
 import os
 
+from . import fit_results as io_fit_results
 from . import history as io_history
 from . import persistence
 
@@ -222,6 +223,13 @@ def save_state(folder: str, name: str, entries: list[dict], notes: str = "",
                                     {"opennmr_processing_version": persistence._PROCESSING_VERSION,
                                      "state": processing})
             record["folder"] = rel.replace(os.sep, "/")
+        # The fits that hold arrays (per-slice fits, Dynamics curve fits)
+        # cannot be part of ``state`` (JSON); they get a file of their own,
+        # for every entry -- including an experiment that is reopened from
+        # its own data, which has no saved copy to hold them.
+        results_rel = os.path.join("results", f"{number:02d}_{io_history.safe_folder_name(entry['label'])}.json.gz")
+        if io_fit_results.write_results_file(os.path.join(folder, results_rel), spectrum):
+            record["results"] = results_rel.replace(os.sep, "/")
         record["summary"] = entry_summary(record)
         out.append(record)
     info = {"opennmr_state_version": STATE_VERSION, "name": str(name), "created": stamp,
@@ -261,6 +269,8 @@ def load_state(folder: str) -> dict:
             processing, _meta = io_history.split_state(entry.get("state") or {})
             spectrum.metadata.raw.update(processing)
             entry["spectrum"] = spectrum
+        entry["fit_results"] = (io_fit_results.read_results_file(
+            os.path.join(folder, *entry["results"].split("/"))) if entry.get("results") else {})
         source = entry.get("source") or {}
         entry["source_available"] = bool(source.get("path")) and os.path.exists(source["path"])
     info["folder"] = folder

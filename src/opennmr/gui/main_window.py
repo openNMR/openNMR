@@ -3467,7 +3467,7 @@ class MainWindow(QMainWindow):
         fixed regardless of dialog style."""
         paths, _selected_filter = QFileDialog.getOpenFileNames(
             self, "Open one or more spectrum files", data_directory.start_directory(),
-            filter="All files (*);;NMR spectrum files (*.jdx *.dx *.jdf *.csv *.xy);;Text tables (*.csv *.xy *.txt *.dat)",
+            filter="All files (*);;NMR spectrum files (*.jdx *.dx *.jdf *.csv *.xy *.tnt *.asc *.fxml);;Text tables (*.csv *.xy *.txt *.dat)",
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not paths:
@@ -4271,13 +4271,20 @@ class MainWindow(QMainWindow):
             if saved_metadata.get("nucleus_indirect") and nucleus_is_ours:
                 self.session.set_nucleus(index, saved_metadata["nucleus_indirect"], indirect=True)
                 spectrum = self.session.spectra[index]
+        sidecar_is_ours = (self._sidecar_belongs(spectrum.metadata.source_path,
+                                                 getattr(spectrum.metadata, "procno", None))
+                           and not io_persistence.is_multi_element(spectrum))
         saved_processing = io_persistence.load_processing_sidecar(
             spectrum.metadata.source_path, vendor=spectrum.metadata.vendor,
-        ) if (self._sidecar_belongs(spectrum.metadata.source_path,
-                                    getattr(spectrum.metadata, "procno", None))
-              and not io_persistence.is_multi_element(spectrum)) else None
+        ) if sidecar_is_ours else None
         if saved_processing:
             spectrum.metadata.raw.update(saved_processing)
+        # The per-slice and curve fits (arrays: a file of their own, see
+        # io.fit_results) -- so a fit made before closing openNMR is still
+        # there on reopening (user report, 2026-11-23).
+        if sidecar_is_ours:
+            spectrum.metadata.raw.update(
+                io_persistence.load_results_sidecar(spectrum.metadata.source_path))
 
         self.spectrum_list.addItem(self.session.label(index))
         # Draw once, not twice. Selecting a row redraws it, and when a
@@ -4618,19 +4625,58 @@ class MainWindow(QMainWindow):
     def _remove_rows(self, rows) -> None:
         """Remove the spectra at session rows ``rows``."""
         rows = sorted({int(r) for r in rows if 0 <= int(r) < len(self.session)})
-        # Last first, so each removal leaves the rows still to go where
-        # they were.
-        for row in reversed(rows):
-            self.session.remove(row)
-            self.spectrum_list.takeItem(row)
-            # Removing a spectrum shifts every later row's index, which
-            # would otherwise leave the Compare list's stored indices
-            # silently pointing at the wrong spectrum (removing one
-            # spectrum doesn't necessarily fire itemSelectionChanged, if
-            # the set of *selected* items didn't itself change).
-            self._after_session_row_removed(row)
+        if not rows:
+            return
+        # One removal at a time used to redraw after every row, while the session
+        # and the list disagreed about how many spectra there were (session.remove
+        # ran before takeItem, and takeItem fires the selection handlers): with
+        # several selected that drew from stale rows and could segfault (user
+        # report 2026-11-23, macOS, 4 selected). So: no signals while taking the
+        # rows out, then a single refresh from the final state.
+        blocked = self.spectrum_list.blockSignals(True)
+        try:
+            # Last first, so each removal leaves the rows still to go where they were.
+            for row in reversed(rows):
+                self.session.remove(row)
+                self.spectrum_list.takeItem(row)
+                self._shift_compare_bookkeeping(row)
+        finally:
+            self.spectrum_list.blockSignals(blocked)
+        self.canvas.prune_external_projections(self.session.spectra)
+        self._reset_after_rows_removed()
         if len(rows) > 1:
             self.statusBar().showMessage(f"Removed {len(rows)} spectra.", 6000)
+
+    def _shift_compare_bookkeeping(self, removed: int) -> None:
+        """Renumber Compare's stored session rows after ``removed`` went."""
+        self._compare_pinned_entries = [
+            (r - 1 if r > removed else r, k)
+            for r, k in self._compare_pinned_entries if r != removed]
+        self._compare_removed_entries = {
+            (r - 1 if r > removed else r, k)
+            for r, k in self._compare_removed_entries if r != removed}
+
+    def _reset_after_rows_removed(self) -> None:
+        """Show what is left: the list's own selection signals were blocked while the rows went."""
+        if len(self.session) == 0:
+            self._on_clear_clicked()
+            return
+        # What _after_session_row_removed does after a single removal, once: Compare is rebuilt
+        # from what is selected now plus the pinned entries (already renumbered), never
+        # "preserved" with stale indices.
+        rows = self._selected_rows()
+        self.compare_list.clear()
+        if len(rows) > 1 or self._compare_pinned_entries:
+            self._populate_compare_list(rows if len(rows) > 1 else [])
+            self._refresh_compare_view_if_active(switch_tab=False)
+        else:
+            self._update_compare_tab_visibility()
+        if self.spectrum_list.currentRow() < 0:
+            self.spectrum_list.setCurrentRow(len(self.session) - 1)   # fires the handlers
+            return
+        if not self.spectrum_list.selectedItems():
+            self.spectrum_list.setCurrentRow(self.spectrum_list.currentRow())
+        self._on_list_selection_changed()
 
     def _on_clear_clicked(self) -> None:
         self.session.clear()
@@ -5327,6 +5373,62 @@ class MainWindow(QMainWindow):
             self.simulation_canvas,
         ]
 
+    def _build_other_data_style(self, form) -> None:
+        """Plot Style ▸ Data plots: how Apply ▸ Plot other data draws its markers, lines, bars and
+        colours (user request, 2026-11-23: formatting belongs in Plot Style, not in the panel).
+        Spines, grid, fonts and line widths of every curve plot are the Core styling above."""
+        sec = "Data plots"
+        changed = self._on_other_data_style_changed
+        self.other_marker_combo = QComboBox()
+        for text, key in (("Circle", "o"), ("Square", "s"), ("Triangle up", "^"),
+                          ("Triangle down", "v"), ("Diamond", "D"), ("Star", "*"),
+                          ("Plus", "P"), ("Cross", "X")):
+            self.other_marker_combo.addItem(text, key)
+        self.other_marker_combo.currentIndexChanged.connect(changed)
+        form.addRow("Marker shape:", self.other_marker_combo, section=sec)
+        self.other_marker_size_spin = QDoubleSpinBox()
+        self.other_marker_size_spin.setRange(1.0, 40.0)
+        self.other_marker_size_spin.setValue(6.0)
+        self.other_marker_size_spin.valueChanged.connect(changed)
+        form.addRow("Marker size:", self.other_marker_size_spin, section=sec)
+        self.other_linewidth_spin = QDoubleSpinBox()
+        self.other_linewidth_spin.setRange(0.2, 10.0)
+        self.other_linewidth_spin.setSingleStep(0.1)
+        self.other_linewidth_spin.setValue(1.5)
+        self.other_linewidth_spin.valueChanged.connect(changed)
+        form.addRow("Line width:", self.other_linewidth_spin, section=sec)
+        self.other_bar_width_spin = QDoubleSpinBox()
+        self.other_bar_width_spin.setRange(0.1, 1.0)
+        self.other_bar_width_spin.setSingleStep(0.05)
+        self.other_bar_width_spin.setValue(0.8)
+        self.other_bar_width_spin.setToolTip("The share of the space between bars that a bar fills.")
+        self.other_bar_width_spin.valueChanged.connect(changed)
+        form.addRow("Bar width:", self.other_bar_width_spin, section=sec)
+        self.other_colormap_combo = QComboBox()
+        for name in ("viridis", "plasma", "inferno", "magma", "cividis", "coolwarm", "turbo"):
+            self.other_colormap_combo.addItem(name, name)
+        self.other_colormap_combo.setToolTip("For points coloured by a column.")
+        self.other_colormap_combo.currentIndexChanged.connect(changed)
+        form.addRow("Colour map:", self.other_colormap_combo, section=sec)
+
+    def _other_data_style(self) -> dict:
+        """The Data plots settings (and the Core spines, which a 3-D figure draws as box edges)."""
+        out = dict(marker=self.other_marker_combo.currentData(),
+                   marker_size=self.other_marker_size_spin.value(),
+                   linewidth=self.other_linewidth_spin.value(),
+                   bar_width=self.other_bar_width_spin.value(),
+                   colormap=self.other_colormap_combo.currentData())
+        if self.output_top_spine_checkbox.isChecked():
+            out["top_spine"] = True
+        if self.output_right_spine_checkbox.isChecked():
+            out["right_spine"] = True
+        return out
+
+    def _on_other_data_style_changed(self, *_args) -> None:
+        panel = getattr(self, "other_plot_panel", None)
+        if panel is not None:
+            panel.replot()
+
     def _build_echem_style(self, form) -> None:
         """Plot Style ▸ Electrochemistry: how Apply ▸ Electrochemistry draws (explicit user
         request, 2026-11-20: style belongs in Plot Style, not a menu of its own)."""
@@ -5461,8 +5563,10 @@ class MainWindow(QMainWindow):
         style_form.add_section("Compare")
         style_form.add_section("2-D")
         style_form.add_section("Electrochemistry")
+        style_form.add_section("Data plots")
         self.style_sections = style_form.sections
         self._build_echem_style(style_form)
+        self._build_other_data_style(style_form)
 
         self.output_linewidth_spin = QDoubleSpinBox()
         self.output_linewidth_spin.setRange(0.1, 10.0)
@@ -6724,6 +6828,9 @@ class MainWindow(QMainWindow):
     def _on_reset_view_limits_clicked(self) -> None:
         for canvas in self._style_target_canvases():
             canvas.clear_view_limits()
+            # Also undo a mouse zoom/pan (typed limits are only part of what
+            # can leave a plot cropped; Compare panels were the reported case).
+            canvas.reset_view()
         self._sync_view_limit_controls(self._series_target_canvas())
 
     def _on_canvas_view_limits_changed(self, canvas) -> None:
@@ -6754,8 +6861,8 @@ class MainWindow(QMainWindow):
                 f"This plot's axis is in <b>{canvas.view_limits_unit_text()}</b>: type limits in that unit.")
         else:
             self.output_limits_unit_label.setText(
-                "Limits can be typed for a 1D spectrum, a Compare stack or overlay, and a "
-                "2D contour. The plot on show is none of these.")
+                "Limits can be typed for a 1D spectrum, a Compare stack, overlay or panels, "
+                "and a 2D contour. The plot on show is none of these.")
         note = canvas.view_limits_note()
         self.output_limits_note_label.setText(note)
         self.output_limits_note_label.setVisible(bool(note))
@@ -6776,6 +6883,8 @@ class MainWindow(QMainWindow):
         if changed:
             for canvas in self._style_target_canvases():
                 canvas.set_style(**changed)
+            if "top_spine" in changed or "right_spine" in changed:
+                self._on_other_data_style_changed()      # a 3-D data plot draws them as box edges
         self._refresh_style_scope_label()
 
     def _set_custom_contour_colour(self, colour: str, *, signals: bool = True) -> None:
@@ -10874,7 +10983,7 @@ class MainWindow(QMainWindow):
         # 2026-10-17). It is phased as the processed data it is.
         if spectrum.metadata.raw.get("procno_dimension") == 1:
             return False
-        if spectrum.metadata.vendor in ("xpulse", "varian", "jeol", "spinsolve", "simpson"):
+        if spectrum.metadata.vendor in ("xpulse", "varian", "jeol", "spinsolve", "simpson", "tecmag"):
             return True
         if spectrum.metadata.vendor == "bruker" and spectrum.metadata.source_path:
             base = spectrum.metadata.source_path
@@ -13668,6 +13777,7 @@ class MainWindow(QMainWindow):
                     kwargs.update(source.get("load_kwargs") or {})
                     self._original_load_kwargs[index] = kwargs
                     self._apply_restored_state(index, processing, metadata, reread=True)
+                    self._apply_saved_fit_results(index, entry.get("fit_results"))
                     messages.append(f"{label}: reopened from {source['path']} and reprocessed "
                                     "as saved.")
             if index is None:
@@ -13680,6 +13790,7 @@ class MainWindow(QMainWindow):
                 self._apply_restored_state(
                     index, processing, metadata,
                     snapshot=(spectrum.data, spectrum.data_imag, spectrum.axes), reread=False)
+                self._apply_saved_fit_results(index, entry.get("fit_results"))
                 if entry["kind"] == "experiment" and entry.get("prefer_copy"):
                     messages.append(f"{label}: opened from the saved copy (processed data with "
                                     "no FID, so its processing cannot be re-applied by "
@@ -13710,6 +13821,21 @@ class MainWindow(QMainWindow):
             self._select_single_row(opened[0])
         self._refresh_model_series_buttons()
         return opened, messages
+
+    def _apply_saved_fit_results(self, index: int, results: dict | None) -> None:
+        """Put the per-slice fits and Dynamics curve fits saved with a
+        state back on spectrum ``index`` (see :mod:`opennmr.io.fit_results`),
+        so the experiment tree can show them again and Fit Curve / the
+        Spectral Fit browser find them, exactly as before the state was
+        saved."""
+        if not results:
+            return
+        spectrum = self.session.spectra[index]
+        spectrum.metadata.raw.update(results)
+        self._schedule_sidecar_save(index)
+        if index == self._selected_index():
+            self._restore_analysis_state(spectrum)
+        self._schedule_tree_refresh()
 
     def _restore_slice_link(self, index: int, link: dict, session_of: dict) -> bool:
         """Re-attach a reopened slice to the 2D it was cut from (the link is
@@ -18279,7 +18405,8 @@ class MainWindow(QMainWindow):
         # Any table of numbers as a 2-D / 3-D scatter, line or bar chart (2026-11-22), drawn on
         # the Compare view; notebook.other_plot.
         self.other_plot_panel = OtherPlotPanel(
-            draw=self._other_plot_draw, fontsize=lambda: float(self.output_fontsize_spin.value()))
+            draw=self._other_plot_draw, fontsize=lambda: float(self.output_fontsize_spin.value()),
+            curve_fits=self._other_plot_curve_fits, style=self._other_data_style)
         self._other_plot_section = CollapsibleSection(
             "Plot other data (2-D / 3-D scatter, line, bar)", content=self.other_plot_panel)
         layout.addWidget(self._other_plot_section)
@@ -18307,10 +18434,24 @@ class MainWindow(QMainWindow):
                  "path": s.metadata.source_path, "selected": i in selected}
                 for i, s in enumerate(self.session.spectra) if s.ndim == 1]
 
+    def _other_plot_curve_fits(self) -> list:
+        """Open experiments that hold a Dynamics curve fit, for Plot other data ▸ Add curve fit:
+        ``(label, [fit result per peak], row)``."""
+        out = []
+        for row, spectrum in enumerate(self.session.spectra):
+            results = (spectrum.metadata.raw or {}).get("relaxation_fit_results")
+            if isinstance(self._relaxation_fit_results, list) and row == getattr(
+                    self, "_current_analysis_index", None) and self._relaxation_fit_results:
+                results = self._relaxation_fit_results      # the panel's own, not yet saved
+            if isinstance(results, (list, tuple)) and results and isinstance(results[0], dict):
+                out.append((self.session.label(row), list(results), row))
+        return out
+
     def _other_plot_draw(self, draw) -> None:
         """Apply ▸ Plot other data: the figure on the Compare view (so Plot Style and export apply)."""
         self._dnp_show_canvas(self.compare_canvas)
-        self.compare_canvas.show_external_plot(draw, kind="compare", series_group="other_plot")
+        # kind "curve": Plot Style's spines, grid and line widths for curve plots apply to it.
+        self.compare_canvas.show_external_plot(draw, kind="curve", series_group="other_plot")
 
     def _echem_draw(self, draw, hz_per_ppm=None) -> None:
         """The cell-and-spectra figure on the Compare view (its own plot kind, so Plot Style applies).

@@ -1123,6 +1123,18 @@ class MplCanvas(QWidget):
         # all), while a QToolButton set to ToolButtonTextOnly always
         # shows its text. There are no icons for these two.
         self.toolbar.addSeparator()
+        # "Plot style": the same menu as right-clicking the plot (Plot Style…, legend,
+        # labels, insets ...), for those who do not know to right-click (user request,
+        # 2026-11-23). Opens under the button; entries that need a clicked point are
+        # simply unavailable, as the menu already handles.
+        self._style_button = QToolButton(self.toolbar)
+        self._style_button.setText("Plot style")
+        self._style_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._style_button.setToolTip(
+            "The plot's style menu, the same as right-clicking the plot: Plot Style…, legend, "
+            "labels, insets, export and more.")
+        self._style_button.clicked.connect(lambda _checked=False: self._show_style_menu_from_button())
+        self.toolbar.addWidget(self._style_button)
         self._crosshair_button = self._add_toolbar_toggle(
             "Crosshair",
             "Show a cross following the cursor across the plot (and, on a 2D, "
@@ -4660,8 +4672,18 @@ class MplCanvas(QWidget):
             return [self.ax] if self.ax in live else []
         if self._compare_axes:
             return [ax for ax in self._compare_axes if ax in live]
+        if self._spectrum_panels:
+            # Compare > Panels: the panels that share the first one's x axis
+            # (a 31P and a 195Pt panel cannot take the same typed range).
+            panels = [ax for ax in self._spectrum_panels if ax in live]
+            if not panels:
+                return []
+            label = panels[0].get_xlabel()
+            return [ax for ax in panels if ax.get_xlabel() == label
+                    and getattr(ax, "_opennmr_panel_kind", "1d") in ("1d", "2d", "contour")
+                    or ax is panels[0]]
         if ((self._current_1d_spectrum is not None or self._plot_kind == "compare")
-                and not self._spectrum_panels and self.ax in live and self.ax.lines):
+                and self.ax in live and self.ax.lines):
             return [self.ax]
         return []
 
@@ -4719,6 +4741,16 @@ class MplCanvas(QWidget):
             else:
                 target = self._limits_in_orientation(main.get_ylim(), natural_y, self._view_y) or natural_y
             main.set_ylim(target)
+        elif self._spectrum_panels:
+            linked_y = bool(self._spectrum_panel_link is not None and self._spectrum_panel_link.y)
+            if not linked_y:
+                for ax in axes:
+                    if getattr(ax, "_opennmr_panel_kind", "1d") == "1d" and ax.lines:
+                        if self._view_x is None:
+                            self._fit_y_to_data(ax)
+                        else:
+                            self._fit_y_to_data(ax, y_range=self._data_y_range(
+                                ax, x_window=tuple(sorted(ax.get_xlim()))))
         elif self._current_1d_spectrum is not None and self._compare_axes is None:
             if self._view_x is None:
                 self._fit_y_to_data(main)
@@ -5298,6 +5330,14 @@ class MplCanvas(QWidget):
     #: The tensor-picture style changed (Tensor Plot Style, or Plot
     #: Style's colour maps / grid carried over to a tensor on show).
     tensorStyleChanged = Signal()
+
+    def _show_style_menu_from_button(self) -> None:
+        """The right-click menu, opened from the "Plot style" toolbar button."""
+        self._last_right_click_axes = None
+        self._last_right_click_xy = None
+        button = self._style_button
+        below = button.mapToGlobal(button.rect().bottomLeft())
+        self._on_context_menu(self.canvas.mapFromGlobal(below))
 
     def _on_context_menu(self, pos) -> None:
         menu = QMenu(self)

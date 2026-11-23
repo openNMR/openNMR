@@ -1,0 +1,22 @@
+{
+  "opennmr_dataset_version": 1,
+  "label": "F1 slice 16 · 23Na · derived · procno 1",
+  "origin_vendor": "derived",
+  "origin": "C:/Users/quark/Documents/openNMR/states/example_T1.opennmr\\spectra\\02_F1 slice 16 _ 23Na _ derived _ procno 1",
+  "saved": "2026-11-23T12:05:04+01:00",
+  "metadata": {
+    "nucleus": "23Na",
+    "nucleus_indirect": null,
+    "sfo1": 132.291917430054,
+    "sfo1_indirect": null,
+    "bf1": null,
+    "o1": null,
+    "ns": null,
+    "procno": 1,
+    "pseudo_2d": true,
+    "homonuclear": false,
+    "mass": null,
+    "probe": null,
+    "pulse_program": null
+  }
+}

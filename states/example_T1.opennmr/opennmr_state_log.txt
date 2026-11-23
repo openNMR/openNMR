@@ -1,0 +1,150 @@
+openNMR state: example_T1
+Saved 2026-11-23 12:05:04 by openNMR 0.12.2
+
+2 spectra:
+
+1. 11 · 23Na · bruker · procno 1 – Experiment
+   Data: C:\Users\quark\Documents\NMR\500_MHz_Cam\20220624_NaCoO2_Pristine_190622A_23Na_1p3mm\11 (bruker)
+   Treated as: a series (pseudo-2D)
+   Apodization: the window recorded in the acquisition file
+   Zero-fill: 32768 points
+   Phase PH0: 8.6°
+   Nucleus: 23Na
+   Nucleus F1: 1H
+   Curve-fit model: “Saturation recovery (T1)”
+   Delays from: “List file × factor”
+   Delay list file: “C:\Users\quark\Documents\NMR\500_MHz_Cam\20220624_NaCoO2_Pristine_190622A_23Na_1p3mm\11\vdlist”
+   Diffusion components: 2
+   Curve-fit results:
+       ==========================================================
+                 CURVE FIT REPORT — saturation_recovery
+       ==========================================================
+         T1 = 2.34 ± 0.00 µs
+         Parameters
+         ------------------------------------------------------
+           M0         1.939e+06 ± 391
+           T1         2.34 ± 0.00 µs
+         Uncertainty
+         ------------------------------------------------------
+           1σ (from supplied point errors)
+           1σ, propagated from the per-point measurement errors
+           supplied with the data (absolute_sigma=True).
+           Independent of how well the model happens to fit.
+         Fit quality
+         ------------------------------------------------------
+           R²             = 0.99632
+           RMSE           = 5.324e+04
+           reduced χ²     = 9794
+           points / d.o.f = 16 / 14
+           final I/I₀     = 300.6  (30063.5%)
+       ==========================================================
+   Solid-state NMR model, every slice fit of 11 · 23Na · bruker · procno 1:
+       Result:
+         Solid-state NMR lineshapes applied to 16 slice(s), taken from slice 16.
+         Each slice fitted as a linear combination of the fixed site lineshapes plus a linear baseline.
+         Slice	Site 1 area	±	Site 1 rel.	±	R²
+         1	6391.6	2.1e+02	0.0034	0.00011	0.0268
+         2	9693	2e+02	0.0051	0.00011	0.0666
+         3	7380.5	2e+02	0.0039	0.00011	0.0397
+         4	17230	2.2e+02	0.0091	0.00011	0.1623
+         5	21610	2.2e+02	0.0114	0.00012	0.2275
+         6	55554	2.1e+02	0.0292	0.00011	0.6817
+         7	1.548e+05	2.3e+02	0.0815	0.00012	0.9313
+         8	4.2651e+05	3e+02	0.2244	0.00016	0.9844
+         9	1.0607e+06	5.7e+02	0.5582	0.0003	0.9908
+         10	1.75e+06	9.1e+02	0.9209	0.00048	0.9913
+         11	1.9062e+06	9.7e+02	1.0031	0.00051	0.9916
+         12	1.906e+06	9.7e+02	1.0030	0.00051	0.9916
+         13	1.9106e+06	9.7e+02	1.0054	0.00051	0.9916
+         14	1.9142e+06	9.5e+02	1.0073	0.0005	0.9920
+         15	1.9212e+06	9.5e+02	1.0110	0.0005	0.9921
+         16	1.9215e+06	9.5e+02	1.0112	0.0005	0.9920
+         R² below 0.9 in slice(s) 1, 2, 3, 4, 5, 6 – expected where the signal has decayed into the noise, a sign of a changing lineshape otherwise.
+         What the fit tells you:
+           ⚠ The fixed lineshapes leave real signal behind in slices 1–16 (worst, slice 11: about 79× the noise). The shape changes along the series – for example, one part of the pattern relaxing faster than another – so the intensities from those slices are less reliable.
+           • Around 389.5 ppm (slice 16) the fitted peak's shape does not quite match the data.
+         What to try next:
+           → Try a model with more peaks, so parts that relax differently can change independently; or fit the strongest of those slices on its own and compare.
+           → Let the peak's Gaussian/Lorentzian mix (eta) vary, or try two peaks there if it looks like it has a shoulder.
+   Fit (Solid-state NMR model, every slice) on 11 · 23Na · bruker · procno 1, 2026-11-23T12:03:57+01:00:
+       Solid-state NMR lineshapes applied to 16 slice(s), taken from slice 16.
+       Each slice fitted as a linear combination of the fixed site lineshapes plus a linear baseline.
+       
+       Slice	Site 1 area	±	Site 1 rel.	±	R²
+       1	6391.6	2.1e+02	0.0034	0.00011	0.0268
+       2	9693	2e+02	0.0051	0.00011	0.0666
+       3	7380.5	2e+02	0.0039	0.00011	0.0397
+       4	17230	2.2e+02	0.0091	0.00011	0.1623
+       5	21610	2.2e+02	0.0114	0.00012	0.2275
+       6	55554	2.1e+02	0.0292	0.00011	0.6817
+       7	1.548e+05	2.3e+02	0.0815	0.00012	0.9313
+       8	4.2651e+05	3e+02	0.2244	0.00016	0.9844
+       9	1.0607e+06	5.7e+02	0.5582	0.0003	0.9908
+       10	1.75e+06	9.1e+02	0.9209	0.00048	0.9913
+       11	1.9062e+06	9.7e+02	1.0031	0.00051	0.9916
+       12	1.906e+06	9.7e+02	1.0030	0.00051	0.9916
+       13	1.9106e+06	9.7e+02	1.0054	0.00051	0.9916
+       14	1.9142e+06	9.5e+02	1.0073	0.0005	0.9920
+       15	1.9212e+06	9.5e+02	1.0110	0.0005	0.9921
+       16	1.9215e+06	9.5e+02	1.0112	0.0005	0.9920
+       
+       R² below 0.9 in slice(s) 1, 2, 3, 4, 5, 6 – expected where the signal has decayed into the noise, a sign of a changing lineshape otherwise.
+       
+       What the fit tells you:
+         ⚠ The fixed lineshapes leave real signal behind in slices 1–16 (worst, slice 11: about 79× the noise). The shape changes along the series – for example, one part of the pattern relaxing faster than another – so the intensities from those slices are less reliable.
+         • Around 389.5 ppm (slice 16) the fitted peak's shape does not quite match the data.
+       What to try next:
+         → Try a model with more peaks, so parts that relax differently can change independently; or fit the strongest of those slices on its own and compare.
+         → Let the peak's Gaussian/Lorentzian mix (eta) vary, or try two peaks there if it looks like it has a shoulder.
+   Kept fit models (1):
+       “Curve fit: Site 1” – Curve fit, R² 0.99632, 2 free parameters, kept 2026-11-23T12:04:13
+
+2. F1 slice 16 · 23Na · derived · procno 1 – Slice
+   From: C:/Users/quark/Documents/openNMR/states/example_T1.opennmr\spectra\02_F1 slice 16 _ 23Na _ derived _ procno 1
+   Saved copy: spectra/02_F1 slice 16 _ 23Na _ derived _ procno 1
+   Nucleus: 23Na
+   Solid-state NMR fit of F1 slice 16 · 23Na · derived · procno 1:
+       Result:
+         Solid-state NMR fit — MAS 50 kHz, nu0 = 132.2919 MHz, quadrupolar second-order, transitions all, 2584 orientations (automatic scheme), window whole spectrum, baseline estimated and held.
+         R² 0.97586  ·  RMSE 457  ·  reduced χ² 2.09e+05  ·  4.8 s. |C_Q| reported (its sign is not in a lineshape).
+         ⚠ Site 1: eta at its lower bound 0
+         ⚠ Site 1: asym is not determined by the data – its 1σ uncertainty spans its whole range (0 to 1); fix it, or add data that constrain it
+         ⚠ Site 1: aniso and Site 1: asym are 100% correlated – the data do not separate them; fix one, or add data (another field or spinning rate)
+         | δiso (ppm) | Amount | FWHM (ppm) | L fraction | Δ or span (ppm) | η or skew | Share (%)
+         Site 1 | 401.788 ± 0.020 | 8.238e+06 ± 1.3e+04 | 37.587 ± 0.046 | 8.091e-16 ± 0.00036 | 0 ± 370000 | 0.0 ± 3.3 | 100
+         What the fit tells you:
+           ⚠ The model misses real features of your spectrum: what is left over is about 126× the noise. The numbers below are the best this model can do, not necessarily the right ones.
+           ⚠ Site 1's anisotropic pattern spreads over only about 0.0 spinning sidebands at 50 kHz MAS. For an accurate fit of an anisotropic interaction aim for at least 3–5: with fewer, Δ and especially η are poorly determined. Spinning slower, or a static spectrum, would pin them down.
+           ⚠ There is signal near -1024 ppm that the fit leaves out, where spinning sidebands of Site 1 should be: the fit's sidebands for Site 1 are too weak, so the anisotropy is probably underestimated (or the MAS rate is off).
+           • The Lorentzian fraction of Site 1 ended at 0, the edge of what is physically possible. That can be real (an asymmetry of 0 is an axially symmetric tensor), but if you did not expect it, the model may be compensating for something else.
+           ⚠ Your data cannot pin down the asymmetry (η or skew) of Site 1: its uncertainty covers its whole allowed range (0 to 1). Whatever value it shows is not a measurement.
+           ✓ Well determined (better than ±5%): the linewidth of Site 1.
+           ⚠ Only roughly determined (more than ±30%): the anisotropy (Δ or span) of Site 1 (-0.001691 ppm ± 3.715e+05 ppm). Treat these as estimates.
+           • The anisotropy (Δ or span) of Site 1 and the asymmetry (η or skew) of Site 1 trade off against each other (100% correlated): the data cannot tell them apart well. Fixing one makes the other reliable; another field or spinning rate would separate them.
+           • This fit (1 peak with CSA) and “Solid-state NMR, 1 component” (1 component, 6 free parameters) describe your data equally well.
+         What to try next:
+           → Try a larger starting value for the anisotropy of Site 1 (or a few values in Try starts).
+           → Fix the asymmetry (η or skew) of Site 1 at a sensible value (untick Free) – a literature value, or one from another measurement – so the other numbers stop depending on it.
+   Fit (Solid-state NMR) on F1 slice 16 · 23Na · derived · procno 1, 2026-11-23T12:03:53+01:00:
+       Solid-state NMR fit — MAS 50 kHz, nu0 = 132.2919 MHz, quadrupolar second-order, transitions all, 2584 orientations (automatic scheme), window whole spectrum, baseline estimated and held.
+       R² 0.97586  ·  RMSE 457  ·  reduced χ² 2.09e+05  ·  4.8 s. |C_Q| reported (its sign is not in a lineshape).
+       ⚠ Site 1: eta at its lower bound 0
+       ⚠ Site 1: asym is not determined by the data – its 1σ uncertainty spans its whole range (0 to 1); fix it, or add data that constrain it
+       ⚠ Site 1: aniso and Site 1: asym are 100% correlated – the data do not separate them; fix one, or add data (another field or spinning rate)
+       | δiso (ppm) | Amount | FWHM (ppm) | L fraction | Δ or span (ppm) | η or skew | Share (%)
+       Site 1 | 401.788 ± 0.020 | 8.238e+06 ± 1.3e+04 | 37.587 ± 0.046 | 8.091e-16 ± 0.00036 | 0 ± 370000 | 0.0 ± 3.3 | 100
+       What the fit tells you:
+         ⚠ The model misses real features of your spectrum: what is left over is about 126× the noise. The numbers below are the best this model can do, not necessarily the right ones.
+         ⚠ Site 1's anisotropic pattern spreads over only about 0.0 spinning sidebands at 50 kHz MAS. For an accurate fit of an anisotropic interaction aim for at least 3–5: with fewer, Δ and especially η are poorly determined. Spinning slower, or a static spectrum, would pin them down.
+         ⚠ There is signal near -1024 ppm that the fit leaves out, where spinning sidebands of Site 1 should be: the fit's sidebands for Site 1 are too weak, so the anisotropy is probably underestimated (or the MAS rate is off).
+         • The Lorentzian fraction of Site 1 ended at 0, the edge of what is physically possible. That can be real (an asymmetry of 0 is an axially symmetric tensor), but if you did not expect it, the model may be compensating for something else.
+         ⚠ Your data cannot pin down the asymmetry (η or skew) of Site 1: its uncertainty covers its whole allowed range (0 to 1). Whatever value it shows is not a measurement.
+         ✓ Well determined (better than ±5%): the linewidth of Site 1.
+         ⚠ Only roughly determined (more than ±30%): the anisotropy (Δ or span) of Site 1 (-0.001691 ppm ± 3.715e+05 ppm). Treat these as estimates.
+         • The anisotropy (Δ or span) of Site 1 and the asymmetry (η or skew) of Site 1 trade off against each other (100% correlated): the data cannot tell them apart well. Fixing one makes the other reliable; another field or spinning rate would separate them.
+         • This fit (1 peak with CSA) and “Solid-state NMR, 1 component” (1 component, 6 free parameters) describe your data equally well.
+       What to try next:
+         → Try a larger starting value for the anisotropy of Site 1 (or a few values in Try starts).
+         → Fix the asymmetry (η or skew) of Site 1 at a sensible value (untick Free) – a literature value, or one from another measurement – so the other numbers stop depending on it.
+   Kept fit models (1):
+       “Solid-state NMR, 1 component” – Solid-state NMR, R² 0.97586, 6 free parameters, kept 2026-11-23T10:18:25
