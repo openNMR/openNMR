@@ -1,6 +1,8 @@
 """Advanced Processing > Shearing and Scaling (2D): the panel
 (gui/shear_panel.py) and its wiring into the main window."""
 
+import dataclasses
+
 import numpy as np
 import pytest
 from PySide6.QtWidgets import QApplication
@@ -22,6 +24,9 @@ def _mqmas(f1_sign=1, nucleus="23Na"):
     cryst, _ = two_site_mqmas(f1_sign=f1_sign)
     spec = make_2d(cryst)
     spec.metadata.nucleus = spec.metadata.nucleus_indirect = nucleus
+    # The synthetic data are built with f1_sign = +1 or -1 explicitly; a
+    # Bruker label would make the panel start from TopSpin's convention (-1).
+    spec.metadata = dataclasses.replace(spec.metadata, vendor="simulated")
     return spec
 
 

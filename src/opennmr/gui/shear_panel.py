@@ -304,8 +304,17 @@ class ShearPanel(QWidget):
         for w in (self.second_shear_check, self.split_t1_check, self.use_a_check, self.use_b_check):
             w.toggled.connect(self._on_settings_changed)
         self.spin_combo.currentIndexChanged.connect(self._refill_orders)
+        self.experiment_combo.currentIndexChanged.connect(self._default_f1_direction)
         self._refill_orders()
         self.set_source(None)
+
+    def _default_f1_direction(self, *_):
+        """Start the F1 direction at the convention TopSpin's own shear
+        uses for this experiment (see :func:`default_f1_sign`)."""
+        if self._source is None or shear_source_problem(self._source):
+            return
+        sign = nb_shear.default_f1_sign(self._source, self.experiment())
+        self.f1_sign_combo.setCurrentIndex(self.f1_sign_combo.findData(sign))
 
     # --- public -----------------------------------------------------------
     def set_source(self, spectrum, label: str = "") -> None:
@@ -328,6 +337,10 @@ class ShearPanel(QWidget):
             spin_txt = f", I = {nb_shear._frac(spin)}" if spin else ""
             self.source_label.setText(f"Spectrum: {label or spectrum.metadata.source_path} "
                                       f"({nuc}{spin_txt})")
+            if changed:
+                # TopSpin's xfshear convention (checked against it on real data)
+                sign = nb_shear.default_f1_sign(spectrum, self.experiment())
+                self.f1_sign_combo.setCurrentIndex(self.f1_sign_combo.findData(sign))
             if changed and spin and spin > 0.5:
                 i = self.spin_combo.findData(spin)
                 if i >= 0:

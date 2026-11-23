@@ -934,6 +934,9 @@ class MplCanvas(QWidget):
     #: against the spectrum (and persist them) rather than leaving
     #: them as canvas-local state that a reselection would drop.
     contourSlicesChanged = Signal(object)
+    #: A scroll over the contours of a Compare 2D plot (overlay or panels):
+    #: the factor to multiply the lowest contour by (>1 fewer levels).
+    compareContourScrolled = Signal(float)
 
     #: The DOSY contour floor, as a fraction of the map's own peak --
     #: the same quantity :attr:`_CONTOUR_FACTOR_DEFAULT` is for a 2D,
@@ -2497,6 +2500,11 @@ class MplCanvas(QWidget):
         if self._panel_axes and not on_x_strip and not on_y_strip and ax in self._panel_axes:
             # The body of a Compare 2D panel has no intensity axis to rescale
             # (it used to squash F1); its two axes are zoomed from their strips.
+            # What a scroll over the contours does is what it does on one 2D:
+            # raise or lower the lowest contour. The window owns that setting
+            # (Compare > 2D spectra > Lowest contour), so it is asked.
+            if self._panel_spectra and all(getattr(s, "ndim", 0) == 2 for s in self._panel_spectra):
+                self.compareContourScrolled.emit(float(self._contour_scroll_step(event)))
             return
 
         if on_x_strip:
@@ -7684,7 +7692,12 @@ class MplCanvas(QWidget):
         # here. This still applies the user's own general, explicit
         # _aspect_ratio lock (None when unlocked -- a no-op layered on
         # top of whatever plot_2d_contour's own divider already set).
-        self.ax.set_box_aspect(self._aspect_ratio)
+        # A stacked Compare has one axes per spectrum and ``self.ax`` is only
+        # the last of them: locking just that one squeezed the bottom spectrum
+        # into a small box while the rest kept the full width (user report,
+        # 2026-11-23). Every row takes the same lock.
+        for locked_ax in ([a for a in (self._compare_axes or []) if a in self.figure.axes] or [self.ax]):
+            locked_ax.set_box_aspect(self._aspect_ratio)
         # matplotlib's own Axes.grid(visible, **kwargs) quirk: passing
         # any style kwarg (even alongside visible=False) is treated as
         # an implicit "turn it on" and warns -- only pass alpha when
@@ -8771,7 +8784,8 @@ class MplCanvas(QWidget):
             )
 
     def show_2d_overlay(self, spectra: list[NMRSpectrum], labels: list[str] | None = None,
-                        insets=None, factor: float | None = None, clevels: int | None = None) -> None:
+                        insets=None, factor: float | None = None, clevels: int | None = None,
+                        projections: bool = False) -> None:
         """Overlay 2-3 2D/pseudo-2D spectra as flat-colour line contours
         on one set of axes -- real roadmap ask: "a way to overlay
         multiple 2D contours." Thin wrapper around
@@ -8804,7 +8818,10 @@ class MplCanvas(QWidget):
             labels=[entry.label for entry in entries] if labels is not None else None,
             colours=[entry.colour for entry in entries], insets=insets,
             fontsize=self._AXIS_LABELSIZE, contour_linewidth=self._contour_linewidth,
+            show_projections=bool(projections),
             **levels, **self._contour_fraction_kwargs())
+        strips = getattr(self.ax, "opennmr_projection_axes", None) or {}
+        self._proj_axes = {"f1": strips.get("f1"), "f2": strips.get("f2")}
         if labels is not None:
             self.ax.legend(**self._legend_kwargs())
             self._legend_visible = True

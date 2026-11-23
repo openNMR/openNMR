@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+import numpy as np
+
 from ..notebook import other_plot as op
 from .widgets.report_label import ReportLabel
 from .widgets.typed_spinbox import TypedSpinBox
@@ -187,6 +189,22 @@ class OtherPlotPanel(QWidget):
         self.colour_button = QPushButton("automatic")
         self.colour_button.clicked.connect(self._pick_colour)
         ef.addRow("Colour:", self.colour_button)
+        # Multiply an axis by a constant (units, or matching another series' scale).
+        self.scale_edits = {}
+        scale_row = QWidget()
+        sh = QHBoxLayout(scale_row)
+        sh.setContentsMargins(0, 0, 0, 0)
+        for axis in ("x", "y", "z"):
+            sh.addWidget(QLabel(f"{axis} ×"))
+            edit = QLineEdit("1")
+            edit.setMaximumWidth(90)
+            edit.setToolTip(f"Multiply every {axis} value of this dataset by this number "
+                            "(1e-3 for a thousandth, for example). Error bars scale with y.")
+            edit.editingFinished.connect(self._editor_changed)
+            self.scale_edits[axis] = edit
+            sh.addWidget(edit)
+        sh.addStretch(1)
+        ef.addRow("Multiply by:", scale_row)
         self._editor_form = ef
         dv.addWidget(self.editor)
         v.addWidget(box)
@@ -327,7 +345,7 @@ class OtherPlotPanel(QWidget):
     def _new_record(**kw) -> dict:
         record = {"label": "", "auto_label": True, "source": None, "x": None, "y": None, "z": None,
                   "yerr": None, "colour_by": None, "kind": None, "colour": None, "fit": None,
-                  "fit_code": None}
+                  "fit_code": None, "xscale": "1", "yscale": "1", "zscale": "1"}
         record.update(kw)
         return record
 
@@ -547,6 +565,8 @@ class OtherPlotPanel(QWidget):
                                   current=record["colour_by"])
             self.kind_combo.setCurrentIndex(max(0, self.kind_combo.findData(record["kind"])))
             self.colour_button.setText(self._colour_text(record["colour"]))
+            for axis, edit in self.scale_edits.items():
+                edit.setText(str(record.get(f"{axis}scale", "1")))
             self._sync()
         finally:
             self._loading = False
@@ -583,6 +603,8 @@ class OtherPlotPanel(QWidget):
             record["yerr"] = self._ref_from_combo(self.yerr_combo, QLineEdit(), "y error")
             record["colour_by"] = self._ref_from_combo(self.colour_by_combo, QLineEdit(), "colour")
         record["kind"] = self.kind_combo.currentData()
+        for axis, edit in self.scale_edits.items():
+            record[f"{axis}scale"] = edit.text().strip() or "1"
         if record["auto_label"] and record["fit"] is None:
             self.name_edit.blockSignals(True)
             self.name_edit.setText(self._label(record))
@@ -663,6 +685,27 @@ class OtherPlotPanel(QWidget):
         n = len(self.sources[record["source"]]["table"]) if record["source"] is not None else 0
         return list(range(1, n + 1))
 
+    @staticmethod
+    def _scales(record: dict, who: str) -> dict:
+        """``{"x": .., "y": .., "z": ..}`` from the Multiply by boxes; ValueError saying which."""
+        out = {}
+        for axis in ("x", "y", "z"):
+            text = str(record.get(f"{axis}scale", "1")).strip() or "1"
+            try:
+                out[axis] = float(text.replace(",", "."))
+            except ValueError:
+                raise ValueError(f"{who}: the {axis} multiplier {text!r} is not a number.") from None
+            if not np.isfinite(out[axis]):
+                raise ValueError(f"{who}: the {axis} multiplier must be a finite number.")
+        return out
+
+    def _safe_scales(self, record: dict) -> dict:
+        """The multipliers for the notebook code: 1 for one that is not a number (the plot says so)."""
+        try:
+            return self._scales(record, "dataset")
+        except ValueError:
+            return {"x": 1.0, "y": 1.0, "z": 1.0}
+
     def build_datasets(self) -> list[dict]:
         """The datasets as :func:`opennmr.notebook.other_plot.dataset` dicts. Raises ValueError,
         saying which dataset and what is missing or mismatched."""
@@ -674,7 +717,8 @@ class OtherPlotPanel(QWidget):
                 if three:
                     raise ValueError(f"{who} is a curve fit, which is 2-D: switch the dimensions to 2-D "
                                      "or remove it.")
-                ds = dict(record["fit"]["ds"])
+                s = self._scales(record, who)
+                ds = op.rescaled(record["fit"]["ds"], x=s["x"], y=s["y"])
                 ds["label"] = self._label(record)
                 if record["kind"]:
                     ds["kind"] = record["kind"]
@@ -686,6 +730,7 @@ class OtherPlotPanel(QWidget):
                 raise ValueError(f"{who} needs an x and a y: choose a column, the row number, or type a list.")
             if three and record["z"] is None:
                 raise ValueError(f"{who} needs a z for a 3-D plot.")
+            scales = self._scales(record, who)
             try:
                 x = self._resolve(record, "x", i)
                 y = self._resolve(record, "y", i)
@@ -699,6 +744,7 @@ class OtherPlotPanel(QWidget):
                 out.append(op.dataset(x, y, z, label=self._label(record), kind=record["kind"],
                                       colour=record["colour"], yerr=err, xname=names["x"],
                                       yname=names["y"], zname=names["z"], colour_by=cby,
+                                      xscale=scales["x"], yscale=scales["y"], zscale=scales["z"],
                                       colour_name=self._ref_text(record["colour_by"])
                                       if record["colour_by"] and "col" in record["colour_by"] else ""))
             except ValueError as exc:
@@ -795,8 +841,17 @@ class OtherPlotPanel(QWidget):
             for k, ref in (("xname", r["x"]), ("yname", r["y"])):
                 if ref and "col" in ref:
                     extra.append(f"{k}={ref['col']!r}")
+            for axis in ("x", "y", "z") if three else ("x", "y"):
+                value = self._safe_scales(r)[axis]
+                if value != 1.0:
+                    extra.append(f"{axis}scale={value:g}")
             lines.append(f"    op.dataset({', '.join(args + extra)}),")
         lines.append("]")
+        for k, r in enumerate(self.datasets):
+            if r["fit"] is not None:
+                s = self._safe_scales(r)
+                if s["x"] != 1.0 or s["y"] != 1.0:
+                    lines.append(f"datasets[{k}] = op.rescaled(datasets[{k}], x={s['x']:g}, y={s['y']:g})")
         try:
             kwargs = self._kwargs()
         except ValueError:

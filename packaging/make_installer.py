@@ -145,6 +145,41 @@ def _copy_text_lf(source: str, target: str) -> None:
         handle.write(data)
 
 
+def find_appimagetool(environ=None, home=None) -> str:
+    """The ``appimagetool`` to build with, or a SystemExit that says what to do.
+
+    ``$APPIMAGETOOL`` first, then ``PATH``, then the usual places a download lands (the home
+    folder, ``~/Downloads``, the repository folder). A set ``$APPIMAGETOOL`` that points at
+    nothing used to be passed to the build as it was and ended in a bare "No such file or
+    directory" (user report, 2026-11-23, WSL): it is now said, and the other places are tried."""
+    environ = os.environ if environ is None else environ
+    home = os.path.expanduser("~") if home is None else home
+    named = environ.get("APPIMAGETOOL")
+    stale = None
+    if named:
+        if os.path.isfile(named) and os.access(named, os.X_OK):
+            return named
+        stale = named
+    found = shutil.which("appimagetool", path=environ.get("PATH"))
+    if found:
+        return found
+    for folder in (home, os.path.join(home, "Downloads"), os.path.dirname(PACKAGING)):
+        for name in ("appimagetool", f"appimagetool-{_arch()}.AppImage", "appimagetool.AppImage"):
+            candidate = os.path.join(folder, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    why = ""
+    if stale:
+        why = (f"$APPIMAGETOOL is set to {stale}, which is "
+               f"{'not executable (chmod +x it)' if os.path.exists(stale) else 'not there'}. ")
+    raise SystemExit(
+        why + "appimagetool not found. Download it once and make it executable:\n"
+        f"  curl -L -o ~/appimagetool https://github.com/AppImage/appimagetool/releases/download/"
+        f"continuous/appimagetool-{_arch()}.AppImage && chmod +x ~/appimagetool\n"
+        "then run this again (it is found in the home folder, on PATH, or via "
+        "APPIMAGETOOL=/full/path/to/appimagetool).")
+
+
 def linux_appimage(version: str) -> str:
     source = os.path.join(DIST_DIR, APP_NAME)
     if not os.path.exists(os.path.join(source, APP_NAME)):
@@ -157,11 +192,8 @@ def linux_appimage(version: str) -> str:
     _copy_text_lf(os.path.join(PACKAGING, "linux", "openNMR.desktop"),
                   os.path.join(appdir, "openNMR.desktop"))
     shutil.copy2(LOGO_PNG, os.path.join(appdir, "openNMR.png"))
-    tool = os.environ.get("APPIMAGETOOL") or shutil.which("appimagetool")
+    tool = find_appimagetool()
     out = os.path.join(DIST_DIR, f"openNMR-{version}-linux-{_arch()}.AppImage")
-    if tool is None:
-        raise SystemExit("appimagetool not found (set APPIMAGETOOL or put it on PATH): "
-                         "https://github.com/AppImage/appimagetool/releases")
     env = dict(os.environ, ARCH=_arch(), APPIMAGE_EXTRACT_AND_RUN="1")
     subprocess.run([tool, "--no-appstream", appdir, out], check=True, env=env)
     return out

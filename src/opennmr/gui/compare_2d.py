@@ -79,8 +79,10 @@ class Compare2DControls(QGroupBox):
             "spectrum on itself would show nothing, so these are drawn side by side.")
         self.copies_spin.valueChanged.connect(self._on_copies_changed)
         form.addRow("Panels per spectrum:", self.copies_spin)
-        self.projections_check = QCheckBox("Projections on each panel")
-        self.projections_check.setToolTip("Side by side: F1/F2 (positive) projections beside each panel.")
+        self.projections_check = QCheckBox("Projections")
+        self.projections_check.setToolTip(
+            "F1/F2 (positive) projections: one beside each panel, or, in an overlay, one trace "
+            "per spectrum in its colour. Scroll over the contours to raise or lower the lowest contour.")
         form.addRow(self.projections_check)
         self.floor_spin = QDoubleSpinBox()
         self.floor_spin.setRange(0.01, 90.0)

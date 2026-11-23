@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -52,7 +53,11 @@ def read_table(source, skip_lines: int = 0) -> pd.DataFrame:
 
     ``skip_lines``: how many lines at the top of the file (or text) to leave out first -- a
     title, instrument settings, anything before the header row or the numbers. Blank lines
-    count as lines."""
+    count as lines.
+
+    A file of several tables separated by blank lines (the Dynamics curve-fit export: its
+    fitted parameters, then the series) gives the table titled "series", else the one with the
+    most numbers; the table's title is in ``table.attrs["section"]``."""
     skip_lines = int(skip_lines or 0)
     if skip_lines < 0:
         raise ValueError("The number of header lines to skip cannot be negative.")
@@ -62,13 +67,21 @@ def read_table(source, skip_lines: int = 0) -> pd.DataFrame:
             raise ValueError("There is no data to read.")
         if "\n" not in text:
             raise ValueError(f"No such file: {text}")
-        handle = io.StringIO(text)
     else:
-        handle = text
+        text = _read_text(text)
+    # A file of several tables (Dynamics' curve-fit export writes its parameters, a blank
+    # line, then the series) plots its series: pick the block, drop its title line.
+    # csv.writer ends rows with \r\n and a text-mode write adds another \r on Windows
+    # (\r\r\n): that must not read as a blank line after every row.
+    text = re.sub(r"\r+\n|\r", "\n", text)
+    text, section = _pick_block(text, skip_lines)
+    if section is not None:
+        skip_lines = 0
+    handle = io.StringIO(text)
+
     def read(sep):
-        src = io.StringIO(text) if isinstance(handle, io.StringIO) else handle
-        return pd.read_csv(src, sep=sep, engine="python", skip_blank_lines=True, comment="#",
-                           skiprows=skip_lines or None, header=None, dtype=str)
+        return pd.read_csv(io.StringIO(text), sep=sep, engine="python", skip_blank_lines=True,
+                           comment="#", skiprows=skip_lines or None, header=None, dtype=str)
     try:
         try:
             df = read(None)
@@ -91,7 +104,59 @@ def read_table(source, skip_lines: int = 0) -> pd.DataFrame:
     df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
     if df.shape[1] < 2:
         raise ValueError("The table needs at least two numeric columns.")
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+    if section is not None:
+        df.attrs["section"] = section
+    return df
+
+
+def _read_text(path: str) -> str:
+    for encoding in ("utf-8-sig", "latin-1"):
+        try:
+            with open(path, encoding=encoding, newline="") as fh:
+                return fh.read()
+        except UnicodeDecodeError:
+            continue
+    raise ValueError(f"Could not read {path} as text.")
+
+
+def _pick_block(text: str, skip_lines: int):
+    """``(text, section)``: when ``text`` holds several tables separated by blank lines, the
+    one to plot -- a block titled "series" if there is one, else the one with the most numeric
+    rows -- without its title line; ``section`` is that title (None when there is one table or
+    ``skip_lines`` was given, which is the user choosing the start themselves)."""
+    if skip_lines:
+        return text, None
+    blocks, current = [], []
+    for line in text.splitlines():
+        if line.strip():
+            current.append(line)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    if len(blocks) < 2:
+        return text, None
+
+    def split_title(lines):
+        # a title is one cell with no separator, followed by a line that has some
+        seps = (",", "\t", ";")
+        if len(lines) > 1 and not any(s in lines[0] for s in seps) and any(s in lines[1] for s in seps):
+            return lines[0].strip(), lines[1:]
+        return "", lines
+
+    def numeric_rows(lines):
+        return sum(1 for line in lines[1:]
+                   if sum(_is_number(c) for c in re.split(r"[,\t;]", line)) >= 2)
+
+    parsed = [split_title(b) for b in blocks]
+    usable = [(title, lines) for title, lines in parsed if numeric_rows(lines) >= 1]
+    if len(usable) < 1:
+        return text, None
+    titled = [(title, lines) for title, lines in usable if "series" in title.lower()]
+    title, lines = (titled or sorted(usable, key=lambda item: -numeric_rows(item[1])))[0]
+    return "\n".join(lines), title or "table 1"
 
 
 def _is_number(value) -> bool:
@@ -167,9 +232,14 @@ def number_list(text) -> list[float]:
 def dataset(x, y, z=None, *, label: str | None = None, kind: str | None = None,
             colour: str | None = None, yerr=None, marker: str | None = None,
             linestyle: str | None = None, xname: str = "", yname: str = "", zname: str = "",
-            colour_by=None, colour_name: str = "") -> dict:
+            colour_by=None, colour_name: str = "", xscale: float = 1.0, yscale: float = 1.0,
+            zscale: float = 1.0) -> dict:
     """One series for :func:`plot_datasets`: ``x`` and ``y`` (and ``z`` for a 3-D figure) as
     sequences of numbers.
+
+    ``xscale``, ``yscale``, ``zscale``: multiply that axis' numbers (and, for ``yscale``, the
+    ``yerr`` error bars, by its size) by a constant before plotting -- to put a series in other
+    units, or on the scale of another. The result is what is plotted and what the axis shows.
 
     ``kind``: draw this one as ``scatter``/``line``/``line_markers``/``bar`` (the figure's
     ``kind`` when ``None``) -- a measured profile as points and its fit as a line, say.
@@ -179,6 +249,9 @@ def dataset(x, y, z=None, *, label: str | None = None, kind: str | None = None,
     xs = np.asarray(x, dtype=float)
     ys = np.asarray(y, dtype=float)
     zs = None if z is None else np.asarray(z, dtype=float)
+    for name, value in (("xscale", xscale), ("yscale", yscale), ("zscale", zscale)):
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be a finite number, not {value!r}.")
     if xs.ndim != 1 or ys.ndim != 1 or len(xs) != len(ys) or (zs is not None and len(zs) != len(xs)):
         raise ValueError("x, y (and z) of a dataset must be one column each, of the same length.")
     if kind is not None and kind not in KINDS:
@@ -187,9 +260,29 @@ def dataset(x, y, z=None, *, label: str | None = None, kind: str | None = None,
     if err is not None and err.shape != ys.shape:
         raise ValueError("yerr must be as long as y.")
     cvals = None if colour_by is None else np.asarray(colour_by, dtype=float)
+    xs, ys = xs * float(xscale), ys * float(yscale)
+    zs = None if zs is None else zs * float(zscale)
+    err = None if err is None else err * abs(float(yscale))
     return {"x": xs, "y": ys, "z": zs, "label": label, "kind": kind, "colour": colour, "yerr": err,
             "marker": marker, "linestyle": linestyle, "xname": xname, "yname": yname, "zname": zname,
             "colour_by": cvals, "colour_name": colour_name}
+
+
+def rescaled(ds: dict, *, x: float = 1.0, y: float = 1.0, z: float = 1.0) -> dict:
+    """A copy of dataset ``ds`` with its x, y (and error bars) and z multiplied by constants --
+    for a dataset that came ready-made, like those of :func:`curve_fit_datasets`. A fitted curve
+    and its points scaled by the same ``y`` stay on top of each other."""
+    for name, value in (("x", x), ("y", y), ("z", z)):
+        if not np.isfinite(value):
+            raise ValueError(f"The {name} scale must be a finite number, not {value!r}.")
+    out = dict(ds)
+    out["x"] = np.asarray(ds["x"], dtype=float) * float(x)
+    out["y"] = np.asarray(ds["y"], dtype=float) * float(y)
+    if ds.get("z") is not None:
+        out["z"] = np.asarray(ds["z"], dtype=float) * float(z)
+    if ds.get("yerr") is not None:
+        out["yerr"] = np.asarray(ds["yerr"], dtype=float) * abs(float(y))
+    return out
 
 
 def curve_fit_datasets(source, peak=None, *, points: bool = True, curve: bool = True,

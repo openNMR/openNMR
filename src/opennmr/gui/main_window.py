@@ -3152,6 +3152,7 @@ class MainWindow(QMainWindow):
         self.compare_2d_controls = Compare2DControls()
         self.compare_2d_controls.changed.connect(self._on_compare_controls_changed)
         self.compare_2d_controls.add_inset_requested.connect(self._on_add_compare_inset)
+        self.compare_canvas.compareContourScrolled.connect(self._on_compare_contour_scrolled)
         self.compare_2d_controls.link_toggled.connect(
             lambda on: self.compare_canvas.set_panels_linked(on))
         self.compare_2d_controls.setVisible(False)
@@ -10201,7 +10202,12 @@ class MainWindow(QMainWindow):
         self._compare_plot_row_positions = {}
 
         controls = self.compare_2d_controls
-        labels = [self.session.label(row) for row, _c in rows_and_candidates]
+        # The label of what each *entry* is -- the row here is the position in
+        # the Compare list, not the Session row (they differ as soon as the
+        # list holds anything but the first n spectra: user report, 2026-11-23,
+        # "the legend shows the first n spectra, not the selected ones").
+        labels = [self._compare_entry_label(self.compare_list.item(row).data(Qt.ItemDataRole.UserRole))
+                  for row, _c in rows_and_candidates]
         spectra = [c for _row, c in rows_and_candidates]
         # "Panels per spectrum": the same spectrum more than once, so
         # different regions of it can be compared side by side.
@@ -10252,7 +10258,8 @@ class MainWindow(QMainWindow):
         if layout == "overlay":
             self.compare_canvas.show_2d_overlay(
                 spectra, labels=labels, insets=controls.inset_specs() if with_insets else None,
-                factor=factor, clevels=clevels)
+                factor=factor, clevels=clevels,
+                projections=controls.projections_check.isChecked())
         else:
             self.compare_label_controls.set_panel_count(len(spectra))
             insets = ([controls.inset_specs(panel=i) for i in range(len(spectra))]
@@ -10263,6 +10270,27 @@ class MainWindow(QMainWindow):
                 link_axes=controls.link_check.isChecked(), insets=insets,
                 factor=factor, clevels=clevels,
                 panel_labels=self.compare_label_controls.args() if len(spectra) > 1 else None)
+
+    def _on_compare_contour_scrolled(self, step: float) -> None:
+        """Scrolling over the contours of the Compare 2D plot moves the lowest
+        contour (Compare > 2D spectra > Lowest contour) as it does on a
+        single 2D, and keeps the zoom you are in."""
+        spin = self.compare_2d_controls.floor_spin
+        new = min(max(spin.value() * step, spin.minimum()), spin.maximum())
+        if abs(new - spin.value()) < 1e-9:
+            return
+        canvas = self.compare_canvas
+        limits = [(ax.get_xlim(), ax.get_ylim()) for ax in canvas._panel_axes]
+        blocked = spin.blockSignals(True)
+        spin.setValue(new)
+        spin.blockSignals(blocked)
+        self.compare_2d_controls._debounce.stop()
+        self._refresh_compare_view(switch_tab=False, force_render=True)
+        if len(canvas._panel_axes) == len(limits):
+            for ax, (xl, yl) in zip(canvas._panel_axes, limits):
+                ax.set_xlim(xl)
+                ax.set_ylim(yl)
+            canvas.canvas.draw_idle()
 
     def _on_add_compare_inset(self) -> None:
         """Turn the zoomed region of the Compare 2D plot into an inset
@@ -25732,12 +25760,41 @@ class MainWindow(QMainWindow):
         region_box = QGroupBox("Integration Regions")
         region_layout = QVBoxLayout(region_box)
 
+        # Selecting and integrating are one step (explicit user request,
+        # 2026-10-16: "merge the 'select regions' and 'integrate' buttons,
+        # so that any region selected is automatically integrated"). A
+        # region typed into the table, removed, or found automatically
+        # is integrated the same way.
+        self.select_region_button = QPushButton("Select and Integrate Regions from Plot")
+        self.select_region_button.setCheckable(True)
+        # The first and most obvious control of this box (user request,
+        # 2026-11-23): big, bold, and filled with the accent colour while on.
+        self.select_region_button.setMinimumHeight(40)
+        self.select_region_button.setObjectName("selectRegionButton")
+        self.select_region_button.setStyleSheet(
+            "QPushButton#selectRegionButton { font-weight: 600; padding: 8px 12px; }"
+            "QPushButton#selectRegionButton:checked { background-color: palette(highlight); "
+            "color: palette(highlighted-text); }")
+        self.select_region_button.setToolTip(
+            "While on, drag across the Spectrum plot: each dragged range is added "
+            "to the table and every region is integrated at once – the selected "
+            "1D spectrum, or every slice of a pseudo-2D series. Typing, removing or "
+            "finding regions re-integrates too.\n\n"
+            "Also Analysis ▸ Select and Integrate Regions from Plot (Ctrl+Shift+I; "
+            "Cmd+Shift+I on macOS)."
+        )
+        self.select_region_button.toggled.connect(self._on_select_region_toggled)
+        region_layout.addWidget(self.select_region_button)
+
+
         label_row = QHBoxLayout()
         self.integral_labels_check = QCheckBox("Label integrals under the peaks")
+        # Never taller than one line.
+        self.integral_labels_check.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.integral_labels_check.setToolTip(
-            "Write each region's integral under its peak on the 1D spectrum, scaled so the "
-            "smallest is 1. The labels stay on the plot (and in saved figures) after you leave "
-            "this tab; untick to remove them.")
+            "Write each region's integral under its peak,\n"
+            "scaled so the smallest is 1. The labels stay on the plot\n"
+            "(and in saved figures) until you untick this.")
         self.integral_labels_check.toggled.connect(lambda _on: self._sync_integral_labels())
         label_row.addWidget(self.integral_labels_check)
         # The label options appear only once the labels are switched on (user request,
@@ -25865,23 +25922,6 @@ class MainWindow(QMainWindow):
         region_button_row.addWidget(clear_regions_button)
         region_layout.addLayout(region_button_row)
 
-        # Selecting and integrating are one step (explicit user request,
-        # 2026-10-16: "merge the 'select regions' and 'integrate' buttons,
-        # so that any region selected is automatically integrated"). A
-        # region typed into the table, removed, or found automatically
-        # is integrated the same way.
-        self.select_region_button = QPushButton("Select and Integrate Regions from Plot")
-        self.select_region_button.setCheckable(True)
-        self.select_region_button.setToolTip(
-            "While on, drag across the Spectrum plot: each dragged range is added "
-            "to the table and every region is integrated at once – the selected "
-            "1D spectrum, or every slice of a pseudo-2D series. Typing, removing or "
-            "finding regions re-integrates too.\n\n"
-            "Also Analysis ▸ Select and Integrate Regions from Plot (Ctrl+Shift+I; "
-            "Cmd+Shift+I on macOS)."
-        )
-        self.select_region_button.toggled.connect(self._on_select_region_toggled)
-        region_layout.addWidget(self.select_region_button)
 
         # Regions found from a threshold (explicit user request,
         # 2026-10-06): relaxometry.find_integration_regions over every

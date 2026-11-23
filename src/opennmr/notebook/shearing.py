@@ -425,12 +425,33 @@ def _f1_scale(convention, c1_after: float, kappa_t2: float) -> float:
                      f"{list(SCALE_CONVENTIONS)} or a number.")
 
 
+def default_f1_sign(spectrum=None, experiment: str = "mqmas") -> int:
+    """The F1 direction (``f1_sign``) to start from for ``spectrum``.
+
+    TopSpin's own ``xfshear`` (MQMAS/STMAS) always applies the phase
+    that moves a peak by ``nu1 + R nu2`` in the displayed Bruker F1,
+    whatever the quadrature mode. In openNMR's convention that is
+    ``f1_sign = -1`` for the p = 0 -> +3 -> -1 echo: checked on a
+    27Al 3QMAS of YAG (States-TPPI, I = 5/2) against TopSpin's own
+    ``xfshear`` result, where the correlation of the two sheared
+    spectra is 0.94 with -1 and 0.22 with +1 (sites smeared into
+    diagonal streaks), and peaks at kappa = 19/12 exactly. So Bruker
+    MQMAS/STMAS data default to -1; everything else (other vendors,
+    other experiments) to +1. Check against the data
+    (:func:`estimate_shear`) where in doubt."""
+    if spectrum is None or experiment not in ("mqmas", "stmas"):
+        return 1
+    if _is_dict(spectrum):      # NMR2dimport's dict is always TopSpin data
+        return -1
+    return -1 if getattr(spectrum.metadata, "vendor", None) == "bruker" else 1
+
+
 def make_shear_plan(experiment: str = "mqmas", *, spin: float | None = None,
                     nucleus: str | None = None, mq_order: int = 3,
                     pathway: str = "echo", satellite: int = 1,
                     das_angles: tuple = (37.38, 79.19), second_shear: bool = False,
                     split_t1: bool = False,
-                    f1_sign: int = 1, convention=None,
+                    f1_sign: int | None = None, convention=None, spectrum=None,
                     kappa_t2: float | None = None, kappa_t1: float | None = None,
                     a: tuple | None = None, b: tuple | None = None,
                     cs: tuple | None = None, qis: tuple | None = None,
@@ -465,7 +486,10 @@ def make_shear_plan(experiment: str = "mqmas", *, spin: float | None = None,
         with the effective t1 coefficients
         ``x_eff = (x_MQ - kappa x_CT) / (1 + |kappa|)``. Assumes the F1
         dwell (Bruker IN0) is the whole t1 increment.
-    f1_sign : +1 or -1
+    spectrum : the 2D the plan is for (optional). With ``f1_sign`` left at
+        ``None`` it decides the F1 direction, see :func:`default_f1_sign`
+        (TopSpin data: -1 for MQMAS/STMAS; +1 otherwise).
+    f1_sign : +1 or -1, or ``None`` (default: from ``spectrum``, else +1)
         +1 when F1 is displayed with the same sense as the t1
         coherence's frequency, -1 when reversed (receiver/quadrature
         convention). :func:`estimate_shear` tells you which.
@@ -485,6 +509,8 @@ def make_shear_plan(experiment: str = "mqmas", *, spin: float | None = None,
     exp = experiment.lower()
     if exp not in EXPERIMENTS:
         raise ValueError(f"Unknown experiment {experiment!r}; use one of {list(EXPERIMENTS)}.")
+    if f1_sign is None:
+        f1_sign = default_f1_sign(spectrum, exp)
     if f1_sign not in (1, -1):
         raise ValueError("f1_sign must be +1 or -1.")
     if spin is None and nucleus is not None:

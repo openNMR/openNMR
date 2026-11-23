@@ -340,3 +340,27 @@ def test_czjzek_sampling_works_and_selftest_has_a_sobol_step():
     assert len(cq) == 1024 and (cq >= 0).all() and ((eta >= 0) & (eta <= 1)).all()
     with open(os.path.join(REPO, "src", "opennmr", "selftest.py"), encoding="utf-8") as handle:
         assert 'report.run("sobol", sobol)' in handle.read()
+
+
+def test_appimagetool_is_found_or_the_missing_path_is_said(tmp_path):
+    """2026-11-23: APPIMAGETOOL pointed at a file that was not there and the build died with a
+    bare FileNotFoundError. Now it names the path and the way to get the tool; a good tool in the
+    usual places is used instead."""
+    mi = _load("make_installer")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {"APPIMAGETOOL": str(home / "appimagetool"), "PATH": str(tmp_path / "nowhere")}
+    with pytest.raises(SystemExit) as exc:
+        mi.find_appimagetool(env, str(home))
+    message = str(exc.value)
+    assert str(home / "appimagetool") in message and "not there" in message and "chmod +x" in message
+    tool = home / "appimagetool"
+    tool.write_text("#!/bin/sh\n")
+    if os.name != "nt":                      # Windows has no execute bit to test
+        with pytest.raises(SystemExit, match="not executable"):
+            mi.find_appimagetool(env, str(home))
+    tool.chmod(0o755)
+    assert mi.find_appimagetool(env, str(home)) == str(tool)
+    assert mi.find_appimagetool({"PATH": ""}, str(home)) == str(tool)       # found without the variable
+    with pytest.raises(SystemExit, match="appimagetool not found"):
+        mi.find_appimagetool({"PATH": ""}, str(tmp_path / "empty"))

@@ -1201,6 +1201,7 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
                   equal_tickspacing=False, tick_number=None,
                   tick_dir='in', tick_length=4, tick_width=1.0, tick_pad=4,
                   show_nQ_line=False, nQ=1, nQ_colors=None, insets=None,
+                  show_projections=False, projection_size=0.5, projection_pad=0.1,
                   ax=None, fig=None, save_fig=False, fig_name='nmr_2d_overlay',
                   save_format='png'):
     """Overlay 2-6 2D NMR spectra as line contours on one set of axes,
@@ -1216,6 +1217,12 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
     list of matplotlib colours, one per spectrum.
 
     ``insets`` : zoomed insets of the overlay, see :func:`draw_insets`.
+
+    ``show_projections`` : ``True`` (both), ``False``, ``'f1'`` or ``'f2'``:
+    the positive (maximum) F2 projection above and F1 projection left of
+    the contours, one trace per spectrum in its own colour, each scaled to
+    its own maximum like its contours. The strips are in
+    ``ax.opennmr_projection_axes`` (``{"f1": ax or None, "f2": ...}``).
 
     Returns ``fig, ax``.
     """
@@ -1351,6 +1358,43 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
         x_line = np.linspace(xmin, xmax, 500)
         for nq, colour in zip(nQ_list, nQ_colors):
             ax.plot(x_line, nq * x_line, linestyle='--', linewidth=1.5, color=colour, alpha=0.8, zorder=10)
+
+    ax.opennmr_projection_axes = {"f1": None, "f2": None}
+    if show_projections not in (True, False, 'f1', 'f2'):
+        raise ValueError("show_projections must be True, False, 'f1', or 'f2'")
+    if show_projections:
+        divider = AxesDivider(ax, xref=axes_size.Scaled(1), yref=axes_size.Scaled(1))
+        ax.set_axes_locator(divider.new_locator(nx=0, ny=0))
+        divider.set_aspect(False)
+        strips = {}
+        if show_projections in (True, 'f2'):
+            strips["f2"] = divider.append_axes("top", projection_size, pad=projection_pad, sharex=ax)
+        if show_projections in (True, 'f1'):
+            strips["f1"] = divider.append_axes("left", projection_size, pad=projection_pad, sharey=ax)
+        for strip in strips.values():
+            strip.tick_params(axis='both', which='both', bottom=False, top=False, left=False,
+                              right=False, labelbottom=False, labeltop=False, labelleft=False,
+                              labelright=False)
+            for spine in ('top', 'right', 'bottom', 'left'):
+                strip.spines[spine].set_visible(False)
+        for spectrum, colour in zip(spectra, resolved_colours):
+            data = np.asarray(spectrum.data, dtype=np.float64)
+            x_axis = np.asarray(spectrum.axes[1].ppm, dtype=float)
+            y_axis = (np.asarray(spectrum.axes[0].index, dtype=float) if spectrum.is_pseudo_2d
+                      else np.asarray(spectrum.axes[0].ppm, dtype=float))
+            if "f2" in strips:
+                proj = np.max(data, axis=0)
+                top = float(np.max(proj)) or 1.0
+                strips["f2"].plot(x_axis, proj / top, color=colour, linewidth=contour_linewidth)
+            if "f1" in strips:
+                proj = np.max(data, axis=1)
+                top = float(np.max(proj)) or 1.0
+                strips["f1"].plot(proj / top, y_axis, color=colour, linewidth=contour_linewidth)
+        if "f2" in strips:
+            strips["f2"].set_ylim(-0.02, 1.08)
+        if "f1" in strips:
+            strips["f1"].set_xlim(1.08, -0.02)      # peaks point away from the contour, as in one 2D
+        ax.opennmr_projection_axes.update(strips)
 
     if labels is not None:
         ax.legend(**(legend_kwargs or {}))
