@@ -51,3 +51,4 @@ Claude outputs/
 /release-*/
 /.release-venv/
 opennmr_src.zip
+_to_delete/
