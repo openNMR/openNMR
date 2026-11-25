@@ -560,6 +560,29 @@ def trim_values_to_rows(values, n_rows: int):
     return values, ""
 
 
+class _FitExportParent:
+    """Link from a spectrum made by an "Export ... Fit to Pseudo-2D" to
+    the spectrum whose per-slice fit it shows.
+
+    Holds the parent's ``metadata.raw`` dict (which survives the
+    ``dataclasses.replace`` calls that swap spectrum objects in the
+    session) rather than the spectrum itself, plus its label for
+    messages. Copying it -- a deepcopy of a spectrum's raw dict -- gives
+    the same link back, never a second copy of the parent's data. It is
+    stored under a ``_`` key, so it is never written to a save point or
+    sidecar (a reopened export has no parent link, and says so)."""
+
+    def __init__(self, raw: dict, label: str):
+        self.raw = raw
+        self.label = label
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __copy__(self):
+        return self
+
+
 class MainWindow(QMainWindow):
     # Rows kept for later follow their experiment (session.TrackedRow): a
     # row removed or reordered meanwhile cannot make them mean another
@@ -23281,7 +23304,9 @@ class MainWindow(QMainWindow):
             "Reconstruct every fitted slice's summed peak lineshape on "
             "the full ppm axis and stack them into a new pseudo-2D "
             "spectrum – lets the fitted series be viewed/compared "
-            "exactly like the raw data. Needs Fit Spectrum to have "
+            "exactly like the raw data. Optional, and not a step before "
+            "Dynamics ▸ Fit Curve (which uses the per-slice fit on this spectrum, "
+            "not the exported one). Needs Fit Spectrum to have "
             "been run across at least two slices."
         )
         self.export_isotropic_pseudo2d_button.setEnabled(False)
@@ -31783,6 +31808,31 @@ class MainWindow(QMainWindow):
         self.export_integration_pseudo2d_button.setEnabled(bool(is_integration))
         self._refresh_model_series_buttons()
 
+    def _tag_fit_export(self, pseudo2d: NMRSpectrum, parent_index: int) -> None:
+        """Record on an exported fit series which spectrum it came from.
+
+        The export shows the fitted lineshapes (a model, not
+        measurements) and carries none of the per-site areas: those
+        stay with the parent's ``slice_fit_results``. So Dynamics ▸
+        Fit Curve on the export is redirected to the parent (see
+        :meth:`_fit_export_parent_index`) instead of finding nothing."""
+        pseudo2d.metadata.raw["_fit_export_parent"] = _FitExportParent(
+            self.session.spectra[parent_index].metadata.raw,
+            self.session.label(parent_index))
+
+    def _fit_export_parent_index(self, spectrum: NMRSpectrum):
+        """``(parent session index or None, parent label)`` for a spectrum
+        made by an "Export ... Fit to Pseudo-2D", or ``None`` for any
+        other spectrum. The index is ``None`` when the parent has since
+        been removed."""
+        link = (spectrum.metadata.raw or {}).get("_fit_export_parent")
+        if not isinstance(link, _FitExportParent):
+            return None
+        for i, other in enumerate(self.session.spectra):
+            if other.metadata.raw is link.raw:
+                return i, link.label
+        return None, link.label
+
     def _slices_to_pseudo2d_traces(self, results: list[dict], values) -> list[NMRSpectrum]:
         """One :class:`NMRSpectrum` trace per slice, sharing that
         slice's own ppm axis (from ``result["slice"]``) but with
@@ -31817,6 +31867,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Export failed", str(exc))
             return
+        self._tag_fit_export(pseudo2d, index)
         self._add_derived_spectrum(pseudo2d, f"Fit({self.session.label(index)})")
 
     def _on_export_integration_pseudo2d_clicked(self) -> None:
@@ -31916,7 +31967,8 @@ class MainWindow(QMainWindow):
             "lineshapes held fixed — only each site's intensity (and a linear baseline) "
             "changes, which is what a relaxation series does.</li>"
             "<li>Go to <i>Dynamics</i> ▸ <i>Fit Curve</i>: the per-site areas are "
-            "waiting there.</li></ol>")
+            "waiting there. (Exporting the fit to a pseudo-2D is optional and only for "
+            "viewing it against the data; Fit Curve does not need it.)</li></ol>")
         note.setTextFormat(Qt.TextFormat.RichText)
         note.setWordWrap(True)
         v.addWidget(note)
@@ -31932,7 +31984,10 @@ class MainWindow(QMainWindow):
         export_button = QPushButton(f"Export {label.replace('&', '&&')} Fit to Pseudo-2D…")
         export_button.setToolTip(
             "Stack every slice's fitted lineshape into a new pseudo-2D spectrum, to view or "
-            "compare with the data. Available once every slice has been fitted.")
+            "compare with the data. Optional, and not a step before Dynamics ▸ Fit Curve: "
+            "the exported spectrum shows the fitted lineshapes only, not the per-site areas, "
+            "which stay with this spectrum (Fit Curve on the export uses them from here). "
+            "Available once every slice has been fitted.")
         export_button.setEnabled(False)
         export_button.clicked.connect(
             lambda _c=False, k=kind: self._on_export_model_pseudo2d_clicked(k))
@@ -32427,6 +32482,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Export failed", str(exc))
             return
+        self._tag_fit_export(pseudo2d, index)
         self._add_derived_spectrum(
             pseudo2d, f"{self._MODEL_SERIES_LABELS[kind]} fit({self.session.label(index)})")
 
@@ -33037,8 +33093,33 @@ class MainWindow(QMainWindow):
         showing for a different selection), then reuses its spectral
         fit if one already exists (from "Fit Spectrum"), or runs one
         now with the peak_defs just brought into view."""
-        self._select_single_row(index)
         spectrum = self.session.spectra[index]
+        if not spectrum.metadata.raw.get("slice_fit_results"):
+            origin = self._fit_export_parent_index(spectrum)
+            if origin is not None:
+                # An exported fit series shows the fitted lineshapes only;
+                # the per-site areas Fit Curve needs are on the spectrum
+                # it was exported from (issue #1, openNMR-issues).
+                parent_index, parent_label = origin
+                parent = (self.session.spectra[parent_index]
+                          if parent_index is not None else None)
+                if parent is None or not parent.metadata.raw.get("slice_fit_results"):
+                    QMessageBox.information(
+                        self, "Fit Curve needs the measured series",
+                        f"{self.session.label(index)} is an exported picture of the fit of "
+                        f"{parent_label}: it holds the fitted lineshapes, not the per-site "
+                        "areas that Fit Curve fits.\n\n"
+                        + ("That spectrum is no longer open. " if parent is None else
+                           "That spectrum no longer has its slice fit. ")
+                        + "Select the original series, fit its slices again (Fit Every "
+                        "Slice, Fit Spectrum or Integrate), then press Fit Curve.")
+                    return
+                self.statusBar().showMessage(
+                    f"Fit Curve uses the per-site areas of {parent_label}, not the exported "
+                    f"picture of its fit ({self.session.label(index)}).", 10000)
+                self._on_fit_curve_pseudo2d_action(parent_index)
+                return
+        self._select_single_row(index)
         if not spectrum.metadata.raw.get("slice_fit_results") and self.peak_table.rowCount() == 0:
             # Nothing measured and no peaks: integrate the regions if
             # there are any, rather than demanding a peak (user report,

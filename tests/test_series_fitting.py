@@ -331,3 +331,91 @@ def test_gui_slice_reopened_without_its_link_finds_its_parent_by_content(window)
     for key in ("slice_parent", "slice_axis", "slice_index"):   # as after reopening a session
         window.session.spectra[child].metadata.raw.pop(key, None)
     assert window._slice_parent_of(child) == (parent_index, 4)
+
+
+# -- exported fit series: Fit Curve on it uses the parent's per-site areas ------------
+# (issue #1, openNMR-issues: the export carries the fitted lineshapes only, so Fit Curve
+# on it found nothing)
+
+def _fit_series_and_set_up_curve(window):
+    """Fit every slice with the CSA model, and set the Dynamics controls up for it."""
+    spectrum = _load_ir(window)
+    window.slice_spin.setValue(len(DELAYS))
+    _fit_csa_on_selected(window)
+    window._model_series_widgets["csa"][0].click()
+    window.delay_source_combo.setCurrentIndex(1)                  # manual list
+    window.delay_unit_combo.setCurrentIndex(window.delay_unit_combo.findText("s"))
+    window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in DELAYS))
+    window.relaxation_model_combo.setCurrentIndex(
+        window.relaxation_model_combo.findData("inversion_recovery"))
+    window.value_source_combo.setCurrentIndex(window.value_source_combo.findData("area"))
+    return spectrum
+
+
+def _export_csa_fit(window):
+    n_before = len(window.session)
+    window._model_series_widgets["csa"][1].click()
+    assert len(window.session) == n_before + 1
+    return n_before                                   # the export's session index
+
+
+def test_gui_fit_curve_on_the_exported_fit_uses_the_parents_areas(window):
+    spectrum = _fit_series_and_set_up_curve(window)
+    parent_index = window._selected_index()
+    exported_index = _export_csa_fit(window)
+    exported = window.session.spectra[exported_index]
+    assert window._selected_index() == exported_index            # the export is selected
+    assert "slice_fit_results" not in exported.metadata.raw      # it holds the lineshapes only
+    assert window._fit_export_parent_index(exported) == (parent_index, window.session.label(parent_index))
+    window._shown.clear()
+
+    window._on_fit_curve_button_clicked()                        # on the export
+    assert not window._shown                                     # no "Nothing to fit yet"
+    assert window._selected_index() == parent_index              # redirected to the parent
+    t1 = [r["params"]["T1"] for r in window._relaxation_fit_results]
+    assert t1 == [pytest.approx(T1_A, rel=0.03), pytest.approx(T1_B, rel=0.03)]
+    # The export is untouched.
+    assert "slice_fit_results" not in window.session.spectra[exported_index].metadata.raw
+
+
+def test_gui_fit_curve_on_the_parent_is_unchanged_by_exporting(window):
+    _fit_series_and_set_up_curve(window)
+    parent_index = window._selected_index()
+    window._on_fit_curve_button_clicked()
+    before = [r["params"]["T1"] for r in window._relaxation_fit_results]
+    _export_csa_fit(window)
+    window._select_single_row(parent_index)
+    window._on_fit_curve_button_clicked()
+    after = [r["params"]["T1"] for r in window._relaxation_fit_results]
+    assert after == pytest.approx(before)
+
+
+def test_gui_fit_curve_on_the_exported_fit_explains_when_the_parent_is_gone(window):
+    _fit_series_and_set_up_curve(window)
+    exported_index = _export_csa_fit(window)
+    window.session.remove(0)                                     # the parent leaves the session
+    exported_index -= 1
+    exported = window.session.spectra[exported_index]
+    assert window._fit_export_parent_index(exported)[0] is None
+    window._select_single_row(exported_index)
+    window._shown.clear()
+    window._on_fit_curve_button_clicked()
+    assert window._shown and "no longer open" in window._shown[-1][1]
+    assert "exported picture of the fit" in window._shown[-1][1]
+
+
+def test_gui_fit_export_link_survives_copies_and_is_not_saved(window):
+    import copy
+    from opennmr.io import persistence
+    _fit_series_and_set_up_curve(window)
+    exported = window.session.spectra[_export_csa_fit(window)]
+    link = exported.metadata.raw["_fit_export_parent"]
+    assert copy.deepcopy(exported.metadata.raw)["_fit_export_parent"] is link
+    assert "_fit_export_parent" not in persistence.processing_state(exported)
+
+
+def test_gui_export_button_tooltips_say_the_export_is_optional(window):
+    for _fit, export_button, _status in window._model_series_widgets.values():
+        assert "Optional" in export_button.toolTip()
+        assert "Fit Curve" in export_button.toolTip()
+    assert "Optional" in window.export_isotropic_pseudo2d_button.toolTip()
