@@ -558,7 +558,96 @@
     "Site Site 2: nucleus 63Cu; δiso 1961.95 ppm; amount 2.73071e+08; FWHM 86.0613 ppm (pseudo_voigt)"
    ],
    "summary": "kind: combined\nsettings: {\"larmor_Hz\": 132293800.0, \"mas_Hz\": 100000.0, \"order\": \"second\", \"transitions\": \"all\", \"rotor_angle\": \"magic\", \"n_zcw\": 4181, \"n_gamma\": null, \"use_symmetry\":…\nlog: Site 1 (23Na, I = 1.5): δiso 33.3556 ppm; CSA Δ -1215.45 ppm, η 0.000349427; quadrupolar C_Q 0.81248 MHz, η_Q 1.35095e-05; amount 5.89176e+09, FWHM 33.0498 ppm pseudo_voigt\nSite 2 (63Cu, I = 1.5): δiso 1961.95 ppm; amount 2.73071e+08, FWHM 86.0613 ppm pseudo_voigt\nMAS 100 kHz, nu0 = 132.2938 MHz, quadrupolar second-order, transitions all, Site 1: 5797 orientations (octant), Site 2: 5797 orientations (octant).\n63Cu on the 23Na scale: its 0 ppm is at +2403.34 ppm (ratio 1.002403343, from the IUPAC frequency ratios)."
+  },
+  {
+   "id": 5,
+   "time": "2026-11-26T22:02:51+01:00",
+   "runs": 3,
+   "panel": "motion",
+   "label": "Anisotropic motion",
+   "inputs": {
+    "sites": [
+     {
+      "site": {
+       "amount": 1.0,
+       "delta_iso": 0.0,
+       "eta": 0.0,
+       "fwhm": 2.0,
+       "interactions": [
+        {
+         "C_Q": 0.17,
+         "eta_Q": 0.0,
+         "type": "quadrupolar"
+        }
+       ],
+       "label": "C–D",
+       "lineshape": "lorentzian",
+       "nucleus": "2H",
+       "spin": 1.0
+      },
+      "euler": [
+       "0.0",
+       "70.5",
+       "0.0"
+      ],
+      "dipolar": ""
+     }
+    ],
+    "modes": [
+     {
+      "kind": "ring_jump",
+      "param": "3",
+      "axis": "z",
+      "k": "1e5",
+      "Ea": "",
+      "nu0": "",
+      "sense": "nearest",
+      "step": ""
+     },
+     {
+      "kind": "ring_jump",
+      "param": "3",
+      "axis": "x",
+      "k": "100000",
+      "Ea": "",
+      "nu0": "",
+      "sense": "nearest",
+      "step": ""
+     }
+    ],
+    "hops": [],
+    "field_T": 9.4,
+    "order": "first",
+    "transitions": "all",
+    "mas_kHz": 0.0,
+    "echo": null,
+    "tau_us": 30.0,
+    "gauss_ppm": 0.0,
+    "auto_axis": true,
+    "axis": [
+     200.0,
+     -200.0,
+     2048
+    ],
+    "temperature": "",
+    "sweep": "mode:0",
+    "values": "1e3:1e8:6 log",
+    "limits": true,
+    "overlay_value": "",
+    "extra": {
+     "Environment 1": "C–D | 0 | C_Q 0.17 MHz, η_Q 0 | 0.0 | 70.5 | 0.0 | ",
+     "Mode 1": "kind ring_jump, param 3, axis z, k 1e5, sense nearest",
+     "Mode 2": "kind ring_jump, param 3, axis x, k 100000, sense nearest"
+    }
+   },
+   "inputs_text": [
+    "Environment 1: C–D | 0 | C_Q 0.17 MHz, η_Q 0 | 0.0 | 70.5 | 0.0 | ",
+    "Mode 1: kind ring_jump, param 3, axis z, k 1e5, sense nearest",
+    "Mode 2: kind ring_jump, param 3, axis x, k 100000, sense nearest"
+   ],
+   "summary": "6 spectra, Rate of axis 1 (Ring jump (n-fold)), s⁻¹: 1e+03, 1e+04, 1e+05, 1e+06, 1e+07, 1e+08.",
+   "updated": "2026-11-26T22:03:07+01:00"
   }
  ],
- "next_id": 5
+ "next_id": 6
 }

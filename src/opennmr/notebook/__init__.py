@@ -113,6 +113,7 @@ from .motion import (
     effective_site, averaged_spectrum, limit_spectra, plot_motion_series,
     mode_from_spec, model_from_spec, motion_axis_limits, motion_overlay, motion_overlay_series,
     plot_motion_overlay, plot_motion_overlay_stack, plot_motion_limits,
+    interaction_site, rotation_model,
 )
 from .motion_fit import (
     fit_motion, fit_motion_rates, arrhenius_regression, fit_parameter_list as motion_fit_parameters,
@@ -634,7 +635,7 @@ __all__ = [
     "limit_spectra", "plot_motion_series",
     "mode_from_spec", "model_from_spec", "motion_axis_limits", "motion_overlay",
     "motion_overlay_series", "plot_motion_overlay", "plot_motion_overlay_stack",
-    "plot_motion_limits",
+    "plot_motion_limits", "interaction_site", "rotation_model",
     "motion_fit", "fit_motion", "fit_motion_rates", "arrhenius_regression",
     "motion_fit_parameters", "plot_motion_fit", "plot_motion_rates",
     # dynamics: Tikhonov regularisation (distributions and 2D maps)

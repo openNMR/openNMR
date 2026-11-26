@@ -2,7 +2,7 @@ openNMR simulation log
 ======================
 
 Every simulation run in openNMR, with its inputs. Written from
-opennmr_simulation_history.json after every run; edits here are not read back --
+opennmr_simulation_history.json after every run; edits here are not read back.
 use File ▸ Simulation History in openNMR to restore a run's inputs.
 
 ------------------------------------------------------------------------
@@ -131,3 +131,14 @@ Wednesday 21 October 2026 (UTC+02:00)
       Site 2 (63Cu, I = 1.5): δiso 1961.95 ppm; amount 2.73071e+08, FWHM 86.0613 ppm pseudo_voigt
       MAS 100 kHz, nu0 = 132.2938 MHz, quadrupolar second-order, transitions all, Site 1: 5797 orientations (octant), Site 2: 5797 orientations (octant).
       63Cu on the 23Na scale: its 0 ppm is at +2403.34 ppm (ratio 1.002403343, from the IUPAC frequency ratios).
+
+------------------------------------------------------------------------
+Thursday 26 November 2026 (UTC+01:00)
+------------------------------------------------------------------------
+22:02:51–22:03:07  #5 Anisotropic motion (run 3 times; the last run is shown)
+    Inputs:
+      Environment 1: C–D | 0 | C_Q 0.17 MHz, η_Q 0 | 0.0 | 70.5 | 0.0 | 
+      Mode 1: kind ring_jump, param 3, axis z, k 1e5, sense nearest
+      Mode 2: kind ring_jump, param 3, axis x, k 100000, sense nearest
+    Result:
+      6 spectra, Rate of axis 1 (Ring jump (n-fold)), s⁻¹: 1e+03, 1e+04, 1e+05, 1e+06, 1e+07, 1e+08.

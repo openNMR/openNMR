@@ -101,6 +101,7 @@ __all__ = [
     "MotionSite", "Mode", "MotionModel", "ring_jump", "flip", "ring_diffusion",
     "random_reorientation", "custom_mode", "cone_jump", "dipolar_coupling_Hz",
     "axis_vector", "rotation_about_axis", "euler_from_rotation",
+    "interaction_site", "rotation_model",
     "motion_spectrum", "motion_rate_series", "averaged_tensors", "effective_site",
     "averaged_spectrum", "limit_spectra", "plot_motion_series", "mode_from_spec",
     "model_from_spec", "motion_axis_limits", "motion_overlay", "motion_overlay_series", "plot_motion_overlay",
@@ -313,12 +314,17 @@ class Mode:
     diffusion rate ``D`` (s^-1: the decay rate of the m = 1 harmonic)
     instead. ``model``: 'nearest' (each state jumps to its two
     neighbours on the ring), 'forward' / 'backward' (one way round only), 'random' (to every other state) or 'custom'
-    (``pattern[i, j]`` = relative rate i -> j).
+    (``pattern[i, j]`` = relative rate i -> j). ``periodic=False`` makes the
+    'nearest' / 'forward' / 'backward' networks an open chain (an arc of positions
+    that does not close on itself) instead of a ring.
     """
 
     def __init__(self, kind, rotations, model="nearest", rate=None, pattern=None,
-                 label=None, rate_is="k", axis=None):
+                 label=None, rate_is="k", axis=None, periodic=True):
         self.kind = str(kind)
+        #: True when the last position is also a neighbour of the first (a closed ring);
+        #: False for an open arc of positions (nearest-neighbour hops stop at the ends).
+        self.periodic = bool(periodic)
         self.rotations = np.asarray(rotations, dtype=float).reshape(-1, 3, 3)
         self.model = model
         if model not in ("nearest", "random", "custom", "forward", "backward"):
@@ -364,12 +370,16 @@ class Mode:
             rel = np.zeros((n, n))
             for i in range(n):
                 if self.model == "forward":          # one-way: i -> i+1 only (anticlockwise
-                    steps = ((i + 1) % n,)           # seen from +axis, the right-hand sense)
+                    steps = (i + 1,)                 # seen from +axis, the right-hand sense)
                 elif self.model == "backward":
-                    steps = ((i - 1) % n,)
+                    steps = (i - 1,)
                 else:
-                    steps = ((i + 1) % n, (i - 1) % n)
+                    steps = (i + 1, i - 1)
                 for j in steps:
+                    if self.periodic:
+                        j %= n
+                    elif not 0 <= j < n:             # open arc: no hop past either end
+                        continue
                     if j != i:
                         rel[i, j] = 1.0
         K += k * rel.T                               # K[j, i] = rate i -> j
@@ -380,12 +390,13 @@ class Mode:
         return {"kind": self.kind, "rotations": self.rotations.tolist(), "model": self.model,
                 "rate": dict(self.rate), "rate_is": self.rate_is, "label": self.label,
                 "pattern": None if self.pattern is None else self.pattern.tolist(),
-                "axis": self.axis}
+                "axis": self.axis, "periodic": self.periodic}
 
     @classmethod
     def from_dict(cls, d):
         return cls(d["kind"], d["rotations"], d.get("model", "nearest"), d.get("rate"),
-                   d.get("pattern"), d.get("label"), d.get("rate_is", "k"), d.get("axis"))
+                   d.get("pattern"), d.get("label"), d.get("rate_is", "k"), d.get("axis"),
+                   periodic=d.get("periodic", True))
 
 
 def _rate_dict(k_Hz=None, Ea_eV=None, nu0_Hz=1e12):
@@ -395,17 +406,36 @@ def _rate_dict(k_Hz=None, Ea_eV=None, nu0_Hz=1e12):
                                                           "nu0_Hz": float(nu0_Hz)}
 
 
-def ring_jump(n=3, axis="z", k_Hz=None, Ea_eV=None, nu0_Hz=1e12, model="nearest", label=None):
-    """``n``-site jumps by multiples of 360/n degrees about ``axis``
-    (e.g. a methyl or a ring flip about its axis). ``k_Hz`` is the rate
-    per allowed jump: to each neighbour for 'nearest', to each other
-    site for 'random'."""
+def ring_jump(n=3, axis="z", k_Hz=None, Ea_eV=None, nu0_Hz=1e12, model="nearest", label=None,
+              step_deg=None):
+    """``n``-site jumps about ``axis`` (e.g. a methyl or a ring flip about its axis).
+    ``k_Hz`` is the rate per allowed jump: to each neighbour for 'nearest', to each other
+    site for 'random', one way round for 'forward' (anticlockwise looking down the axis)
+    or 'backward' (clockwise).
+
+    The positions are ``0, step, 2*step, ...`` degrees about the axis. By default
+    ``step_deg = 360/n``, a closed ring. Give a smaller ``step_deg`` for an *arc* (e.g.
+    three positions 20 degrees apart: a libration or a wobble); the neighbour hops then
+    stop at its ends instead of closing the ring (``n * step_deg`` may not exceed 360)."""
     n = int(n)
     if n < 2:
         raise ValueError("A ring needs at least two sites.")
-    rots = [rotation_about_axis(axis, 2.0 * math.pi * j / n) for j in range(n)]
+    periodic = True
+    step = 360.0 / n
+    if step_deg is not None:
+        step = float(step_deg)
+        if step <= 0.0 or n * step > 360.0 + 1e-9:
+            raise ValueError(f"{n} positions {step:g}° apart do not fit in one turn: need "
+                             "0 < step and n × step <= 360°.")
+        periodic = abs(n * step - 360.0) < 1e-9
+    if not periodic and model in ("forward", "backward"):
+        raise ValueError("One-way hops need a closed ring (n × step = 360°): on an open arc "
+                         "everything would end up in the last position. Use 'nearest' (both "
+                         "ways) for an arc.")
+    rots = [rotation_about_axis(axis, math.radians(step * j)) for j in range(n)]
+    default = f"{n}-site jump" if periodic else f"{n}-position arc ({step:g}° steps)"
     return Mode("ring_jump", rots, model, _rate_dict(k_Hz, Ea_eV, nu0_Hz),
-                label=label or f"{n}-site jump", axis=axis)
+                label=label or default, axis=axis, periodic=periodic)
 
 
 def flip(angle_deg=180.0, axis="z", k_Hz=None, Ea_eV=None, nu0_Hz=1e12, label=None):
@@ -1613,7 +1643,7 @@ def plot_motion_series(series, ax=None, offset=1.1, colours=None, label_fmt=None
 # ----------------------------------------------------------------------
 
 _MODE_ARGS = {
-    "ring_jump": ("n", "axis", "model"),
+    "ring_jump": ("n", "axis", "model", "step_deg"),
     "flip": ("angle_deg", "axis"),
     "ring_diffusion": ("axis", "D_Hz", "n"),
     "random_reorientation": ("group",),
@@ -1646,6 +1676,8 @@ def mode_from_spec(spec):
             kw["n"] = int(kw["n"])
     if kind == "ring_jump" and "n" in kw:
         kw["n"] = int(kw["n"])
+    if kind == "ring_jump" and "step_deg" in kw:
+        kw["step_deg"] = float(kw["step_deg"])
     if kind == "flip" and "angle_deg" in kw:
         kw["angle_deg"] = float(kw["angle_deg"])
     if spec.get("label"):
@@ -1659,6 +1691,101 @@ def model_from_spec(sites, modes=(), hops=None, couplings=None):
     their dicts) and ``modes`` given as :class:`Mode`s or the dicts of
     :func:`mode_from_spec`."""
     return MotionModel(list(sites), hops, [mode_from_spec(m) for m in modes], couplings)
+
+
+#: Sense of rotation as users say it -> the Mode model. Looking down the axis from its tip
+#: (+z towards the viewer), 'anticlockwise' is the right-hand (positive) sense.
+_SENSE = {"both": "nearest", "either": "nearest", "back and forth": "nearest",
+          "nearest": "nearest", "anticlockwise": "forward", "counterclockwise": "forward",
+          "forward": "forward", "clockwise": "backward", "backward": "backward",
+          "any": "random", "random": "random", "all": "random"}
+
+
+def interaction_site(nucleus, delta_iso=0.0, label=None, csa=None, quad=None, dipolar=(),
+                     euler=(0.0, 0.0, 0.0), fwhm=1.0, lineshape="lorentzian"):
+    """A :class:`MotionSite` built directly from its tensors (no Simulate needed).
+
+    ``csa`` = ``(delta_aniso_ppm, eta)`` (Haeberlen); ``quad`` = ``(C_Q_MHz, eta_Q)``;
+    ``dipolar`` = ``[("1H", {"r_A": 1.09}), ("1H", {"D_Hz": 23300})...]`` or the short form
+    ``("1H", 1.09)`` meaning a distance in angstrom. The interaction's principal axes
+    (the EFG frame, or the CSA frame without a quadrupolar coupling) sit at ``euler`` =
+    (alpha, beta, gamma) degrees from the frame of the first rotation axis -- ``beta`` is
+    the angle between that axis and the principal z axis (for a C-D bond along z, the
+    angle between the axis and the bond). The dipolar vectors are along the site z axis
+    unless a ``"vector"`` is given in the dict."""
+    site = Site(nucleus, delta_iso, label=label, fwhm=fwhm, lineshape=lineshape)
+    if quad is not None:
+        site.add_quadrupolar(float(quad[0]), float(quad[1]) if len(quad) > 1 else 0.0)
+    if csa is not None:
+        site.add_csa(float(csa[0]), float(csa[1]) if len(csa) > 1 else 0.0)
+    out = MotionSite(site, euler=euler)
+    for partner, how in dipolar:
+        kw = dict(how) if isinstance(how, dict) else {"r_A": float(how)}
+        out.add_dipolar(partner, **kw)
+    return out
+
+
+def rotation_model(sites, axes, hops=None, euler=None):
+    """A :class:`MotionModel` for tensors that rotate about one or several axes, each
+    with its own positions, sense and rate -- the notebook counterpart of the Dynamics
+    rotation set-up.
+
+    ``sites``: a :class:`MotionSite` (see :func:`interaction_site`), a Simulate
+    :class:`Site` or a list of them. ``euler``: (alpha, beta, gamma) degrees placing the
+    interaction's principal axes in the frame of axis 1 (plain Sites only; a MotionSite
+    keeps its own).
+
+    ``axes``: a list of dicts, **axis 1 first (innermost: the one nearest the
+    interaction)**. Axis 1 *is* the reference direction (z); every further axis is given
+    by ``polar`` (its angle from axis 1) and ``azimuth`` (degrees, about axis 1, from the
+    x axis of the reference frame). Keys:
+
+    * ``kind``: 'ring_jump' (default), 'flip' or 'ring_diffusion';
+    * ``n``: number of positions (ring_jump), ``step_deg``: angle between positions
+      (default 360/n: a closed ring; smaller for an open arc), ``angle_deg`` (flip);
+    * ``sense``: 'both' (default), 'anticlockwise', 'clockwise' or 'any' (hops to every
+      other position);
+    * ``k_Hz`` (rate per hop) or ``Ea_eV`` with ``nu0_Hz`` -- every axis has its own;
+    * ``label``.
+
+    Axes are independent processes, combined as in :class:`MotionModel`: a methyl turning
+    about the C-C axis (axis 1) on a chain that turns about another axis (axis 2) is
+    ``[{"n": 3, "k_Hz": 1e8}, {"n": 2, "polar": 55, "k_Hz": 1e4}]``."""
+    if isinstance(sites, (MotionSite, Site, dict)):
+        sites = [sites]
+    sites = [_as_motion_site(s) for s in sites]
+    if euler is not None:
+        if len(sites) != 1:
+            raise ValueError("euler places one interaction; give a MotionSite per site "
+                             "(interaction_site(..., euler=...)) for several.")
+        sites[0].euler = tuple(float(a) for a in euler)
+    if not axes:
+        raise ValueError("Give at least one rotation axis.")
+    modes = []
+    for i, ax in enumerate(axes):
+        spec = dict(ax)
+        kind = spec.pop("kind", "ring_jump")
+        polar = float(spec.pop("polar", 0.0))
+        azimuth = float(spec.pop("azimuth", 0.0))
+        sense = spec.pop("sense", "both")
+        if i == 0:
+            if polar or azimuth:
+                raise ValueError("Axis 1 is the reference direction: leave out polar/azimuth "
+                                 "and place the interaction with euler instead.")
+            spec["axis"] = "z"
+        else:
+            spec["axis"] = (polar, azimuth)
+        if kind == "ring_jump":
+            key = str(sense).strip().lower()
+            if key not in _SENSE:
+                raise ValueError(f"sense {sense!r}: use 'both', 'anticlockwise', 'clockwise' "
+                                 "or 'any'.")
+            spec["model"] = _SENSE[key]
+        spec["kind"] = kind
+        if "label" not in spec:
+            spec["label"] = None
+        modes.append(mode_from_spec({k: v for k, v in spec.items() if v is not None}))
+    return MotionModel(sites, hops, modes)
 
 
 def motion_overlay_series(model, spectra, per_spectrum_temperature=True, **kwargs):

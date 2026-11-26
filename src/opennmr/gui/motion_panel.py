@@ -1,15 +1,25 @@
-"""Dynamics ▸ Anisotropic motion: tensors that rotate as well as, or instead of, hop.
+"""Dynamics ▸ Anisotropic motion: tensors that rotate about one or several axes, as well as hop.
 
-The environments (shift, CSA, quadrupolar coupling; optional dipolar couplings to spin-1/2
-partners) come from Simulate -- *Take sites from Simulate* -- and are placed in a molecular
-frame by Euler angles. Rotational modes (n-fold ring jumps, flips, ring diffusion, random
-reorientation: several at once, each with its own rate or Arrhenius barrier) and hops between
-the environments are tables. The lineshape is the exact Bloch-McConnell solution, static,
-under MAS and after a Hahn or quadrupolar echo, at rates from slow to fast: a rate (or
-temperature) sweep is stacked on the Fit view with the slow and fast limits; one spectrum can
-be overlaid on the spectrum selected in Open experiments, scaled onto it, with the residual.
-All the maths is :mod:`opennmr.notebook.motion`; *Copy notebook code* gives the same numbers
-in a notebook.
+Three steps, top to bottom:
+
+1. **Interactions** -- the shift, CSA, quadrupolar and dipolar tensors that rotate. Type them in
+   (*Add interaction*) or import them from Simulate. Each one is placed relative to rotation
+   axis 1 by Euler angles; beta is the angle between axis 1 and the interaction's principal
+   z axis.
+2. **Rotation axes** -- one row per axis: how many positions, how far apart, which way round
+   (both ways, anticlockwise, clockwise or to any position), and its *own* rate or Arrhenius
+   barrier. Axis 1 is the reference direction; each further axis is given by its angle from
+   axis 1 and its azimuth about it. The first axis listed is the innermost (a methyl turning on
+   a group that itself turns: methyl first).
+3. **Simulate or fit** (the sections below).
+
+Hops between environments stay under *Advanced*. The lineshape is the exact Bloch-McConnell
+solution, static, under MAS and after a Hahn or quadrupolar echo, at rates from slow to fast:
+a rate (or temperature) sweep is stacked on the Fit view with the slow and fast limits; one
+spectrum can be overlaid on the spectrum selected in Open experiments, scaled onto it, with the
+residual. All the maths is :mod:`opennmr.notebook.motion` (:func:`~opennmr.notebook.motion.
+rotation_model` builds the same model in a notebook); *Copy notebook code* gives the same
+numbers there.
 """
 
 from __future__ import annotations
@@ -21,9 +31,9 @@ import warnings
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..notebook import motion as M
@@ -53,6 +63,13 @@ QUICK_MOTIONS = (
      "24 small jumps. The rate is the rotational diffusion rate."),
     ("Tumbling in every direction (liquid-like, isotropic)", "random_reorientation",
      "Reorientation in all directions: anisotropic interactions average to zero when it is fast."),
+)
+#: Sense of a ring jump: (menu text, Mode model). 'forward' is anticlockwise looking down the axis.
+SENSES = (
+    ("Both ways (to either neighbour)", "nearest"),
+    ("Anticlockwise only", "forward"),
+    ("Clockwise only", "backward"),
+    ("To any other position", "random"),
 )
 _PARAM_KEY = {"ring_jump": "n", "flip": "angle_deg", "ring_diffusion": "n",
               "random_reorientation": "group"}
@@ -122,6 +139,138 @@ def _interaction_text(site) -> str:
     return "; ".join(bits)
 
 
+class InteractionDialog(QDialog):
+    """Type in one environment's tensors: shift, CSA, quadrupolar coupling, dipolar partners and
+    the orientation of its principal axes relative to rotation axis 1. :meth:`values` gives the
+    keyword arguments of :meth:`AnisotropicMotionPanel.add_interaction`."""
+
+    def __init__(self, parent=None, site=None, euler=(0.0, 0.0, 0.0), dipolar="", nucleus="2H"):
+        super().__init__(parent)
+        self.setWindowTitle("Interaction tensors")
+        outer = QVBoxLayout(self)
+        form = QFormLayout()
+        outer.addLayout(form)
+        self.label_edit = QLineEdit("" if site is None else site.label)
+        self.label_edit.setPlaceholderText("optional")
+        self.nucleus_edit = QLineEdit(nucleus if site is None else site.nucleus)
+        self.nucleus_edit.setToolTip("The observed nuclide, e.g. 2H, 13C, 23Na.")
+        self.diso_spin = self._spin(-1e5, 1e5, 3, " ppm", 0.0 if site is None else site.delta_iso)
+        self.fwhm_spin = self._spin(0.0, 1e4, 3, " ppm", 2.0 if site is None else site.fwhm)
+        self.shape_combo = QComboBox()
+        self.shape_combo.addItems(["lorentzian", "gaussian"])
+        if site is not None and site.lineshape in ("lorentzian", "gaussian"):
+            self.shape_combo.setCurrentText(site.lineshape)
+        form.addRow("Label:", self.label_edit)
+        form.addRow("Nucleus:", self.nucleus_edit)
+        form.addRow("Isotropic shift δiso:", self.diso_spin)
+        form.addRow("Line width (FWHM):", self.fwhm_spin)
+        form.addRow("Line shape:", self.shape_combo)
+
+        csa = None if site is None else site.get("csa")
+        quad = None if site is None else site.get("quadrupolar")
+        self.csa_box = QGroupBox("Chemical shift anisotropy (Haeberlen)")
+        self.csa_box.setCheckable(True)
+        self.csa_box.setChecked(bool(csa))
+        cf = QFormLayout(self.csa_box)
+        aniso, asym, ceuler = 0.0, 0.0, (0.0, 0.0, 0.0)
+        if csa:
+            c = csa[0]
+            aniso, asym = float(c["aniso"]), float(c["asym"])
+            if c.get("convention", "Haeberlen") != "Haeberlen":
+                from ..notebook.simulations import convert_csa_parameters
+                _iso, aniso, asym = convert_csa_parameters(0.0, aniso, asym, c["convention"],
+                                                           "Haeberlen")
+            ceuler = tuple(c.get("euler", ceuler))
+        self.aniso_spin = self._spin(-1e5, 1e5, 3, " ppm", aniso)
+        self.asym_spin = self._spin(0.0, 1.0, 3, "", asym)
+        cf.addRow("Anisotropy Δ:", self.aniso_spin)
+        cf.addRow("Asymmetry η:", self.asym_spin)
+        self.csa_euler = [self._spin(-360, 360, 2, "°", v) for v in ceuler]
+        self.csa_euler_row = self._row(self.csa_euler)
+        cf.addRow("CSA axes in the EFG frame (α, β, γ):", self.csa_euler_row)
+        outer.addWidget(self.csa_box)
+
+        self.quad_box = QGroupBox("Quadrupolar coupling")
+        self.quad_box.setCheckable(True)
+        self.quad_box.setChecked(bool(quad))
+        qf = QFormLayout(self.quad_box)
+        self.cq_spin = self._spin(-1e3, 1e3, 4, " MHz", float(quad[0]["C_Q"]) if quad else 0.17)
+        self.etaq_spin = self._spin(0.0, 1.0, 3, "", float(quad[0]["eta_Q"]) if quad else 0.0)
+        qf.addRow("C_Q:", self.cq_spin)
+        qf.addRow("η_Q:", self.etaq_spin)
+        outer.addWidget(self.quad_box)
+
+        self.dipolar_edit = QLineEdit(dipolar)
+        self.dipolar_edit.setPlaceholderText("1H@1.09   (partner@distance in Å)   or   1H:23.3 (kHz)")
+        self.dipolar_edit.setToolTip("Dipolar couplings to spin-1/2 partners, comma separated: "
+                                     "'partner@r(Å)' or 'partner:D(kHz)'. The bond lies along the "
+                                     "interaction's principal z axis.")
+        outer.addWidget(QLabel("Dipolar partner(s) (optional):"))
+        outer.addWidget(self.dipolar_edit)
+
+        orient = QGroupBox("Orientation relative to rotation axis 1")
+        of = QFormLayout(orient)
+        self.euler = [self._spin(-360, 360, 2, "°", v) for v in euler]
+        of.addRow("Euler angles α, β, γ:", self._row(self.euler))
+        note = QLabel("β is the angle between rotation axis 1 and the principal z axis of the "
+                      "interaction (the EFG frame, or the CSA frame without a quadrupolar "
+                      "coupling; for a C–D bond, between the axis and the bond). With a single "
+                      "axis only β matters.")
+        note.setWordWrap(True)
+        of.addRow(note)
+        outer.addWidget(orient)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._check)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+    @staticmethod
+    def _spin(lo, hi, decimals, suffix, value):
+        s = QDoubleSpinBox()
+        s.setRange(lo, hi)
+        s.setDecimals(decimals)
+        s.setSuffix(suffix)
+        s.setValue(float(value))
+        return s
+
+    @staticmethod
+    def _row(widgets):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        for x in widgets:
+            h.addWidget(x)
+        return w
+
+    def values(self) -> dict:
+        return {
+            "nucleus": self.nucleus_edit.text().strip(),
+            "delta_iso": self.diso_spin.value(),
+            "label": self.label_edit.text().strip() or None,
+            "fwhm": self.fwhm_spin.value(), "lineshape": self.shape_combo.currentText(),
+            "csa": ((self.aniso_spin.value(), self.asym_spin.value())
+                    if self.csa_box.isChecked() else None),
+            "csa_euler": tuple(s.value() for s in self.csa_euler),
+            "quad": ((self.cq_spin.value(), self.etaq_spin.value())
+                     if self.quad_box.isChecked() else None),
+            "dipolar": self.dipolar_edit.text().strip(),
+            "euler": tuple(s.value() for s in self.euler),
+        }
+
+    def _check(self) -> None:
+        try:
+            v = self.values()
+            Site(v["nucleus"], 0.0)                       # an unknown nuclide fails here
+            parse_dipolar(v["dipolar"])
+            if v["quad"] is not None:
+                Site(v["nucleus"], 0.0).add_quadrupolar(*v["quad"])
+        except (ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "Interaction tensors", str(exc))
+            return
+        self.accept()
+
+
 class AnisotropicMotionPanel(QWidget):
     """Dynamics ▸ Anisotropic motion.
 
@@ -134,7 +283,8 @@ class AnisotropicMotionPanel(QWidget):
 
     SITE_COLUMNS = ("Label", "δiso (ppm)", "Interactions", "α (°)", "β (°)", "γ (°)",
                     "Dipolar partner(s)")
-    MODE_COLUMNS = ("Mode", "Parameter", "Axis", "k (s⁻¹)", "Ea (eV)", "ν₀ (s⁻¹)")
+    MODE_COLUMNS = ("Motion", "Positions / angle", "Axis: angle from axis 1, azimuth (°)",
+                    "k (s⁻¹)", "Ea (eV)", "ν₀ (s⁻¹)", "Sense", "Step (°)")
     HOP_COLUMNS = ("From", "To", "k → (s⁻¹)", "Ea → (eV)", "Ea ← (eV)", "ν₀ (s⁻¹)")
 
     def __init__(self, canvas=None, show_view=None, get_spectra=None, get_simulate_sites=None,
@@ -157,33 +307,89 @@ class AnisotropicMotionPanel(QWidget):
         layout = QVBoxLayout(self)
         main_layout = layout
         intro = QLabel(
-            "<b>1. Nucleus</b> (its interactions come from Simulate) &nbsp;→&nbsp; "
-            "<b>2. Describe the rotation</b> &nbsp;→&nbsp; <b>3. Simulate or fit</b> "
-            "(next section). Everything the quick set-up writes can still be edited under "
+            "<b>1. Interactions</b> (type them in or import from Simulate) &nbsp;→&nbsp; "
+            "<b>2. Rotation axes</b> (each with its own positions, sense and rate) &nbsp;→&nbsp; "
+            "<b>3. Simulate or fit</b> (next sections). Hops between environments are under "
             "<i>Advanced</i>.")
         intro.setWordWrap(True)
         intro.setTextFormat(Qt.TextFormat.RichText)
         main_layout.addWidget(intro)
 
-        step1 = QGroupBox("1. Which nucleus?")
-        s1 = QHBoxLayout(step1)
+        step1 = QGroupBox("1. Interactions: the tensors that rotate")
+        v1 = QVBoxLayout(step1)
+        hint1 = QLabel(
+            "One row per environment. Use <i>Add interaction…</i> to type its shift, CSA, "
+            "quadrupolar and dipolar tensors, or import them from Simulate. α, β, γ place its "
+            "principal axes relative to rotation axis 1; β is the angle between axis 1 and the "
+            "principal z axis (for a C–D bond, between the axis and the bond).")
+        hint1.setWordWrap(True)
+        hint1.setTextFormat(Qt.TextFormat.RichText)
+        v1.addWidget(hint1)
+        head = QHBoxLayout()
         self.quick_nucleus_label = QLabel("")
-        self.quick_take_button = QPushButton("Take nucleus and interactions from Simulate")
-        self.quick_take_button.setToolTip(
-            "Uses the sites of Simulate ▸ Solid-state NMR (shift, CSA, quadrupolar coupling, "
-            "dipolar partners). Set them up there first; the observed nucleus is then shown here.")
-        self.quick_take_button.clicked.connect(self.take_from_simulate)
+        head.addWidget(QLabel("Nucleus:"))
+        head.addWidget(self.quick_nucleus_label)
+        head.addStretch(1)
+        v1.addLayout(head)
+        self.sites_table = QTableWidget(0, len(self.SITE_COLUMNS))
+        self.sites_table.setHorizontalHeaderLabels(list(self.SITE_COLUMNS))
+        self.sites_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.sites_table.horizontalHeader().setStretchLastSection(True)
+        self.sites_table.setMaximumHeight(150)
+        self.sites_table.setToolTip(
+            "Double-click a label to edit the tensors. α, β, γ: the Euler angles (ZYZ, degrees) "
+            "that place the interaction's own frame – the EFG frame with a quadrupolar coupling, "
+            "else the CSA frame – relative to rotation axis 1 (the z axis of the reference frame). "
+            "Dipolar: 'partner:D(kHz)' or 'partner@r(Å)', e.g. 1H:23.3 or 1H@1.09 (the bond along "
+            "the interaction's z axis).")
+        for c, tip in ((3, "Euler α (°): rotation about axis 1; only matters with several "
+                           "interactions or axes."),
+                       (4, "Euler β (°): the angle between rotation axis 1 and the principal z "
+                           "axis of the interaction."),
+                       (5, "Euler γ (°): rotation about the interaction's own z axis.")):
+            self.sites_table.horizontalHeaderItem(c).setToolTip(tip)
+        self.sites_table.cellDoubleClicked.connect(
+            lambda r, c: self.edit_interaction(r) if c < 3 else None)
+        self.sites_table.itemChanged.connect(lambda _i: self._refresh_summary())
+        v1.addWidget(self.sites_table)
+        row = QHBoxLayout()
+        self.add_site_button = QPushButton("Add interaction…")
+        self.add_site_button.setToolTip("Type in the shift, CSA, quadrupolar and dipolar tensors "
+                                        "of one environment.")
+        self.add_site_button.clicked.connect(self.add_interaction_dialog)
+        self.edit_site_button = QPushButton("Edit…")
+        self.edit_site_button.clicked.connect(lambda: self.edit_interaction())
+        self.take_button = QPushButton("Import from Simulate")
+        self.take_button.setToolTip(
+            "Replace the environments by the sites of Simulate ▸ Solid-state NMR (shift, CSA, "
+            "quadrupolar coupling; the observed nucleus). Set them up there first.")
+        self.take_button.clicked.connect(self.take_from_simulate)
+        self.quick_take_button = self.take_button
+        self.remove_site_button = QPushButton("Remove")
+        self.remove_site_button.clicked.connect(self.remove_site)
+        self.settings_button = QPushButton("Use Simulate's field, MAS and order")
+        self.settings_button.clicked.connect(self.use_simulate_settings)
         self.quick_example_button = QPushButton("Example: ²H C–D bond")
         self.quick_example_button.clicked.connect(self.load_example)
-        s1.addWidget(QLabel("Nucleus:"))
-        s1.addWidget(self.quick_nucleus_label)
-        s1.addWidget(self.quick_take_button)
-        s1.addWidget(self.quick_example_button)
-        s1.addStretch(1)
+        for b in (self.add_site_button, self.edit_site_button, self.take_button,
+                  self.remove_site_button, self.settings_button, self.quick_example_button):
+            row.addWidget(b)
+        row.addStretch(1)
+        v1.addLayout(row)
         main_layout.addWidget(step1)
 
-        step2 = QGroupBox("2. What is the rotation?")
-        f2 = QFormLayout(step2)
+        step2 = QGroupBox("2. Rotation axes")
+        v2 = QVBoxLayout(step2)
+        hint2 = QLabel(
+            "Describe one axis, then <i>Add as another axis</i>. <b>Axis 1 is the reference "
+            "direction (z)</b>; every further axis is given by its angle from axis 1 and its "
+            "azimuth about it. Every axis has its own positions, sense and rate. List the "
+            "innermost axis first (a methyl turning on a group that itself turns: methyl first).")
+        hint2.setWordWrap(True)
+        hint2.setTextFormat(Qt.TextFormat.RichText)
+        v2.addWidget(hint2)
+        f2 = QFormLayout()
+        v2.addLayout(f2)
         self.quick_kind_combo = QComboBox()
         for text, key, tip in QUICK_MOTIONS:
             self.quick_kind_combo.addItem(text, key)
@@ -202,13 +408,15 @@ class AnisotropicMotionPanel(QWidget):
         f2.addRow(self.quick_n_label, self.quick_n_spin)
         axis_row = QHBoxLayout()
         self.quick_axis_combo = QComboBox()
-        for text, key in (("z axis", "z"), ("x axis", "x"), ("y axis", "y"),
-                          ("Other direction…", "custom")):
+        for text, key in (("Axis 1 / reference (z)", "z"), ("x of the reference frame", "x"),
+                          ("y of the reference frame", "y"),
+                          ("At an angle to axis 1…", "custom")):
             self.quick_axis_combo.addItem(text, key)
         self.quick_axis_edit = QLineEdit("")
-        self.quick_axis_edit.setPlaceholderText("x,y,z  or  polar,azimuth (°)")
-        self.quick_axis_edit.setToolTip("A direction in the molecular frame: 'x,y,z' components or "
-                                        "'polar,azimuth' angles in degrees.")
+        self.quick_axis_edit.setPlaceholderText("angle from axis 1, azimuth (°)  e.g. 55, 0")
+        self.quick_axis_edit.setToolTip("The direction of this axis in the reference frame (axis 1 "
+                                        "is z): 'polar,azimuth' degrees – the angle from axis 1 "
+                                        "and the azimuth about it – or 'x,y,z' components.")
         self.quick_axis_edit.setEnabled(False)
         self.quick_axis_combo.currentIndexChanged.connect(
             lambda _i: self.quick_axis_edit.setEnabled(self.quick_axis_combo.currentData() == "custom"))
@@ -217,9 +425,10 @@ class AnisotropicMotionPanel(QWidget):
         self.quick_axis_label = QLabel("Rotation axis:")
         f2.addRow(self.quick_axis_label, axis_row)
         self.quick_sense_combo = QComboBox()
-        for text, key in (("Back and forth (either way)", "nearest"),
+        for text, key in (("Both ways (to either neighbour)", "nearest"),
                           ("One way: anticlockwise (looking down the axis)", "forward"),
-                          ("One way: clockwise (looking down the axis)", "backward")):
+                          ("One way: clockwise (looking down the axis)", "backward"),
+                          ("To any other position", "random")):
             self.quick_sense_combo.addItem(text, key)
         self.quick_sense_combo.setToolTip(
             "'Back and forth': each jump goes to either neighbour with equal probability. 'One way': "
@@ -228,6 +437,15 @@ class AnisotropicMotionPanel(QWidget):
             "when several modes or hops are combined.")
         self.quick_sense_label = QLabel("Sense of rotation:")
         f2.addRow(self.quick_sense_label, self.quick_sense_combo)
+        self.quick_step_edit = QLineEdit("")
+        self.quick_step_edit.setMaximumWidth(90)
+        self.quick_step_edit.setPlaceholderText("360/n")
+        self.quick_step_edit.setToolTip(
+            "Angle between neighbouring positions. Blank: 360°/n, a closed ring (a methyl's three "
+            "positions). A smaller step gives an open arc (e.g. 3 positions 20° apart: a wobble "
+            "that does not wrap round).")
+        self.quick_step_label = QLabel("Step between positions (°):")
+        f2.addRow(self.quick_step_label, self.quick_step_edit)
         rate_row = QHBoxLayout()
         self.quick_rate_combo = QComboBox()
         self.quick_rate_combo.addItem("Rate k (s⁻¹)", "k")
@@ -246,14 +464,47 @@ class AnisotropicMotionPanel(QWidget):
             rate_row.addWidget(w)
         rate_row.addStretch(1)
         f2.addRow("How fast:", rate_row)
-        self.quick_apply_button = QPushButton("Use this rotation")
-        self.quick_apply_button.setToolTip("Writes the motion into the Advanced tables below "
-                                           "(replacing the existing modes).")
-        self.quick_apply_button.clicked.connect(self.apply_quick_motion)
-        f2.addRow("", self.quick_apply_button)
+        arow = QHBoxLayout()
+        self.quick_add_button = QPushButton("Add as another axis")
+        self.quick_add_button.setToolTip("Appends this axis (outer to the ones already listed).")
+        self.quick_add_button.clicked.connect(lambda: self.apply_quick_motion(replace=False))
+        self.quick_apply_button = QPushButton("Use as the only axis")
+        self.quick_apply_button.setToolTip("Replaces every listed axis by this one.")
+        self.quick_apply_button.clicked.connect(lambda: self.apply_quick_motion())
+        arow.addWidget(self.quick_add_button)
+        arow.addWidget(self.quick_apply_button)
+        arow.addStretch(1)
+        v2.addLayout(arow)
+
+        v2.addWidget(QLabel("Axes in the model (innermost first; edit any cell, each axis has "
+                            "its own rate)"))
+        self.modes_table = QTableWidget(0, len(self.MODE_COLUMNS))
+        self.modes_table.setHorizontalHeaderLabels(list(self.MODE_COLUMNS))
+        self.modes_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.modes_table.setMaximumHeight(170)
+        self.modes_table.setToolTip(
+            "Axis: z, x, y, 'x,y,z' or 'angle from axis 1, azimuth' in degrees. Positions: how "
+            "many; Step: the angle between neighbours (blank = 360/n, a closed ring). k: the rate "
+            "of each allowed jump (for ring diffusion the diffusion rate D). Give Ea and ν₀ "
+            "instead for an Arrhenius rate (needs a temperature). Axes are independent processes "
+            "with their own rates; the first listed is the innermost (applied first).")
+        self.modes_table.itemChanged.connect(lambda _i: self._refresh_summary())
+        v2.addWidget(self.modes_table)
+        row = QHBoxLayout()
+        for text, slot in (("Remove axis", self.remove_mode), ("Up", lambda: self.move_mode(-1)),
+                           ("Down", lambda: self.move_mode(1))):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        row.addStretch(1)
+        v2.addLayout(row)
+        self.summary_label = QLabel("")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setTextFormat(Qt.TextFormat.RichText)
+        v2.addWidget(self.summary_label)
         main_layout.addWidget(step2)
 
-        self.advanced_box = QGroupBox("Advanced: environments, several motions, hops between sites")
+        self.advanced_box = QGroupBox("Advanced: hops between environments")
         self.advanced_box.setCheckable(True)
         self.advanced_box.setChecked(False)
         advanced_inner = QWidget()
@@ -264,54 +515,6 @@ class AnisotropicMotionPanel(QWidget):
         self.advanced_box.toggled.connect(advanced_inner.setVisible)
         advanced_inner.setVisible(False)
         layout = adv_layout
-
-        layout.addWidget(QLabel("Environments (the interactions are edited in Simulate)"))
-        self.sites_table = QTableWidget(0, len(self.SITE_COLUMNS))
-        self.sites_table.setHorizontalHeaderLabels(list(self.SITE_COLUMNS))
-        self.sites_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.sites_table.horizontalHeader().setStretchLastSection(True)
-        self.sites_table.setMaximumHeight(130)
-        self.sites_table.setToolTip(
-            "α, β, γ: the Euler angles (ZYZ, degrees) that place the site's own frame – the EFG "
-            "frame with a quadrupolar coupling, else the CSA frame – in the molecular frame, "
-            "where the rotation axes are given. Dipolar: 'partner:D(kHz)' or 'partner@r(Å)', "
-            "e.g. 1H:23.3 or 1H@1.09 (the bond along the site's z axis).")
-        layout.addWidget(self.sites_table)
-        row = QHBoxLayout()
-        self.take_button = QPushButton("Take sites from Simulate")
-        self.take_button.setToolTip("Replace the environments by the sites of Simulate ▸ "
-                                    "Solid-state NMR (the observed nucleus).")
-        self.take_button.clicked.connect(self.take_from_simulate)
-        self.remove_site_button = QPushButton("Remove environment")
-        self.remove_site_button.clicked.connect(self.remove_site)
-        self.settings_button = QPushButton("Use Simulate's field, MAS and order")
-        self.settings_button.clicked.connect(self.use_simulate_settings)
-        for b in (self.take_button, self.remove_site_button, self.settings_button):
-            row.addWidget(b)
-        row.addStretch(1)
-        layout.addLayout(row)
-
-        layout.addWidget(QLabel("Rotational modes (innermost first)"))
-        self.modes_table = QTableWidget(0, len(self.MODE_COLUMNS))
-        self.modes_table.setHorizontalHeaderLabels(list(self.MODE_COLUMNS))
-        self.modes_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.modes_table.setMaximumHeight(140)
-        self.modes_table.setToolTip(
-            "Axis: z, x, y, 'x,y,z' or 'polar,azimuth' (degrees), in the molecular frame. k: the "
-            "rate of each allowed jump (for ring diffusion the diffusion rate D, the decay rate "
-            "of the first harmonic). Give Ea and ν₀ instead for an Arrhenius rate (needs a "
-            "temperature). Modes combine as independent processes; the first listed is the "
-            "innermost (applied first).")
-        layout.addWidget(self.modes_table)
-        row = QHBoxLayout()
-        for text, slot in (("Add mode", lambda: self.add_mode()), ("Remove mode", self.remove_mode),
-                           ("Up", lambda: self.move_mode(-1)), ("Down", lambda: self.move_mode(1)),
-                           ("Example", self.load_example)):
-            b = QPushButton(text)
-            b.clicked.connect(slot)
-            row.addWidget(b)
-        row.addStretch(1)
-        layout.addLayout(row)
 
         layout.addWidget(QLabel("Hops between environments (each reversible; numbers from 1)"))
         self.hops_table = QTableWidget(0, len(self.HOP_COLUMNS))
@@ -499,6 +702,8 @@ class AnisotropicMotionPanel(QWidget):
             self.quick_n_spin.setValue(3)
         self.quick_sense_combo.setVisible(show_n)
         self.quick_sense_label.setVisible(show_n)
+        self.quick_step_edit.setVisible(show_n)
+        self.quick_step_label.setVisible(show_n)
 
     def _quick_rate_changed(self) -> None:
         arrh = self.quick_rate_combo.currentData() == "Ea"
@@ -520,13 +725,26 @@ class AnisotropicMotionPanel(QWidget):
             if axis == "custom":
                 axis = self.quick_axis_edit.text().strip()
                 if not axis:
-                    raise ValueError("Type the rotation axis as x,y,z or polar,azimuth.")
+                    raise ValueError("Type the axis as angle from axis 1, azimuth (degrees) "
+                                     "or as x,y,z.")
             spec["axis"] = axis
             spec["param"] = {"ring_jump": f"{int(self.quick_n_spin.value())}",
                              "flip": f"{self.quick_n_spin.value():g}",
                              "ring_diffusion": "24"}[key]
         if key == "ring_jump":
             spec["sense"] = self.quick_sense_combo.currentData()
+            step_text = self.quick_step_edit.text().strip()
+            if step_text:
+                step = _float(step_text)
+                n = int(self.quick_n_spin.value())
+                if step is None or step <= 0 or n * step > 360.0 + 1e-9:
+                    raise ValueError(f"The step must be a positive angle with n × step ≤ 360° "
+                                     f"(n = {n}); leave it blank for 360°/n.")
+                if (abs(n * step - 360.0) > 1e-9
+                        and self.quick_sense_combo.currentData() in ("forward", "backward")):
+                    raise ValueError("One-way hops need a closed ring (n × step = 360°). Use "
+                                     "'both ways' for an open arc of positions.")
+                spec["step"] = f"{step:g}"
         value = _float(self.quick_rate_edit.text())
         if value is None or value <= 0:
             raise ValueError("Enter the rate (or barrier) as a positive number.")
@@ -537,8 +755,9 @@ class AnisotropicMotionPanel(QWidget):
             spec["k"] = f"{value:g}"
         return spec
 
-    def apply_quick_motion(self) -> bool:
-        """Write the quick set-up into the (Advanced) mode table, replacing its modes."""
+    def apply_quick_motion(self, replace: bool = True) -> bool:
+        """Write the axis described in the form into the axes table: replacing every axis
+        (``replace=True``) or appended after the ones listed."""
         try:
             spec = self.quick_mode_spec()
             T = None
@@ -549,10 +768,15 @@ class AnisotropicMotionPanel(QWidget):
         except ValueError as exc:
             QMessageBox.warning(self, "Anisotropic motion", str(exc))
             return False
-        self._load_modes([spec])
+        if replace:
+            self._load_modes([spec])
+        else:
+            self.add_mode(spec)
         if T is not None:
             self.temperature_edit.setText(f"{T:g}")
-        self._log("Rotation set: " + ", ".join(f"{k} {v}" for k, v in spec.items() if v != ""))
+        n_axes = self.modes_table.rowCount()
+        self._log(("Rotation set" if replace else f"Axis {n_axes} added") + ": "
+                  + ", ".join(f"{k} {v}" for k, v in spec.items() if v != ""))
         return True
 
     def _axis_enabled(self) -> None:
@@ -576,14 +800,75 @@ class AnisotropicMotionPanel(QWidget):
             table.setItem(r, c, item)
         table.blockSignals(False)
 
-    def add_site(self, site: Site, euler=(0.0, 0.0, 0.0), dipolar="") -> None:
-        r = self.sites_table.rowCount()
-        self.sites_table.insertRow(r)
+    def _fill_site_row(self, r, site: Site, euler, dipolar) -> None:
         self._set_row(self.sites_table, r,
                       [site.label, f"{site.delta_iso:g}", _interaction_text(site) or "isotropic",
                        euler[0], euler[1], euler[2], dipolar], read_only=(0, 1, 2))
         self.sites_table.item(r, 0).setData(Qt.ItemDataRole.UserRole, site.to_dict())
+
+    def add_site(self, site: Site, euler=(0.0, 0.0, 0.0), dipolar="") -> None:
+        r = self.sites_table.rowCount()
+        self.sites_table.insertRow(r)
+        self._fill_site_row(r, site, euler, dipolar)
         self._update_nucleus()
+
+    def add_interaction(self, nucleus, delta_iso=0.0, label=None, csa=None, csa_euler=(0, 0, 0),
+                        quad=None, dipolar="", euler=(0.0, 0.0, 0.0), fwhm=2.0,
+                        lineshape="lorentzian", row=None) -> int:
+        """Add an environment from tensors given directly (or replace row ``row``).
+
+        ``csa`` = (Δ ppm, η) Haeberlen; ``quad`` = (C_Q MHz, η_Q); ``csa_euler``: the CSA axes in
+        the EFG frame (only with a quadrupolar coupling); ``dipolar``: 'partner@r(Å)' or
+        'partner:D(kHz)', comma separated; ``euler``: α, β, γ placing the interaction's
+        principal axes relative to rotation axis 1. Returns the row. ValueError for anything
+        that is not a valid site."""
+        parse_dipolar(dipolar)                                   # validate before touching rows
+        n = self.sites_table.rowCount()
+        site = Site(str(nucleus), float(delta_iso),
+                    label=label or (f"{nucleus} site {n + 1 if row is None else row + 1}"),
+                    fwhm=float(fwhm), lineshape=lineshape)
+        if quad is not None:
+            site.add_quadrupolar(float(quad[0]), float(quad[1]) if len(quad) > 1 else 0.0)
+        if csa is not None:
+            site.add_csa(float(csa[0]), float(csa[1]) if len(csa) > 1 else 0.0,
+                         euler=tuple(float(a) for a in csa_euler))
+        euler = tuple(float(a) for a in euler)
+        if row is None:
+            self.add_site(site, euler=euler, dipolar=dipolar)
+            return self.sites_table.rowCount() - 1
+        self._fill_site_row(row, site, euler, dipolar)
+        self._update_nucleus()
+        return row
+
+    def add_interaction_dialog(self) -> bool:
+        dlg = InteractionDialog(self, nucleus=self.nucleus() or "2H")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        try:
+            self.add_interaction(**dlg.values())
+        except (ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "Anisotropic motion", str(exc))
+            return False
+        self._log("Interaction added.")
+        return True
+
+    def edit_interaction(self, row=None) -> bool:
+        r = self.sites_table.currentRow() if row is None else row
+        if r < 0 or r >= self.sites_table.rowCount():
+            QMessageBox.information(self, "Anisotropic motion", "Select an environment to edit.")
+            return False
+        site = Site.from_dict(self.sites_table.item(r, 0).data(Qt.ItemDataRole.UserRole))
+        euler = tuple(_float(self._cell(self.sites_table, r, c), 0.0) for c in (3, 4, 5))
+        dlg = InteractionDialog(self, site=site, euler=euler,
+                                dipolar=self._cell(self.sites_table, r, 6))
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        try:
+            self.add_interaction(row=r, **dlg.values())
+        except (ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "Anisotropic motion", str(exc))
+            return False
+        return True
 
     def remove_site(self) -> None:
         r = self.sites_table.currentRow()
@@ -595,19 +880,38 @@ class AnisotropicMotionPanel(QWidget):
 
     def add_mode(self, spec=None) -> None:
         r = self.modes_table.rowCount()
+        self.modes_table.blockSignals(True)
         self.modes_table.insertRow(r)
+        self.modes_table.blockSignals(False)
         spec = spec or {"kind": "ring_jump", "param": "3", "axis": "z", "k": "1e4"}
         combo = QComboBox()
         for text, key, _what, _default in MODE_KINDS:
             combo.addItem(text, key)
         combo.setCurrentIndex(max(0, combo.findData(spec.get("kind", "ring_jump"))))
         combo.currentIndexChanged.connect(lambda _i, c=combo: self._kind_changed(c))
-        combo.setProperty("sense", spec.get("sense") or "nearest")
         self.modes_table.setCellWidget(r, 0, combo)
+        sense = QComboBox()
+        for text, key in SENSES:
+            sense.addItem(text, key)
+        sense.setCurrentIndex(max(0, sense.findData(spec.get("sense") or "nearest")))
+        sense.currentIndexChanged.connect(lambda _i: self._refresh_summary())
+        self.modes_table.setCellWidget(r, 6, sense)
         self._set_row_from(self.modes_table, r, 1, [spec.get("param", ""), spec.get("axis", "z"),
                                                     spec.get("k", ""), spec.get("Ea", ""),
                                                     spec.get("nu0", "1e12" if spec.get("Ea") else "")])
+        self._set_row_from(self.modes_table, r, 7, [spec.get("step", "")])
+        self._sync_mode_row(r)
         self._refresh_sweep_choices()
+
+    def _sync_mode_row(self, r) -> None:
+        """Sense and step only mean something for ring jumps."""
+        combo = self.modes_table.cellWidget(r, 0)
+        ring = combo is not None and combo.currentData() == "ring_jump"
+        self.modes_table.cellWidget(r, 6).setEnabled(ring)
+        item = self.modes_table.item(r, 7)
+        if item is not None:
+            flags = item.flags() | Qt.ItemFlag.ItemIsEditable
+            item.setFlags(flags if ring else flags & ~Qt.ItemFlag.ItemIsEditable)
 
     def _set_row_from(self, table, r, first_col, values) -> None:
         table.blockSignals(True)
@@ -621,6 +925,9 @@ class AnisotropicMotionPanel(QWidget):
                 key = combo.currentData()
                 default = next(d for _t, k, _w, d in MODE_KINDS if k == key)
                 self._set_row_from(self.modes_table, r, 1, [default])
+                if key != "ring_jump":
+                    self._set_row_from(self.modes_table, r, 7, [""])
+                self._sync_mode_row(r)
         self._refresh_sweep_choices()
 
     def remove_mode(self) -> None:
@@ -645,12 +952,14 @@ class AnisotropicMotionPanel(QWidget):
         out = []
         for r in range(self.modes_table.rowCount()):
             combo = self.modes_table.cellWidget(r, 0)
+            sense = self.modes_table.cellWidget(r, 6)
             out.append({"kind": combo.currentData(), "param": self._cell(self.modes_table, r, 1),
                         "axis": self._cell(self.modes_table, r, 2),
                         "k": self._cell(self.modes_table, r, 3),
                         "Ea": self._cell(self.modes_table, r, 4),
                         "nu0": self._cell(self.modes_table, r, 5),
-                        "sense": combo.property("sense") or "nearest"})
+                        "sense": sense.currentData() if sense is not None else "nearest",
+                        "step": self._cell(self.modes_table, r, 7)})
         return out
 
     def _load_modes(self, specs) -> None:
@@ -789,8 +1098,15 @@ class AnisotropicMotionPanel(QWidget):
                 if v is None:
                     raise ValueError(f"Mode {i}: the parameter must be a number.")
                 spec[key] = v
-            if row["kind"] == "ring_jump" and row.get("sense") in ("forward", "backward"):
-                spec["model"] = row["sense"]
+            if row["kind"] == "ring_jump":
+                if row.get("sense") in ("forward", "backward", "random"):
+                    spec["model"] = row["sense"]
+                if row.get("step"):
+                    step = _float(row["step"])
+                    if step is None:
+                        raise ValueError(f"Axis {i}: the step must be a number of degrees "
+                                         "(or blank for 360°/n).")
+                    spec["step_deg"] = step
             k, Ea = _float(row["k"]), _float(row["Ea"])
             if (k is None) == (Ea is None):
                 raise ValueError(f"Mode {i}: give either k or Ea (with ν₀).")
@@ -831,15 +1147,37 @@ class AnisotropicMotionPanel(QWidget):
         self.sweep_combo.clear()
         for i, row in enumerate(self._mode_rows() if self.modes_table.rowCount() else []):
             name = next(t for t, k, _w, _d in MODE_KINDS if k == row["kind"])
-            self.sweep_combo.addItem(f"Rate of mode {i + 1} ({name}), s⁻¹", f"mode:{i}")
+            self.sweep_combo.addItem(f"Rate of axis {i + 1} ({name}), s⁻¹", f"mode:{i}")
         if self.modes_table.rowCount() > 1:
-            self.sweep_combo.addItem("Rate of all modes, s⁻¹", "all")
+            self.sweep_combo.addItem("Rate of all axes together, s⁻¹", "all")
         if self.hops_table.rowCount():
             self.sweep_combo.addItem("Hop rates × scale", "hops")
         self.sweep_combo.addItem("Temperature, K (Arrhenius rates)", "T")
         i = self.sweep_combo.findData(current)
         self.sweep_combo.setCurrentIndex(max(i, 0))
         self.sweep_combo.blockSignals(False)
+        self._refresh_summary()
+
+    def _refresh_summary(self) -> None:
+        """One line under the axes: how many states the model has, or what is missing."""
+        if not all(hasattr(self, a) for a in ("summary_label", "hops_table", "modes_table",
+                                              "sites_table")):
+            return
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                model = self.build_model()
+        except Exception as exc:  # noqa: BLE001 -- an unfinished table: say what is missing
+            self.summary_label.setText(f"<i>Not complete yet: {exc}</i>")
+            return
+        parts = [f"{m.n} position{'s' if m.n != 1 else ''}" for m in model.modes]
+        text = f"<b>{model.n_states} states</b>"
+        if model.modes:
+            text += (f" = {model.n_env} environment{'s' if model.n_env != 1 else ''} × "
+                     + " × ".join(parts) + " (one factor per axis, each with its own rate)")
+        if model.n_states > model.MAX_STATES:
+            text += f" – <b>more than {model.MAX_STATES}: slow</b>; use fewer positions"
+        self.summary_label.setText(text)
 
     def _temperature(self):
         v = _float(self.temperature_edit.text())
